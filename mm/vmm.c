@@ -330,3 +330,28 @@ uint64_t vmm_unmap_page(uint64_t virtual_address) {
     spinlock_unlock_irqrestore(&vmm_lock, interrupt_flags);
     return physical_address;
 }
+
+bool vmm_map_pages(uint64_t virtual_address, uint64_t physical_address, uint64_t page_count, uint64_t flags) {
+    if (page_count == 0) {
+        return true;
+    }
+    for (uint64_t i = 0; i < page_count; ++i) {
+        if (!vmm_map_page(virtual_address + i * PAGE_SIZE, physical_address + i * PAGE_SIZE, flags)) {
+            for (uint64_t j = 0; j < i; ++j) {
+                (void)vmm_unmap_page(virtual_address + j * PAGE_SIZE);
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+uint64_t vmm_unmap_pages(uint64_t virtual_address, uint64_t page_count) {
+    uint64_t unmapped = 0;
+    for (uint64_t i = 0; i < page_count; ++i) {
+        if (vmm_unmap_page(virtual_address + i * PAGE_SIZE) != 0) {
+            unmapped++;
+        }
+    }
+    return unmapped;
+}

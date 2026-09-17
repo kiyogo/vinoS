@@ -238,6 +238,71 @@ bool kfree(void *pointer) {
     return true;
 }
 
+void *kcalloc(uint64_t num, uint64_t size) {
+    if (num != 0 && size > UINT64_MAX / num) {
+        return 0;
+    }
+    uint64_t total = num * size;
+    void *ptr = kmalloc(total);
+    if (ptr != 0) {
+        for (uint64_t i = 0; i < total; ++i) {
+            ((uint8_t *)ptr)[i] = 0;
+        }
+    }
+    return ptr;
+}
+
+void *krealloc(void *pointer, uint64_t new_size) {
+    if (pointer == 0) {
+        return kmalloc(new_size);
+    }
+    if (new_size == 0) {
+        (void)kfree(pointer);
+        return 0;
+    }
+
+    uint64_t flags = spinlock_lock_irqsave(&heap_lock);
+    if (!heap.initialized) {
+        spinlock_unlock_irqrestore(&heap_lock, flags);
+        return 0;
+    }
+
+    uint64_t pointer_address = (uint64_t)pointer;
+    if (heap.mapped_bytes == 0 || pointer_address < HEAP_BASE + sizeof(struct heap_block)
+        || pointer_address >= HEAP_BASE + heap.mapped_bytes) {
+        spinlock_unlock_irqrestore(&heap_lock, flags);
+        return 0;
+    }
+
+    struct heap_block *candidate = (struct heap_block *)(pointer_address - sizeof(struct heap_block));
+    struct heap_block *block = heap.first;
+    while (block != 0 && block != candidate) {
+        block = block->next;
+    }
+    if (block == 0 || block->free) {
+        spinlock_unlock_irqrestore(&heap_lock, flags);
+        return 0;
+    }
+
+    uint64_t old_size = block->size;
+    spinlock_unlock_irqrestore(&heap_lock, flags);
+
+    if (new_size <= old_size) {
+        return pointer;
+    }
+
+    void *new_ptr = kmalloc(new_size);
+    if (new_ptr == 0) {
+        return 0;
+    }
+    uint64_t copy_bytes = old_size < new_size ? old_size : new_size;
+    for (uint64_t i = 0; i < copy_bytes; ++i) {
+        ((uint8_t *)new_ptr)[i] = ((uint8_t *)pointer)[i];
+    }
+    (void)kfree(pointer);
+    return new_ptr;
+}
+
 uint64_t heap_active_allocation_count(void) {
     uint64_t flags = spinlock_lock_irqsave(&heap_lock);
     uint64_t result = heap.active_allocations;

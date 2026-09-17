@@ -259,6 +259,110 @@ bool pmm_free_frame(uint64_t physical_address) {
     return true;
 }
 
+uint64_t pmm_alloc_page(void) {
+    return pmm_allocate_frame();
+}
+
+bool pmm_free_page(uint64_t physical_address) {
+    return pmm_free_frame(physical_address);
+}
+
+uint64_t pmm_alloc_pages(uint64_t count) {
+    if (count == 0) {
+        return 0;
+    }
+    if (count == 1) {
+        return pmm_allocate_frame();
+    }
+    uint64_t flags = spinlock_lock_irqsave(&pmm_lock);
+    if (!pmm.initialized || pmm.free_frames < count) {
+        spinlock_unlock_irqrestore(&pmm_lock, flags);
+        return 0;
+    }
+
+    uint64_t consecutive = 0;
+    uint64_t start_frame = 0;
+    for (uint64_t frame = pmm.allocation_hint; frame < pmm.frame_search_limit; ++frame) {
+        if (bitmap_test(pmm.free_bitmap, frame)) {
+            if (consecutive == 0) {
+                start_frame = frame;
+            }
+            consecutive++;
+            if (consecutive == count) {
+                break;
+            }
+        } else {
+            consecutive = 0;
+        }
+    }
+
+    if (consecutive < count && pmm.allocation_hint > 1) {
+        consecutive = 0;
+        for (uint64_t frame = 1; frame < pmm.allocation_hint + count && frame < pmm.frame_search_limit; ++frame) {
+            if (bitmap_test(pmm.free_bitmap, frame)) {
+                if (consecutive == 0) {
+                    start_frame = frame;
+                }
+                consecutive++;
+                if (consecutive == count) {
+                    break;
+                }
+            } else {
+                consecutive = 0;
+            }
+        }
+    }
+
+    if (consecutive < count) {
+        spinlock_unlock_irqrestore(&pmm_lock, flags);
+        return 0;
+    }
+
+    for (uint64_t i = 0; i < count; ++i) {
+        bitmap_clear(pmm.free_bitmap, start_frame + i);
+    }
+    pmm.free_frames -= count;
+    pmm.allocation_hint = start_frame + count;
+    if (pmm.allocation_hint >= pmm.frame_search_limit) {
+        pmm.allocation_hint = 1;
+    }
+    uint64_t physical_address = start_frame * FRAME_SIZE;
+    spinlock_unlock_irqrestore(&pmm_lock, flags);
+    return physical_address;
+}
+
+bool pmm_free_pages(uint64_t physical_address, uint64_t count) {
+    if (count == 0) {
+        return false;
+    }
+    if (count == 1) {
+        return pmm_free_frame(physical_address);
+    }
+    uint64_t flags = spinlock_lock_irqsave(&pmm_lock);
+    if (!pmm.initialized || physical_address == 0 || physical_address % FRAME_SIZE != 0) {
+        spinlock_unlock_irqrestore(&pmm_lock, flags);
+        return false;
+    }
+    uint64_t start_frame = physical_address / FRAME_SIZE;
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t frame = start_frame + i;
+        if (!frame_is_tracked(frame) || !bitmap_test(pmm.usable_bitmap, frame) || bitmap_test(pmm.free_bitmap, frame)) {
+            spinlock_unlock_irqrestore(&pmm_lock, flags);
+            return false;
+        }
+    }
+    for (uint64_t i = 0; i < count; ++i) {
+        uint64_t frame = start_frame + i;
+        bitmap_set(pmm.free_bitmap, frame);
+    }
+    pmm.free_frames += count;
+    if (start_frame < pmm.allocation_hint) {
+        pmm.allocation_hint = start_frame;
+    }
+    spinlock_unlock_irqrestore(&pmm_lock, flags);
+    return true;
+}
+
 uint64_t pmm_total_memory_bytes(void) {
     uint64_t flags = spinlock_lock_irqsave(&pmm_lock);
     uint64_t result = pmm.total_memory_bytes;

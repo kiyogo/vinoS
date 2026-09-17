@@ -3,6 +3,8 @@
 
 #include <kos/cpu.h>
 #include <kos/net.h>
+#include <kos/task.h>
+#include <kos/task.h>
 #include <kos/timer.h>
 
 enum {

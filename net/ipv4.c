@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include <kos/net.h>
+#include <kos/sync.h>
 #include <kos/timer.h>
 
 enum {
@@ -53,7 +54,9 @@ bool net_interface_info(struct net_interface_info *info) {
     if (info == 0) {
         return false;
     }
+    uint64_t flags = spinlock_lock_irqsave(&ipv4_lock);
     *info = interface;
+    spinlock_unlock_irqrestore(&ipv4_lock, flags);
     return true;
 }
 

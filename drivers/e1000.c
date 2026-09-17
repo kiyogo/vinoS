@@ -7,6 +7,7 @@
 #include <kos/memory.h>
 #include <kos/pci.h>
 #include <kos/sync.h>
+#include <kos/task.h>
 #include <kos/timer.h>
 #include <kos/vmm.h>
 
@@ -364,7 +365,11 @@ bool e1000_wait_for_transmit(uint64_t timeout_ticks) {
             spinlock_unlock_irqrestore(&e1000_lock, flags);
             return false;
         }
-        cpu_wait_for_interrupt();
+        if (task_is_multitasking_active()) {
+            task_sleep(1);
+        } else {
+            cpu_wait_for_interrupt();
+        }
     }
 }
 

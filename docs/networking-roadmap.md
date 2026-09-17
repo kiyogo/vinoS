@@ -1,37 +1,47 @@
 # Networking roadmap
 
-## Current implementation
+## Current status (N6 foundation)
 
-KOS has a bounded, kernel-owned UDP socket core for the IPv4 loopback endpoint
-`127.0.0.1`. It supports opening, binding, sending, receiving, queueing, and
-closing UDP sockets. Boot runs a self-test that transfers a payload between two
-distinct loopback sockets.
+The QEMU e1000 path now provides Ethernet, ARP, IPv4, ICMP, DHCP, UDP, DNS,
+and a bounded TCP client/server core. TCP tracks sequence and acknowledgement
+numbers, advertises receive windows, segments output at MSS, keeps one small
+out-of-order segment for reassembly, retries unacknowledged data with an
+exponential RTO, and expires closed connections through TIME-WAIT. All blocking
+connect/send/receive operations have finite timeouts.
 
-Terminal diagnostics:
+The DNS client sends A-record queries over UDP, validates the transaction ID,
+server address and port, retries up to three times within the caller's total
+deadline, and expires cached answers using their TTL. Terminal diagnostics are:
 
 ```text
-KOS> netinfo
-KOS> udptest
+KOS> dns example.com
+example.com -> 93.184.216.34
+KOS> tcpinfo
+KOS> netstat
 ```
 
-The QEMU launcher now attaches a deterministic Intel e1000 NIC to QEMU's
-user-mode NAT/DHCP/DNS backend. KOS discovers that PCI device and enables its
-memory/bus-master bits, but has not yet programmed e1000 receive/transmit rings.
-This is not external networking. `netinfo` explicitly reports that no external
-interface exists. Therefore there is deliberately no `curl` command yet.
+HTTP/1.1 is available through the bounded `curl` client. N6 now provides
+freestanding SHA-256/HMAC/HKDF/AES-GCM primitives, a hardware-entropy gate,
+and an explicit TLS session/error API. TLS 1.3 record exchange and X.509
+validation are still pending; the kernel must not claim HTTPS success without
+certificate validation.
+
+`curl` accepts a bare host name, for example `curl example.com`; bare names use
+HTTP by default so the command remains usable while TLS is unfinished. Use
+`curl --https example.com` or an explicit `https://` URL when TLS is required.
+Raw response body is the default (matching Windows `curl`); `--text` filters
+HTML into readable text, and `--raw` is accepted as an explicit raw alias.
+HTTP responses are buffered up to 128 KiB; larger responses are returned with a
+clear partial-output warning instead of being reported as a connection error.
 
 ## Required path to `curl`
 
-1. Program e1000 receive/transmit descriptor rings and expose an Ethernet frame
-   boundary. A virtio-net backend can follow after this deterministic QEMU path.
-2. Add ARP, IPv4 parsing/serialization, checksum validation, routing, and ICMP.
-3. Add DHCP client support and a fixed-IP test mode.
-4. Move the UDP loopback socket API onto the IPv4 packet path.
-5. Add TCP state machine, retransmission timers, receive windows, and ports.
-6. Add DNS resolver and URL parser in user space or the future shell runtime.
-7. Add an HTTP/1.1 client command, initially `curl http://...` only.
-8. Add TLS in user space before claiming HTTPS support.
+1. Implement a TLS 1.3 client in a protected user-space library (see
+   `docs/tls-roadmap.md`).
+2. Add certificate store and hostname validation.
+3. Add HTTP redirect and HTTPS integration tests.
+4. Move DNS/TCP/HTTP clients out of the kernel behind socket syscalls.
+5. Add virtio-net and physical NIC drivers after the deterministic e1000 path.
 
-The next visible network commands after a virtio-net backend are `ifconfig`,
-`ping`, `ip route`, `nslookup`, and `curl`. Each requires an observable QEMU
-test; none should be exposed as a fake success command.
+The next visible networking milestone is TLS; each new protocol must have an
+observable QEMU test and must not expose fake success output.

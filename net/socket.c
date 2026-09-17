@@ -5,6 +5,9 @@
 #include <kos/net.h>
 #include <kos/e1000.h>
 #include <kos/sync.h>
+#include <kos/wait.h>
+#include <kos/task.h>
+#include <kos/timer.h>
 
 enum {
     NET_UDP_QUEUE_DEPTH = 4,
@@ -27,6 +30,7 @@ struct udp_socket {
     uint64_t queue_head;
     uint64_t queue_tail;
     uint64_t queue_count;
+    struct wait_queue wait_queue;
 };
 
 static struct udp_socket sockets[NET_SOCKET_MAX];
@@ -120,6 +124,7 @@ bool net_initialize(void) {
     }
     for (uint64_t index = 0; index < NET_SOCKET_MAX; ++index) {
         sockets[index] = (struct udp_socket){0};
+        wait_queue_init(&sockets[index].wait_queue);
     }
     datagrams_sent = 0;
     datagrams_received = 0;
@@ -274,6 +279,7 @@ bool net_udp_sendto(uint16_t socket_id, struct net_ipv4_endpoint destination,
         receiver->queue_tail = (receiver->queue_tail + 1) % NET_UDP_QUEUE_DEPTH;
         ++receiver->queue_count;
         ++datagrams_sent;
+        wait_queue_wake_all(&receiver->wait_queue);
         spinlock_unlock_irqrestore(&network_lock, flags);
         return true;
     }
@@ -394,6 +400,7 @@ void net_udp_receive(uint32_t source, uint32_t destination, const uint8_t *packe
     receiver->queue_tail = (receiver->queue_tail + 1) % NET_UDP_QUEUE_DEPTH;
     ++receiver->queue_count;
     ++datagrams_received;
+    wait_queue_wake_all(&receiver->wait_queue);
     spinlock_unlock_irqrestore(&network_lock, flags);
 }
 
@@ -422,6 +429,58 @@ bool net_udp_recvfrom(uint16_t socket_id, struct net_ipv4_endpoint *source,
     --socket->queue_count;
     spinlock_unlock_irqrestore(&network_lock, flags);
     return true;
+}
+
+static bool udp_recv_cond(void *arg) {
+    struct udp_socket *s = (struct udp_socket *)arg;
+    if (s == 0 || !s->open) {
+        return true;
+    }
+    return s->queue_count > 0;
+}
+
+bool net_udp_recvfrom_timeout(uint16_t socket_id, struct net_ipv4_endpoint *source,
+        uint8_t *data, uint64_t capacity, uint64_t *size, uint64_t timeout_ms) {
+    if (source == 0 || data == 0 || size == 0 || socket_id >= NET_SOCKET_MAX) {
+        return false;
+    }
+    if (net_udp_recvfrom(socket_id, source, data, capacity, size)) {
+        return true;
+    }
+    if (timeout_ms == 0) {
+        return false;
+    }
+    struct udp_socket *s = 0;
+    uint64_t flags = spinlock_lock_irqsave(&network_lock);
+    s = socket_at(socket_id);
+    spinlock_unlock_irqrestore(&network_lock, flags);
+    if (s == 0) {
+        return false;
+    }
+    uint64_t start_tick = timer_get_ticks();
+    uint64_t timeout_ticks = timer_ms_to_ticks(timeout_ms);
+    if (timeout_ticks == 0) {
+        timeout_ticks = 1;
+    }
+    while (timer_get_ticks() - start_tick < timeout_ticks) {
+        net_poll();
+        if (net_udp_recvfrom(socket_id, source, data, capacity, size)) {
+            return true;
+        }
+        uint64_t elapsed_ticks = timer_get_ticks() - start_tick;
+        if (elapsed_ticks >= timeout_ticks) {
+            break;
+        }
+        uint64_t remaining_ticks = timeout_ticks - elapsed_ticks;
+        uint64_t slice_ticks = remaining_ticks < 10 ? remaining_ticks : 10;
+        uint64_t slice_ms = timer_ticks_to_ms(slice_ticks);
+        if (slice_ms == 0) {
+            slice_ms = 1;
+        }
+        (void)wait_event_timeout(&s->wait_queue, udp_recv_cond, s, slice_ms);
+    }
+    net_poll();
+    return net_udp_recvfrom(socket_id, source, data, capacity, size);
 }
 
 bool net_udp_loopback_self_test(void) {

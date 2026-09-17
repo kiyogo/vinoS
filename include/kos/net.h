@@ -120,6 +120,8 @@ bool net_udp_sendto(uint16_t socket_id, struct net_ipv4_endpoint destination,
         const uint8_t *data, uint64_t size);
 bool net_udp_recvfrom(uint16_t socket_id, struct net_ipv4_endpoint *source,
         uint8_t *data, uint64_t capacity, uint64_t *size);
+bool net_udp_recvfrom_timeout(uint16_t socket_id, struct net_ipv4_endpoint *source,
+        uint8_t *data, uint64_t capacity, uint64_t *size, uint64_t timeout_ms);
 bool net_udp_loopback_self_test(void);
 uint64_t net_udp_datagrams_dropped(void);
 void net_udp_receive(uint32_t source, uint32_t destination, const uint8_t *packet, uint64_t size);

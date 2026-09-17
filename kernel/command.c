@@ -18,6 +18,8 @@
 #include <kos/timer.h>
 #include <kos/task.h>
 #include <kos/vfs.h>
+#include <kos/heap.h>
+#include <kos/ramfs.h>
 
 typedef void (*command_handler)(const char *arguments);
 
@@ -855,6 +857,1223 @@ static void command_elfinfo(const char *arguments) {
     log_info_hex("ELF entry: ", info.entry_point);
     log_info_u64("ELF program headers: ", info.program_header_count);
     log_info_u64("ELF loadable segments: ", info.loadable_segment_count);
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: synctest (K12.17 - K12.21)                            */
+/* ========================================================================= */
+
+struct pmm_stress_worker_arg {
+    uint32_t worker_id;
+    uint32_t iterations;
+    volatile uint32_t completed_iters;
+    volatile uint32_t errors;
+    volatile bool finished;
+};
+
+static void pmm_stress_worker(void *arg) {
+    struct pmm_stress_worker_arg *w = (struct pmm_stress_worker_arg *)arg;
+    for (uint32_t iter = 0; iter < w->iterations; ++iter) {
+        uint64_t p1 = pmm_alloc_page();
+        uint64_t p2 = pmm_alloc_page();
+        uint64_t pmulti = pmm_alloc_pages(2);
+
+        if (p1 == 0 || p2 == 0 || pmulti == 0 || p1 == p2 || p1 == pmulti || p2 == pmulti) {
+            w->errors++;
+        }
+        if ((p1 & 0xfff) != 0 || (p2 & 0xfff) != 0 || (pmulti & 0xfff) != 0) {
+            w->errors++;
+        }
+
+        task_yield();
+
+        if (p1 != 0 && !pmm_free_page(p1)) {
+            w->errors++;
+        }
+        if (p2 != 0 && !pmm_free_page(p2)) {
+            w->errors++;
+        }
+        if (pmulti != 0 && !pmm_free_pages(pmulti, 2)) {
+            w->errors++;
+        }
+
+        w->completed_iters++;
+    }
+    w->finished = true;
+}
+
+struct heap_stress_worker_arg {
+    uint32_t worker_id;
+    uint32_t iterations;
+    volatile uint32_t completed_iters;
+    volatile uint32_t errors;
+    volatile bool finished;
+};
+
+static void heap_stress_worker(void *arg) {
+    struct heap_stress_worker_arg *w = (struct heap_stress_worker_arg *)arg;
+    for (uint32_t iter = 0; iter < w->iterations; ++iter) {
+        uint8_t *b32 = (uint8_t *)kmalloc(32);
+        uint8_t *b64 = (uint8_t *)kmalloc(64);
+        uint8_t *b128 = (uint8_t *)kmalloc(128);
+        uint32_t *bzero = (uint32_t *)kcalloc(16, sizeof(uint32_t));
+
+        if (b32 == 0 || b64 == 0 || b128 == 0 || bzero == 0) {
+            w->errors++;
+        } else {
+            for (uint32_t i = 0; i < 16; ++i) {
+                if (bzero[i] != 0) {
+                    w->errors++;
+                    break;
+                }
+            }
+
+            uint8_t tag = (uint8_t)((w->worker_id << 4) | (iter & 0x0f));
+            for (int i = 0; i < 32; ++i) b32[i] = tag;
+            for (int i = 0; i < 64; ++i) b64[i] = (uint8_t)(tag ^ 0xaa);
+
+            uint8_t *b_realloc = (uint8_t *)krealloc(b64, 128);
+            if (b_realloc == 0) {
+                w->errors++;
+            } else {
+                for (int i = 0; i < 64; ++i) {
+                    if (b_realloc[i] != (uint8_t)(tag ^ 0xaa)) {
+                        w->errors++;
+                        break;
+                    }
+                }
+                b64 = b_realloc;
+            }
+
+            task_yield();
+
+            for (int i = 0; i < 32; ++i) {
+                if (b32[i] != tag) {
+                    w->errors++;
+                    break;
+                }
+            }
+        }
+
+        if (b32 != 0) (void)kfree(b32);
+        if (b64 != 0) (void)kfree(b64);
+        if (b128 != 0) (void)kfree(b128);
+        if (bzero != 0) (void)kfree(bzero);
+
+        w->completed_iters++;
+    }
+    w->finished = true;
+}
+
+struct vfs_stress_worker_arg {
+    char filename[32];
+    char pattern[32];
+    uint32_t iterations;
+    volatile uint32_t completed_iters;
+    volatile uint32_t errors;
+    volatile bool finished;
+};
+
+static void vfs_stress_worker(void *arg) {
+    struct vfs_stress_worker_arg *w = (struct vfs_stress_worker_arg *)arg;
+    uint64_t pat_len = 0;
+    while (w->pattern[pat_len] != '\0') pat_len++;
+
+    for (uint32_t iter = 0; iter < w->iterations; ++iter) {
+        if (!vfs_write_file(w->filename, (const uint8_t *)w->pattern, pat_len)) {
+            w->errors++;
+        }
+
+        task_yield();
+
+        const uint8_t *data = 0;
+        uint64_t size = 0;
+        if (!vfs_read_file(w->filename, &data, &size) || size != pat_len || data == 0) {
+            w->errors++;
+        } else {
+            for (uint64_t i = 0; i < pat_len; ++i) {
+                if (data[i] != (uint8_t)w->pattern[i]) {
+                    w->errors++;
+                    break;
+                }
+            }
+        }
+
+        task_yield();
+
+        if (!vfs_unlink_file(w->filename)) {
+            w->errors++;
+        }
+
+        w->completed_iters++;
+    }
+    w->finished = true;
+}
+
+struct vfs_reader_worker_arg {
+    uint32_t iterations;
+    volatile uint32_t completed_iters;
+    volatile uint32_t errors;
+    volatile bool finished;
+};
+
+static void vfs_reader_worker(void *arg) {
+    struct vfs_reader_worker_arg *w = (struct vfs_reader_worker_arg *)arg;
+    for (uint32_t iter = 0; iter < w->iterations; ++iter) {
+        uint64_t vcount = vfs_volume_count();
+        if (vcount == 0) {
+            w->errors++;
+        }
+        struct vfs_volume_info vinfo;
+        if (!vfs_volume_info_at(0, &vinfo)) {
+            w->errors++;
+        }
+        (void)vfs_file_count_on_volume('D');
+        task_yield();
+        w->completed_iters++;
+    }
+    w->finished = true;
+}
+
+struct socket_sync_sender_arg {
+    uint16_t port;
+    uint64_t delay_ms;
+    volatile bool finished;
+};
+
+static void socket_sync_sender_worker(void *arg) {
+    struct socket_sync_sender_arg *sarg = (struct socket_sync_sender_arg *)arg;
+    task_sleep(sarg->delay_ms);
+    uint16_t sender_id = UINT16_MAX;
+    if (net_udp_open(&sender_id)) {
+        struct net_ipv4_endpoint target = {
+            .address = NET_IPV4_LOOPBACK,
+            .port = sarg->port,
+        };
+        static const uint8_t msg[] = "SYNC-WAITQ-OK";
+        (void)net_udp_sendto(sender_id, target, msg, sizeof(msg) - 1);
+        (void)net_udp_close(sender_id);
+    }
+    sarg->finished = true;
+}
+
+static void command_synctest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("=== Milestone K12 Step 12 Subsystem Sync Tests ===");
+    log_info("==================================================");
+
+    bool all_passed = true;
+    struct process *cur_proc = process_get_kernel();
+
+    /* ------------------------------------------------------------- */
+    /* Test 1: PMM Concurrent Stress (K12.17)                        */
+    /* ------------------------------------------------------------- */
+    log_info("[synctest] 1. PMM Concurrent Allocation Stress...");
+    {
+        uint64_t initial_frames = pmm_allocated_frame_count();
+        enum { WORKER_COUNT = 4, ITERS = 25 };
+        struct pmm_stress_worker_arg args[WORKER_COUNT];
+
+        for (int i = 0; i < WORKER_COUNT; ++i) {
+            args[i].worker_id = (uint32_t)i;
+            args[i].iterations = ITERS;
+            args[i].completed_iters = 0;
+            args[i].errors = 0;
+            args[i].finished = false;
+            char name[16] = "pmm_sync_0";
+            name[9] = (char)('0' + i);
+            struct thread *t = thread_create(cur_proc, pmm_stress_worker, &args[i], name);
+            if (t == 0) {
+                log_error("  [FAIL] Failed to create PMM worker thread!");
+                all_passed = false;
+            }
+        }
+
+        uint64_t start_time = timer_get_ticks();
+        bool done = false;
+        while (!done && (timer_get_ticks() - start_time) < timer_ms_to_ticks(3000)) {
+            done = true;
+            for (int i = 0; i < WORKER_COUNT; ++i) {
+                if (!args[i].finished) {
+                    done = false;
+                    break;
+                }
+            }
+            if (!done) {
+                task_yield();
+            }
+        }
+
+        uint32_t total_errors = 0;
+        for (int i = 0; i < WORKER_COUNT; ++i) {
+            if (!args[i].finished) {
+                log_error("  [FAIL] PMM worker timed out!");
+                all_passed = false;
+            }
+            total_errors += args[i].errors;
+        }
+
+        uint64_t final_frames = pmm_allocated_frame_count();
+        if (total_errors > 0 || final_frames != initial_frames) {
+            log_errorf("  [FAIL] PMM stress errors=%u, initial=%llu, final=%llu", total_errors, initial_frames, final_frames);
+            all_passed = false;
+        } else {
+            log_infof("  4 threads completed %d iterations each with 0 leaks.", ITERS);
+            log_info("  [PASS] PMM concurrent allocation/free stress verified!");
+        }
+    }
+
+    /* ------------------------------------------------------------- */
+    /* Test 2: Heap Concurrent Stress (K12.18)                       */
+    /* ------------------------------------------------------------- */
+    log_info("[synctest] 2. Heap Concurrent Allocation & Realloc Stress...");
+    {
+        uint64_t initial_allocs = heap_active_allocation_count();
+        enum { WORKER_COUNT = 4, ITERS = 20 };
+        struct heap_stress_worker_arg args[WORKER_COUNT];
+
+        for (int i = 0; i < WORKER_COUNT; ++i) {
+            args[i].worker_id = (uint32_t)i;
+            args[i].iterations = ITERS;
+            args[i].completed_iters = 0;
+            args[i].errors = 0;
+            args[i].finished = false;
+            char name[16] = "heap_sync_0";
+            name[10] = (char)('0' + i);
+            struct thread *t = thread_create(cur_proc, heap_stress_worker, &args[i], name);
+            if (t == 0) {
+                log_error("  [FAIL] Failed to create heap worker thread!");
+                all_passed = false;
+            }
+        }
+
+        uint64_t start_time = timer_get_ticks();
+        bool done = false;
+        while (!done && (timer_get_ticks() - start_time) < timer_ms_to_ticks(3000)) {
+            done = true;
+            for (int i = 0; i < WORKER_COUNT; ++i) {
+                if (!args[i].finished) {
+                    done = false;
+                    break;
+                }
+            }
+            if (!done) {
+                task_yield();
+            }
+        }
+
+        uint32_t total_errors = 0;
+        for (int i = 0; i < WORKER_COUNT; ++i) {
+            if (!args[i].finished) {
+                log_error("  [FAIL] Heap worker timed out!");
+                all_passed = false;
+            }
+            total_errors += args[i].errors;
+        }
+
+        uint64_t final_allocs = heap_active_allocation_count();
+        if (total_errors > 0 || final_allocs != initial_allocs) {
+            log_errorf("  [FAIL] Heap stress errors=%u, initial=%llu, final=%llu", total_errors, initial_allocs, final_allocs);
+            all_passed = false;
+        } else {
+            log_infof("  4 threads completed %d iterations with malloc/calloc/realloc/free.", ITERS);
+            log_info("  [PASS] Heap concurrent allocation/realloc/free stress verified!");
+        }
+    }
+
+    /* ------------------------------------------------------------- */
+    /* Test 3: VFS / RAMFS Concurrent Access & Unlink (K12.20)       */
+    /* ------------------------------------------------------------- */
+    log_info("[synctest] 3. VFS / RAMFS Concurrent Create/Read/Write/Unlink...");
+    {
+        uint64_t initial_files = vfs_file_count_on_volume('D');
+        struct vfs_stress_worker_arg w_a = {
+            .filename = "D:/sync_file_a.txt",
+            .pattern = "KOS_SYNC_PAYLOAD_AAA",
+            .iterations = 10,
+            .completed_iters = 0,
+            .errors = 0,
+            .finished = false,
+        };
+        struct vfs_stress_worker_arg w_b = {
+            .filename = "D:/sync_file_b.txt",
+            .pattern = "KOS_SYNC_PAYLOAD_BBB",
+            .iterations = 10,
+            .completed_iters = 0,
+            .errors = 0,
+            .finished = false,
+        };
+        struct vfs_reader_worker_arg w_r = {
+            .iterations = 20,
+            .completed_iters = 0,
+            .errors = 0,
+            .finished = false,
+        };
+
+        struct thread *ta = thread_create(cur_proc, vfs_stress_worker, &w_a, "vfs_worker_a");
+        struct thread *tb = thread_create(cur_proc, vfs_stress_worker, &w_b, "vfs_worker_b");
+        struct thread *tr = thread_create(cur_proc, vfs_reader_worker, &w_r, "vfs_reader");
+
+        if (ta == 0 || tb == 0 || tr == 0) {
+            log_error("  [FAIL] Failed to create VFS worker threads!");
+            all_passed = false;
+        }
+
+        uint64_t start_time = timer_get_ticks();
+        while ((!w_a.finished || !w_b.finished || !w_r.finished) && (timer_get_ticks() - start_time) < timer_ms_to_ticks(3000)) {
+            task_yield();
+        }
+
+        uint64_t final_files = vfs_file_count_on_volume('D');
+        uint32_t errs = w_a.errors + w_b.errors + w_r.errors;
+        if (!w_a.finished || !w_b.finished || !w_r.finished || errs > 0 || final_files != initial_files) {
+            log_errorf("  [FAIL] VFS concurrent stress errors=%u, files initial=%llu, final=%llu", errs, initial_files, final_files);
+            all_passed = false;
+        } else {
+            log_info("  Concurrent writers and readers completed with clean unlinks.");
+            log_info("  [PASS] VFS/RAMFS concurrent create/read/write/unlink verified!");
+        }
+    }
+
+    /* ------------------------------------------------------------- */
+    /* Test 4: Socket Wait Queue Synchronization (K12.21)           */
+    /* ------------------------------------------------------------- */
+    log_info("[synctest] 4. Socket Wait Queue Non-Busy Synchronization...");
+    {
+        uint16_t recv_sock = UINT16_MAX;
+        if (!net_udp_open(&recv_sock)) {
+            log_error("  [FAIL] Failed to open UDP receiver socket!");
+            all_passed = false;
+        } else {
+            struct net_ipv4_endpoint recv_ep = {
+                .address = NET_IPV4_LOOPBACK,
+                .port = 43210,
+            };
+            if (!net_udp_bind(recv_sock, recv_ep)) {
+                log_error("  [FAIL] Failed to bind receiver socket!");
+                all_passed = false;
+            } else {
+                struct socket_sync_sender_arg sarg = {
+                    .port = 43210,
+                    .delay_ms = 20,
+                    .finished = false,
+                };
+                struct thread *tsend = thread_create(cur_proc, socket_sync_sender_worker, &sarg, "sock_sender");
+                if (tsend == 0) {
+                    log_error("  [FAIL] Failed to create socket sender thread!");
+                    all_passed = false;
+                } else {
+                    uint8_t buffer[64];
+                    struct net_ipv4_endpoint sender_ep;
+                    uint64_t recv_size = 0;
+
+                    /* Wait queue timed receive (200ms timeout) */
+                    uint64_t t0 = timer_get_ticks();
+                    bool ok = net_udp_recvfrom_timeout(recv_sock, &sender_ep, buffer, sizeof(buffer), &recv_size, 200);
+                    uint64_t elapsed_ms = timer_ticks_to_ms(timer_get_ticks() - t0);
+
+                    if (!ok || recv_size != 13) {
+                        log_errorf("  [FAIL] Timed UDP receive failed! ok=%d, size=%llu", (int)ok, recv_size);
+                        all_passed = false;
+                    } else {
+                        buffer[recv_size] = '\0';
+                        log_infof("  Received message '%s' in %llu ms via socket wait queue.", (const char *)buffer, elapsed_ms);
+
+                        /* Test empty socket timeout (30ms timeout) */
+                        uint64_t t_to0 = timer_get_ticks();
+                        bool to_res = net_udp_recvfrom_timeout(recv_sock, &sender_ep, buffer, sizeof(buffer), &recv_size, 30);
+                        uint64_t to_elapsed = timer_ticks_to_ms(timer_get_ticks() - t_to0);
+
+                        if (to_res) {
+                            log_error("  [FAIL] Expected timeout on empty socket but received data!");
+                            all_passed = false;
+                        } else {
+                            log_infof("  Empty socket cleanly timed out in %llu ms (expected ~30ms).", to_elapsed);
+                            log_info("  [PASS] Socket wait queue non-busy synchronization verified!");
+                        }
+                    }
+                }
+                (void)net_udp_close(recv_sock);
+            }
+        }
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_passed) {
+        log_info(">>> [PASS] ALL SUBSYSTEM SYNCHRONIZATION TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] ONE OR MORE SUBSYSTEM SYNCHRONIZATION TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/*
+ * ============================================================================
+ * Diagnostic Command: handletest (K12.14, K12.15)
+ * ============================================================================
+ */
+
+struct handletest_obj {
+    struct kos_object_header header;
+    uint32_t magic;
+    bool destructor_called;
+};
+
+static void handletest_destructor(void *object) {
+    struct handletest_obj *obj = (struct handletest_obj *)object;
+    if (obj != NULL) {
+        obj->destructor_called = true;
+    }
+}
+
+static void command_handletest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("   KOS Kernel Object & Handle Table Diagnostics   ");
+    log_info("==================================================");
+
+    bool all_passed = true;
+
+    /* ------------------------------------------------------------
+     * Test 1: Object refcounting & custom destructor callback
+     * ------------------------------------------------------------ */
+    log_info("[handletest] 1. Kernel Object Refcounting & Destructor...");
+    {
+        struct handletest_obj obj1;
+        obj1.magic = 0xABCD1234;
+        obj1.destructor_called = false;
+
+        kos_object_init(&obj1.header, KOS_OBJ_MUTEX, handletest_destructor);
+        int32_t ref = kos_object_get_refcount(&obj1.header);
+        if (ref != 1) {
+            log_errorf("  [FAIL] Expected initial refcount 1, got %d", ref);
+            all_passed = false;
+        } else if (obj1.header.type != KOS_OBJ_MUTEX) {
+            log_errorf("  [FAIL] Expected object type MUTEX (%d), got %d",
+                       (int)KOS_OBJ_MUTEX, (int)obj1.header.type);
+            all_passed = false;
+        } else if (obj1.destructor_called) {
+            log_error("  [FAIL] Destructor called prematurely on init!");
+            all_passed = false;
+        } else {
+            kos_object_ref(&obj1.header);
+            ref = kos_object_get_refcount(&obj1.header);
+            if (ref != 2) {
+                log_errorf("  [FAIL] Expected refcount 2 after kos_object_ref, got %d", ref);
+                all_passed = false;
+            } else {
+                kos_object_unref(&obj1.header);
+                ref = kos_object_get_refcount(&obj1.header);
+                if (ref != 1 || obj1.destructor_called) {
+                    log_errorf("  [FAIL] Expected refcount 1 and no destructor, got ref=%d called=%d",
+                               ref, (int)obj1.destructor_called);
+                    all_passed = false;
+                } else {
+                    kos_object_unref(&obj1.header);
+                    ref = kos_object_get_refcount(&obj1.header);
+                    if (ref != 0) {
+                        log_errorf("  [FAIL] Expected refcount 0 after final unref, got %d", ref);
+                        all_passed = false;
+                    } else if (!obj1.destructor_called) {
+                        log_error("  [FAIL] Custom destructor was not invoked upon reaching 0 refcount!");
+                        all_passed = false;
+                    } else {
+                        log_info("  Object refcount transitions (1 -> 2 -> 1 -> 0) verified.");
+                        log_info("  Custom destructor callback successfully executed at refcount 0.");
+                        log_info("  [PASS] Kernel object refcounting and destructor verified!");
+                    }
+                }
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------
+     * Test 2: Handle creation, rights validation, generation tagging
+     * ------------------------------------------------------------ */
+    log_info("[handletest] 2. Handle Creation, Rights & Generation Tagging...");
+    {
+        struct process *proc = process_create("htest-proc2");
+        if (proc == NULL || proc->handles == NULL) {
+            log_error("  [FAIL] Failed to create test process with handle table!");
+            all_passed = false;
+        } else {
+            struct handletest_obj obj2;
+            obj2.magic = 0x5678EF01;
+            obj2.destructor_called = false;
+            kos_object_init(&obj2.header, KOS_OBJ_SEMAPHORE, NULL);
+
+            /* Create handle with READ and WAIT rights */
+            handle_t h = handle_create(proc, &obj2.header, KOS_RIGHT_READ | KOS_RIGHT_WAIT);
+            if (h == KOS_INVALID_HANDLE) {
+                log_error("  [FAIL] Failed to create handle!");
+                all_passed = false;
+            } else {
+                uint16_t idx = KOS_HANDLE_INDEX(h);
+                uint16_t gen = KOS_HANDLE_GEN(h);
+                int32_t ref = kos_object_get_refcount(&obj2.header);
+
+                log_infof("  Created handle 0x%08x (Index=%u, Gen=%u), object refcount=%d",
+                          h, (unsigned)idx, (unsigned)gen, ref);
+
+                if (ref != 2) {
+                    log_errorf("  [FAIL] Expected object refcount 2, got %d", ref);
+                    all_passed = false;
+                } else if (gen == 0) {
+                    log_error("  [FAIL] Handle generation must be non-zero!");
+                    all_passed = false;
+                } else {
+                    /* Lookup with matching rights */
+                    void *p_read = handle_lookup(proc, h, KOS_RIGHT_READ);
+                    void *p_wait = handle_lookup(proc, h, KOS_RIGHT_WAIT);
+                    void *p_both = handle_lookup(proc, h, KOS_RIGHT_READ | KOS_RIGHT_WAIT);
+
+                    /* Lookup with forbidden / unheld rights */
+                    void *p_write = handle_lookup(proc, h, KOS_RIGHT_WRITE);
+                    void *p_exec = handle_lookup(proc, h, KOS_RIGHT_EXECUTE);
+
+                    /* Lookup with type checking */
+                    void *p_type_ok = handle_lookup_type(proc, h, KOS_OBJ_SEMAPHORE, KOS_RIGHT_READ);
+                    void *p_type_bad = handle_lookup_type(proc, h, KOS_OBJ_MUTEX, KOS_RIGHT_READ);
+
+                    if (p_read != &obj2.header || p_wait != &obj2.header || p_both != &obj2.header) {
+                        log_error("  [FAIL] Handle lookup failed with held rights!");
+                        all_passed = false;
+                    } else if (p_write != NULL || p_exec != NULL) {
+                        log_error("  [FAIL] Handle lookup succeeded with unheld rights (security bypass)!");
+                        all_passed = false;
+                    } else if (p_type_ok != &obj2.header || p_type_bad != NULL) {
+                        log_error("  [FAIL] Handle lookup type validation failed!");
+                        all_passed = false;
+                    } else {
+                        log_info("  Handle rights correctly enforced (granted rights pass, unheld fail).");
+                        log_info("  Handle object type validation confirmed (SEMAPHORE match, MUTEX reject).");
+
+                        bool closed = handle_close(proc, h);
+                        ref = kos_object_get_refcount(&obj2.header);
+                        if (!closed || ref != 1) {
+                            log_errorf("  [FAIL] handle_close failed or bad refcount (%d)", ref);
+                            all_passed = false;
+                        } else {
+                            log_info("  Handle successfully closed and table reference dropped.");
+                            log_info("  [PASS] Handle creation, rights validation, and type check verified!");
+                        }
+                    }
+                }
+            }
+
+            process_destroy(proc);
+            kos_object_unref(&obj2.header);
+        }
+    }
+
+    /* ------------------------------------------------------------
+     * Test 3: Stale handle prevention (Anti-ABA)
+     * ------------------------------------------------------------ */
+    log_info("[handletest] 3. Stale Handle Prevention (Anti-ABA Verification)...");
+    {
+        struct process *proc = process_create("htest-proc3");
+        if (proc == NULL || proc->handles == NULL) {
+            log_error("  [FAIL] Failed to create test process for ABA test!");
+            all_passed = false;
+        } else {
+            struct handletest_obj objA;
+            struct handletest_obj objB;
+            kos_object_init(&objA.header, KOS_OBJ_EVENT, NULL);
+            kos_object_init(&objB.header, KOS_OBJ_EVENT, NULL);
+
+            /* Create handle A */
+            handle_t handleA = handle_create(proc, &objA.header, KOS_RIGHT_ALL);
+            uint16_t idxA = KOS_HANDLE_INDEX(handleA);
+            uint16_t genA = KOS_HANDLE_GEN(handleA);
+
+            log_infof("  Created handle A 0x%08x at slot %u with generation %u",
+                      handleA, (unsigned)idxA, (unsigned)genA);
+
+            /* Close handle A */
+            if (!handle_close(proc, handleA)) {
+                log_error("  [FAIL] Failed to close handle A!");
+                all_passed = false;
+            } else {
+                /* Attempt to close handle A second time (must fail) */
+                if (handle_close(proc, handleA)) {
+                    log_error("  [FAIL] Second handle_close succeeded on already closed handle!");
+                    all_passed = false;
+                } else {
+                    /* Create handle B: will reuse slot idxA, but with incremented generation */
+                    handle_t handleB = handle_create(proc, &objB.header, KOS_RIGHT_ALL);
+                    uint16_t idxB = KOS_HANDLE_INDEX(handleB);
+                    uint16_t genB = KOS_HANDLE_GEN(handleB);
+
+                    log_infof("  Created handle B 0x%08x at slot %u with generation %u",
+                              handleB, (unsigned)idxB, (unsigned)genB);
+
+                    if (idxB != idxA) {
+                        log_errorf("  [FAIL] Expected slot reuse %u, got %u", (unsigned)idxA, (unsigned)idxB);
+                        all_passed = false;
+                    } else if (genB != genA + 1) {
+                        log_errorf("  [FAIL] Expected generation increment (%u -> %u), got %u",
+                                   (unsigned)genA, (unsigned)(genA + 1), (unsigned)genB);
+                        all_passed = false;
+                    } else {
+                        /* Attempt lookup using old stale handle A: MUST return NULL */
+                        void *stale_lookup = handle_lookup(proc, handleA, KOS_RIGHT_NONE);
+                        void *valid_lookup = handle_lookup(proc, handleB, KOS_RIGHT_NONE);
+
+                        if (stale_lookup != NULL) {
+                            log_error("  [FAIL] ABA vulnerability! Stale handle A accessed newly allocated object!");
+                            all_passed = false;
+                        } else if (valid_lookup != &objB.header) {
+                            log_error("  [FAIL] Valid handle B lookup failed!");
+                            all_passed = false;
+                        } else {
+                            log_info("  Stale handle A successfully rejected via generation tag mismatch.");
+                            log_info("  Reallocated slot correctly serves handle B with generation + 1.");
+                            log_info("  [PASS] Stale handle prevention (anti-ABA) verified!");
+                        }
+
+                        handle_close(proc, handleB);
+                    }
+                }
+            }
+
+            process_destroy(proc);
+            kos_object_unref(&objA.header);
+            kos_object_unref(&objB.header);
+        }
+    }
+
+    /* ------------------------------------------------------------
+     * Test 4: Handle duplication across processes & exit cleanup
+     * ------------------------------------------------------------ */
+    log_info("[handletest] 4. Handle Duplication & Process Exit Table Cleanup...");
+    {
+        struct process *p_src = process_create("htest-src");
+        struct process *p_dst = process_create("htest-dst");
+
+        if (p_src == NULL || p_dst == NULL || p_src->handles == NULL || p_dst->handles == NULL) {
+            log_error("  [FAIL] Failed to create source/destination test processes!");
+            all_passed = false;
+        } else {
+            struct handletest_obj shared_obj;
+            shared_obj.magic = 0xCAFE9999;
+            shared_obj.destructor_called = false;
+            kos_object_init(&shared_obj.header, KOS_OBJ_FILE, handletest_destructor);
+
+            /* Create handle in source process with READ, WRITE, DUPLICATE rights */
+            handle_t h_src = handle_create(p_src, &shared_obj.header,
+                                           KOS_RIGHT_READ | KOS_RIGHT_WRITE | KOS_RIGHT_DUPLICATE);
+            if (h_src == KOS_INVALID_HANDLE) {
+                log_error("  [FAIL] Failed to create handle in source process!");
+                all_passed = false;
+            } else {
+                int32_t ref = kos_object_get_refcount(&shared_obj.header);
+                if (ref != 2) {
+                    log_errorf("  [FAIL] Expected refcount 2, got %d", ref);
+                    all_passed = false;
+                } else {
+                    /* Attempt duplication with rights amplification (EXECUTE not held by src) */
+                    handle_t h_amplified = handle_duplicate(p_src, p_dst, h_src, KOS_RIGHT_EXECUTE);
+                    if (h_amplified != KOS_INVALID_HANDLE) {
+                        log_error("  [FAIL] Rights amplification permitted during duplication!");
+                        all_passed = false;
+                    } else {
+                        /* Duplicate with attenuated rights (READ only) */
+                        handle_t h_dst = handle_duplicate(p_src, p_dst, h_src, KOS_RIGHT_READ);
+                        if (h_dst == KOS_INVALID_HANDLE) {
+                            log_error("  [FAIL] Failed to duplicate handle with attenuated rights!");
+                            all_passed = false;
+                        } else {
+                            ref = kos_object_get_refcount(&shared_obj.header);
+                            log_infof("  Duplicated handle: src=0x%08x -> dst=0x%08x, object refcount=%d",
+                                      h_src, h_dst, ref);
+
+                            if (ref != 3) {
+                                log_errorf("  [FAIL] Expected refcount 3 after duplication, got %d", ref);
+                                all_passed = false;
+                            } else {
+                                /* In dst process: READ must succeed, WRITE must fail */
+                                void *dst_read = handle_lookup(p_dst, h_dst, KOS_RIGHT_READ);
+                                void *dst_write = handle_lookup(p_dst, h_dst, KOS_RIGHT_WRITE);
+
+                                if (dst_read != &shared_obj.header || dst_write != NULL) {
+                                    log_error("  [FAIL] Destination handle rights incorrect after attenuation!");
+                                    all_passed = false;
+                                } else {
+                                    /* Test automatic cleanup on source process destruction */
+                                    process_destroy(p_src);
+                                    p_src = NULL;
+
+                                    ref = kos_object_get_refcount(&shared_obj.header);
+                                    log_infof("  After source process destroyed: object refcount=%d, destructor=%d",
+                                              ref, (int)shared_obj.destructor_called);
+
+                                    if (ref != 2 || shared_obj.destructor_called) {
+                                        log_errorf("  [FAIL] Incorrect refcount (%d) after src cleanup!", ref);
+                                        all_passed = false;
+                                    } else {
+                                        /* Destination process can still access object */
+                                        void *dst_after = handle_lookup(p_dst, h_dst, KOS_RIGHT_READ);
+                                        if (dst_after != &shared_obj.header) {
+                                            log_error("  [FAIL] Destination handle broken after src destruction!");
+                                            all_passed = false;
+                                        } else {
+                                            /* Destroy destination process */
+                                            process_destroy(p_dst);
+                                            p_dst = NULL;
+
+                                            ref = kos_object_get_refcount(&shared_obj.header);
+                                            log_infof("  After dst process destroyed: object refcount=%d, destructor=%d",
+                                                      ref, (int)shared_obj.destructor_called);
+
+                                            if (ref != 1 || shared_obj.destructor_called) {
+                                                log_errorf("  [FAIL] Incorrect refcount (%d) after dst cleanup!", ref);
+                                                all_passed = false;
+                                            } else {
+                                                /* Release final baseline reference */
+                                                kos_object_unref(&shared_obj.header);
+                                                ref = kos_object_get_refcount(&shared_obj.header);
+
+                                                if (ref != 0 || !shared_obj.destructor_called) {
+                                                    log_errorf("  [FAIL] Final unref failed: ref=%d, destructor=%d",
+                                                               ref, (int)shared_obj.destructor_called);
+                                                    all_passed = false;
+                                                } else {
+                                                    log_info("  Both process handle tables cleanly destroyed on exit.");
+                                                    log_info("  Object references properly released across process life cycles.");
+                                                    log_info("  Final destructor called when last reference released.");
+                                                    log_info("  [PASS] Handle duplication and automatic cleanup verified!");
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (p_src != NULL) process_destroy(p_src);
+        if (p_dst != NULL) process_destroy(p_dst);
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_passed) {
+        log_info(">>> [PASS] ALL KERNEL OBJECT & HANDLE TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] KERNEL OBJECT & HANDLE TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/*
+ * ============================================================================
+ * Diagnostic Command: waittest (K12.13, K12.16)
+ * ============================================================================
+ */
+
+/* Test 1 Waiter */
+struct waittest1_state {
+    wait_queue_t *wq;
+    volatile bool *flag;
+    volatile bool woken;
+};
+
+static bool waittest_flag_cond(void *arg) {
+    volatile bool *flag = (volatile bool *)arg;
+    return *flag;
+}
+
+static void waittest1_worker(void *arg) {
+    struct waittest1_state *st = (struct waittest1_state *)arg;
+    wait_event(st->wq, waittest_flag_cond, (void *)st->flag);
+    st->woken = true;
+    thread_exit(0);
+}
+
+/* Test 2 Waiters */
+struct waittest2_state {
+    wait_queue_t *wq;
+    volatile bool *flag;
+    atomic_t woken_count;
+};
+
+static void waittest2_worker(void *arg) {
+    struct waittest2_state *st = (struct waittest2_state *)arg;
+    wait_event(st->wq, waittest_flag_cond, (void *)st->flag);
+    atomic_inc(&st->woken_count);
+    thread_exit(0);
+}
+
+/* Test 3 Condition (always false) */
+static bool waittest_never_cond(void *arg) {
+    (void)arg;
+    return false;
+}
+
+/* Test 4 Event Worker */
+struct waittest4_state {
+    struct process *proc;
+    handle_t event_handle;
+    volatile bool woken;
+};
+
+static void waittest4_worker(void *arg) {
+    struct waittest4_state *st = (struct waittest4_state *)arg;
+    if (event_wait(st->proc, st->event_handle, 1000)) {
+        st->woken = true;
+    }
+    thread_exit(0);
+}
+
+/* Test 5 Cleanup Object & Child Process */
+struct waittest_cleanup_obj {
+    struct kos_object_header header;
+    volatile bool destructor_called;
+};
+
+static void waittest_cleanup_destructor(void *obj) {
+    struct waittest_cleanup_obj *cobj = (struct waittest_cleanup_obj *)obj;
+    if (cobj != NULL) {
+        cobj->destructor_called = true;
+    }
+}
+
+static void waittest5_child_worker(void *arg) {
+    struct process *proc = (struct process *)arg;
+    task_sleep(20);
+    process_exit(proc, 77);
+}
+
+static void command_waittest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("    KOS Wait Queue & Resource Cleanup Diagnostics ");
+    log_info("==================================================");
+
+    bool all_passed = true;
+
+    /* ------------------------------------------------------------
+     * Test 1: Single wakeup (wait_queue_wake_one)
+     * ------------------------------------------------------------ */
+    log_info("[waittest] 1. Single Waiter Wakeup (wait_queue_wake_one)...");
+    {
+        wait_queue_t wq1;
+        wait_queue_init(&wq1);
+        volatile bool flag1 = false;
+        struct waittest1_state st1;
+        st1.wq = &wq1;
+        st1.flag = &flag1;
+        st1.woken = false;
+
+        preempt_disable();
+        struct thread *t1 = thread_create(process_get_kernel(), waittest1_worker, &st1, "wq_single");
+        preempt_enable();
+
+        if (t1 == NULL) {
+            log_error("  [FAIL] Failed to create worker thread for Test 1!");
+            all_passed = false;
+        } else {
+            /* Wait until thread blocks on wq1 */
+            uint64_t wait_start = timer_get_ticks();
+            while (wq1.waiter_count == 0 && (timer_get_ticks() - wait_start) < timer_ms_to_ticks(500)) {
+                task_yield();
+            }
+
+            log_infof("  Waiter queued: count=%u, thread state=%s, woken=%d",
+                      wq1.waiter_count, thread_state_name(t1->state), (int)st1.woken);
+
+            if (wq1.waiter_count != 1 || st1.woken) {
+                log_error("  [FAIL] Waiter was not properly queued in BLOCKED state!");
+                all_passed = false;
+            } else {
+                /* Signal condition and wake single waiter */
+                flag1 = true;
+                wait_queue_wake_one(&wq1);
+
+                /* Wait for worker to complete */
+                uint64_t wake_start = timer_get_ticks();
+                while (!st1.woken && (timer_get_ticks() - wake_start) < timer_ms_to_ticks(500)) {
+                    task_yield();
+                }
+
+                log_infof("  After wake_one: woken=%d, queue count=%u", (int)st1.woken, wq1.waiter_count);
+
+                if (!st1.woken || wq1.waiter_count != 0) {
+                    log_error("  [FAIL] Single waiter did not awaken or queue not empty!");
+                    all_passed = false;
+                } else {
+                    log_info("  Worker cleanly awakened and queue count reached 0.");
+                    log_info("  [PASS] Single wakeup (wait_queue_wake_one) verified!");
+                }
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------
+     * Test 2: Broadcast wakeup (wait_queue_wake_all) with 3 waiters
+     * ------------------------------------------------------------ */
+    log_info("[waittest] 2. Broadcast Wakeup (wait_queue_wake_all)...");
+    {
+        wait_queue_t wq2;
+        wait_queue_init(&wq2);
+        volatile bool flag2 = false;
+        struct waittest2_state st2;
+        st2.wq = &wq2;
+        st2.flag = &flag2;
+        atomic_set(&st2.woken_count, 0);
+
+        preempt_disable();
+        struct thread *tw1 = thread_create(process_get_kernel(), waittest2_worker, &st2, "wq_bcast1");
+        struct thread *tw2 = thread_create(process_get_kernel(), waittest2_worker, &st2, "wq_bcast2");
+        struct thread *tw3 = thread_create(process_get_kernel(), waittest2_worker, &st2, "wq_bcast3");
+        preempt_enable();
+
+        if (tw1 == NULL || tw2 == NULL || tw3 == NULL) {
+            log_error("  [FAIL] Failed to create 3 broadcast worker threads!");
+            all_passed = false;
+        } else {
+            /* Wait until all 3 threads queue on wq2 */
+            uint64_t wait_start = timer_get_ticks();
+            while (wq2.waiter_count < 3 && (timer_get_ticks() - wait_start) < timer_ms_to_ticks(500)) {
+                task_yield();
+            }
+
+            log_infof("  Queued waiters: count=%u (expected 3), woken=%d",
+                      wq2.waiter_count, atomic_read(&st2.woken_count));
+
+            if (wq2.waiter_count != 3 || atomic_read(&st2.woken_count) != 0) {
+                log_error("  [FAIL] Not all 3 waiters queued properly!");
+                all_passed = false;
+            } else {
+                /* Signal condition and broadcast wake all */
+                flag2 = true;
+                wait_queue_wake_all(&wq2);
+
+                uint64_t wake_start = timer_get_ticks();
+                while (atomic_read(&st2.woken_count) < 3 &&
+                       (timer_get_ticks() - wake_start) < timer_ms_to_ticks(500)) {
+                    task_yield();
+                }
+
+                int32_t final_woken = atomic_read(&st2.woken_count);
+                log_infof("  After wake_all: woken_count=%d, queue count=%u",
+                          final_woken, wq2.waiter_count);
+
+                if (final_woken != 3 || wq2.waiter_count != 0) {
+                    log_error("  [FAIL] Broadcast failed to wake all 3 threads or queue not drained!");
+                    all_passed = false;
+                } else {
+                    log_info("  All 3 concurrent waiting threads awakened simultaneously.");
+                    log_info("  [PASS] Broadcast wakeup (wait_queue_wake_all) verified!");
+                }
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------
+     * Test 3: Timed wait (wait_event_timeout)
+     * ------------------------------------------------------------ */
+    log_info("[waittest] 3. Timed Wait & Expiration (wait_event_timeout)...");
+    {
+        wait_queue_t wq3;
+        wait_queue_init(&wq3);
+
+        /* Part A: Condition never signaled -> must time out after ~50ms */
+        uint64_t t0 = timer_get_ticks();
+        bool res_timeout = wait_event_timeout(&wq3, waittest_never_cond, NULL, 50);
+        uint64_t t1 = timer_get_ticks();
+        uint64_t elapsed_ms = timer_ticks_to_ms(t1 - t0);
+
+        log_infof("  Timed wait (50ms requested): result=%d (expect 0), elapsed=%llu ms, wq_waiters=%u",
+                  (int)res_timeout, (unsigned long long)elapsed_ms, wq3.waiter_count);
+
+        if (res_timeout || elapsed_ms < 35 || wq3.waiter_count != 0) {
+            log_error("  [FAIL] wait_event_timeout did not properly expire or queue not clean!");
+            all_passed = false;
+        } else {
+            /* Part B: Condition already true -> must return true immediately */
+            volatile bool already_true = true;
+            uint64_t t2 = timer_get_ticks();
+            bool res_immediate = wait_event_timeout(&wq3, waittest_flag_cond, (void *)&already_true, 200);
+            uint64_t t3 = timer_get_ticks();
+            uint64_t imm_elapsed = timer_ticks_to_ms(t3 - t2);
+
+            log_infof("  Immediate true check: result=%d (expect 1), elapsed=%llu ms",
+                      (int)res_immediate, (unsigned long long)imm_elapsed);
+
+            if (!res_immediate || imm_elapsed > 10) {
+                log_error("  [FAIL] wait_event_timeout did not return true immediately for satisfied condition!");
+                all_passed = false;
+            } else {
+                log_info("  Timeout correctly expired without signal; satisfied condition returned immediately.");
+                log_info("  [PASS] Timed wait (wait_event_timeout) verified!");
+            }
+        }
+    }
+
+    /* ------------------------------------------------------------
+     * Test 4: Wait Queue Kernel Object (Event handles)
+     * ------------------------------------------------------------ */
+    log_info("[waittest] 4. Wait Queue Kernel Object & Event Handles...");
+    {
+        struct process *cur_proc = process_get_current();
+        handle_t hev = event_create(cur_proc, true /* manual_reset */, false /* initial_state */);
+        if (hev == KOS_INVALID_HANDLE) {
+            log_error("  [FAIL] Failed to create event kernel object handle!");
+            all_passed = false;
+        } else {
+            struct waittest4_state st4;
+            st4.proc = cur_proc;
+            st4.event_handle = hev;
+            st4.woken = false;
+
+            preempt_disable();
+            struct thread *tev = thread_create(cur_proc, waittest4_worker, &st4, "wq_event");
+            preempt_enable();
+
+            if (tev == NULL) {
+                log_error("  [FAIL] Failed to create event waiter thread!");
+                all_passed = false;
+            } else {
+                /* Let worker begin waiting on event */
+                task_sleep(10);
+
+                if (st4.woken) {
+                    log_error("  [FAIL] Event waiter woke up before signal!");
+                    all_passed = false;
+                } else {
+                    /* Signal event */
+                    bool sig_ok = event_signal(cur_proc, hev);
+                    if (!sig_ok) {
+                        log_error("  [FAIL] Failed to signal event object!");
+                        all_passed = false;
+                    } else {
+                        /* Wait for worker to awaken */
+                        uint64_t ev_start = timer_get_ticks();
+                        while (!st4.woken && (timer_get_ticks() - ev_start) < timer_ms_to_ticks(500)) {
+                            task_yield();
+                        }
+
+                        log_infof("  After event_signal: woken=%d", (int)st4.woken);
+
+                        if (!st4.woken) {
+                            log_error("  [FAIL] Event waiter was not awakened by event_signal!");
+                            all_passed = false;
+                        } else {
+                            /* Reset event */
+                            bool rst_ok = event_reset(cur_proc, hev);
+                            bool now_sig = event_wait(cur_proc, hev, 0);
+                            log_infof("  After event_reset: reset_ok=%d, signaled=%d",
+                                      (int)rst_ok, (int)now_sig);
+
+                            if (!rst_ok || now_sig) {
+                                log_error("  [FAIL] Event reset failed!");
+                                all_passed = false;
+                            } else {
+                                log_info("  Event handle creation, waiting, signaling and reset verified.");
+                                log_info("  [PASS] Kernel Object Event integration verified!");
+                            }
+                        }
+                    }
+                }
+            }
+
+            handle_close(cur_proc, hev);
+        }
+    }
+
+    /* ------------------------------------------------------------
+     * Test 5: Process Wait & Automatic Resource Cleanup
+     * ------------------------------------------------------------ */
+    log_info("[waittest] 5. Process Wait & Automatic Resource Cleanup (process_wait)...");
+    {
+        struct process *child = process_create("proc_child_cleanup");
+        if (child == NULL) {
+            log_error("  [FAIL] Failed to create child process!");
+            all_passed = false;
+        } else {
+            /* Create a tracked kernel object and place a handle in child */
+            struct waittest_cleanup_obj cleanup_obj;
+            cleanup_obj.destructor_called = false;
+            kos_object_init(&cleanup_obj.header, KOS_OBJ_MUTEX, waittest_cleanup_destructor);
+
+            handle_t h_child = handle_create(child, &cleanup_obj.header, KOS_RIGHT_ALL);
+            int32_t ref_with_handle = kos_object_get_refcount(&cleanup_obj.header);
+            log_infof("  Child process PID %llu created, handle 0x%08x created, object refcount=%d",
+                      (unsigned long long)child->pid, h_child, ref_with_handle);
+
+            if (h_child == KOS_INVALID_HANDLE || ref_with_handle != 2) {
+                log_error("  [FAIL] Failed to associate handle with child process!");
+                all_passed = false;
+            } else {
+                /* Spawn child worker thread */
+                preempt_disable();
+                struct thread *tchild = thread_create(child, waittest5_child_worker, child, "child_worker");
+                preempt_enable();
+
+                if (tchild == NULL) {
+                    log_error("  [FAIL] Failed to spawn child thread!");
+                    all_passed = false;
+                } else {
+                    /* Parent waits on child exit via wait queue */
+                    int exit_code = -1;
+                    uint64_t wait_start = timer_get_ticks();
+                    bool wait_success = process_wait(child, &exit_code, 2000);
+                    uint64_t wait_time = timer_ticks_to_ms(timer_get_ticks() - wait_start);
+
+                    log_infof("  process_wait returned %d in %llu ms: exit_code=%d (expect 77), child state=%s",
+                              (int)wait_success, (unsigned long long)wait_time, exit_code,
+                              process_state_name(child->state));
+
+                    if (!wait_success || exit_code != 77) {
+                        log_errorf("  [FAIL] process_wait failed or exit code mismatch (got %d)", exit_code);
+                        all_passed = false;
+                    } else if (child->state != PROCESS_STATE_ZOMBIE && child->state != PROCESS_STATE_DEAD) {
+                        log_error("  [FAIL] Child process did not transition to ZOMBIE/DEAD!");
+                        all_passed = false;
+                    } else {
+                        /* Check that child handle table was destroyed and object unreffed */
+                        int32_t ref_after_exit = kos_object_get_refcount(&cleanup_obj.header);
+                        log_infof("  After process exit: object refcount=%d, destructor_called=%d",
+                                  ref_after_exit, (int)cleanup_obj.destructor_called);
+
+                        if (ref_after_exit != 1 || cleanup_obj.destructor_called) {
+                            log_error("  [FAIL] Child handle table was not automatically destroyed on exit!");
+                            all_passed = false;
+                        } else {
+                            /* Release parent's baseline reference */
+                            kos_object_unref(&cleanup_obj.header);
+                            if (!cleanup_obj.destructor_called) {
+                                log_error("  [FAIL] Destructor not called after parent unref!");
+                                all_passed = false;
+                            } else {
+                                log_info("  Child handle table cleaned up, object refcount decremented.");
+                                log_info("  Parent successfully synchronized with child exit via exit_wq.");
+                                log_info("  Exit code 77 cleanly delivered to parent.");
+                                log_info("  [PASS] Process termination resource cleanup verified!");
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Clean up child slot if not already dead */
+            if (child->state != PROCESS_STATE_DEAD) {
+                process_destroy(child);
+            }
+        }
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_passed) {
+        log_info(">>> [PASS] ALL WAIT QUEUE & RESOURCE CLEANUP TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] WAIT QUEUE & RESOURCE CLEANUP TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
 }
 
 static const struct command_entry command_registry[] = {

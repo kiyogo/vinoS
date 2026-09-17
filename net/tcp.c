@@ -5,6 +5,7 @@
 #include <kos/log.h>
 #include <kos/net.h>
 #include <kos/sync.h>
+#include <kos/task.h>
 #include <kos/timer.h>
 
 enum {
@@ -292,7 +293,11 @@ int tcp_connect(uint32_t address, uint16_t port) {
             return -1;
         }
         spinlock_unlock_irqrestore(&tcp_lock, lock_flags);
-        cpu_wait_for_interrupt();
+        if (task_is_multitasking_active()) {
+            task_sleep(1);
+        } else {
+            cpu_wait_for_interrupt();
+        }
     }
 
     lock_flags = spinlock_lock_irqsave(&tcp_lock);

@@ -4,6 +4,8 @@
 #include <kos/cpu.h>
 #include <kos/net.h>
 #include <kos/timer.h>
+#include <kos/sync.h>
+#include <kos/task.h>
 
 enum {
     ARP_PACKET_SIZE = 28,
@@ -15,6 +17,7 @@ enum {
 };
 
 static struct net_arp_cache_entry arp_cache[NET_ARP_CACHE_MAX];
+static struct kos_spinlock arp_lock = KOS_SPINLOCK_INITIALIZER;
 static uint64_t arp_requests;
 static uint64_t arp_replies;
 
@@ -50,18 +53,22 @@ static bool mac_equal(const uint8_t left[NET_ETHERNET_ADDRESS_SIZE],
 }
 
 static bool arp_lookup(uint32_t ipv4_address, uint8_t mac_address[NET_ETHERNET_ADDRESS_SIZE]) {
+    uint64_t flags = spinlock_lock_irqsave(&arp_lock);
     for (uint64_t index = 0; index < NET_ARP_CACHE_MAX; ++index) {
         if (arp_cache[index].valid && arp_cache[index].ipv4_address == ipv4_address) {
             for (uint64_t byte = 0; byte < NET_ETHERNET_ADDRESS_SIZE; ++byte) {
                 mac_address[byte] = arp_cache[index].mac_address[byte];
             }
+            spinlock_unlock_irqrestore(&arp_lock, flags);
             return true;
         }
     }
+    spinlock_unlock_irqrestore(&arp_lock, flags);
     return false;
 }
 
 static void arp_remember(uint32_t ipv4_address, const uint8_t mac_address[NET_ETHERNET_ADDRESS_SIZE]) {
+    uint64_t flags = spinlock_lock_irqsave(&arp_lock);
     uint64_t slot = 0;
     uint64_t oldest_tick = UINT64_MAX;
     for (uint64_t index = 0; index < NET_ARP_CACHE_MAX; ++index) {
@@ -86,6 +93,7 @@ static void arp_remember(uint32_t ipv4_address, const uint8_t mac_address[NET_ET
     for (uint64_t byte = 0; byte < NET_ETHERNET_ADDRESS_SIZE; ++byte) {
         arp_cache[slot].mac_address[byte] = mac_address[byte];
     }
+    spinlock_unlock_irqrestore(&arp_lock, flags);
 }
 
 static bool arp_send(uint16_t operation, const uint8_t destination_mac[NET_ETHERNET_ADDRESS_SIZE],
@@ -172,7 +180,11 @@ bool net_arp_resolve(uint32_t ipv4_address, uint8_t mac_address[NET_ETHERNET_ADD
             if (arp_lookup(ipv4_address, mac_address)) {
                 return true;
             }
-            cpu_wait_for_interrupt();
+            if (task_is_multitasking_active()) {
+                task_sleep(1);
+            } else {
+                cpu_wait_for_interrupt();
+            }
         }
     }
     return false;
@@ -182,12 +194,14 @@ uint64_t net_arp_requests_sent(void) { return arp_requests; }
 uint64_t net_arp_replies_received(void) { return arp_replies; }
 
 uint64_t net_arp_cache_count(void) {
+    uint64_t flags = spinlock_lock_irqsave(&arp_lock);
     uint64_t count = 0;
     for (uint64_t index = 0; index < NET_ARP_CACHE_MAX; ++index) {
         if (arp_cache[index].valid) {
             ++count;
         }
     }
+    spinlock_unlock_irqrestore(&arp_lock, flags);
     return count;
 }
 
@@ -195,15 +209,18 @@ bool net_arp_cache_at(uint64_t index, struct net_arp_cache_entry *entry) {
     if (entry == 0) {
         return false;
     }
+    uint64_t flags = spinlock_lock_irqsave(&arp_lock);
     uint64_t seen = 0;
     for (uint64_t slot = 0; slot < NET_ARP_CACHE_MAX; ++slot) {
         if (arp_cache[slot].valid) {
             if (seen == index) {
                 *entry = arp_cache[slot];
+                spinlock_unlock_irqrestore(&arp_lock, flags);
                 return true;
             }
             ++seen;
         }
     }
+    spinlock_unlock_irqrestore(&arp_lock, flags);
     return false;
 }

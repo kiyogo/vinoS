@@ -9,10 +9,15 @@ enum {
     KOS_KERNEL_CODE_SELECTOR = 0x08,
     KOS_KERNEL_DATA_SELECTOR = 0x10,
     KOS_KERNEL_TSS_SELECTOR = 0x18,
+    KOS_USER_CODE_SELECTOR = 0x2b,
+    KOS_USER_DATA_SELECTOR = 0x33,
 };
 
 void gdt_initialize(void);
 void idt_initialize(void);
+void tss_set_rsp0(uint64_t rsp0);
+uint64_t tss_get_rsp0(void);
+uint64_t tss_get_ist1(void);
 KOS_NORETURN void cpu_halt(void);
 KOS_NORETURN void cpu_idle(void);
 KOS_NORETURN void cpu_reboot(void);

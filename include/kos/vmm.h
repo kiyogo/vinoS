@@ -15,5 +15,7 @@ uint64_t vmm_unmap_page(uint64_t virtual_address);
 bool vmm_set_page_permissions(uint64_t virtual_address, uint64_t permissions);
 bool vmm_is_mapped(uint64_t virtual_address);
 bool vmm_query_page(uint64_t virtual_address, uint64_t *physical_address, uint64_t *flags);
+bool vmm_map_pages(uint64_t virtual_address, uint64_t physical_address, uint64_t page_count, uint64_t flags);
+uint64_t vmm_unmap_pages(uint64_t virtual_address, uint64_t page_count);
 
 #endif
