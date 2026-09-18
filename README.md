@@ -2,15 +2,11 @@
 
 KOS is an independent x86_64 desktop operating system.
 
----
-
 ## Key Highlights
 
 - Aore AI OS: Dedicated system architecture for AI agents to run and control the operating system natively.
 - Windows Drive System: Windows style drive letters like C and D for easy use and future Windows software support.
 - Interface Installer: Choose custom desktop environments downloaded from the network or use the default offline interface during installation.
-
----
 
 ## Current Features
 
@@ -25,8 +21,6 @@ KOS is an independent x86_64 desktop operating system.
 - HTTP, HTTPS, TLS 1.3, and cryptography support
 - ELF64 binary loader, package manager, and kernel terminal
 
----
-
 ## Future Goals
 
 - Aore AI core subsystem and agent automation APIs
@@ -35,16 +29,12 @@ KOS is an independent x86_64 desktop operating system.
 - Online desktop interface installer
 - Native web browser engine
 
----
-
 ## Target
 
 - Architecture: x86_64
 - Firmware: UEFI
 - Bootloader: Limine
 - Emulator: QEMU
-
----
 
 ## Build and Run
 
@@ -55,8 +45,6 @@ tools\kos-tool.exe bootstrap-assets
 tools\kos-tool.exe build
 tools\kos-tool.exe run
 ```
-
----
 
 ## Documentation
 
