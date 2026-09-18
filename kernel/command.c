@@ -32,6 +32,14 @@
 #include <kos/page_fault.h>
 #include <kos/symbol.h>
 #include <kos/vmm.h>
+#include <kos/block.h>
+#include <kos/ramdisk.h>
+#include <kos/virtio_blk.h>
+#include <kos/ahci.h>
+#include <kos/block_cache.h>
+#include <kos/partition.h>
+#include <kos/fat32.h>
+#include <kos/volume.h>
 
 void *memset(void *destination, int value, size_t size);
 void *memcpy(void *destination, const void *source, size_t size);
@@ -47,7 +55,7 @@ struct command_entry {
 
 static void command_help(const char *arguments) {
     (void)arguments;
-    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
+    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv blocktest mbrtest gpttest cachetest fattest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
 }
 
 static void command_clear(const char *arguments) {
@@ -2101,18 +2109,37 @@ static void command_waittest(const char *arguments) {
  * ============================================================================
  */
 
-static bool usertest_streq(const char *s1, const char *s2) {
-    if (s1 == NULL || s2 == NULL) {
+static bool usertest_is_empty(const char *arg) {
+    if (arg == NULL) {
+        return true;
+    }
+    while (*arg == ' ' || *arg == '\t' || *arg == '\r' || *arg == '\n') {
+        arg++;
+    }
+    return *arg == '\0';
+}
+
+static bool usertest_match_arg(const char *arg, const char *target) {
+    if (arg == NULL || target == NULL) {
         return false;
     }
-    while (*s1 != '\0' && *s2 != '\0') {
-        if (*s1 != *s2) {
+    while (*arg == ' ' || *arg == '\t') {
+        arg++;
+    }
+    while (*arg != '\0' && *target != '\0') {
+        if (*arg != *target) {
             return false;
         }
-        s1++;
-        s2++;
+        arg++;
+        target++;
     }
-    return *s1 == *s2;
+    if (*target != '\0') {
+        return false;
+    }
+    while (*arg == ' ' || *arg == '\t' || *arg == '\r' || *arg == '\n') {
+        arg++;
+    }
+    return *arg == '\0';
 }
 
 static bool create_test_elf(uint8_t *buf, uint64_t buf_cap, uint64_t *out_size,
@@ -2447,84 +2474,122 @@ static bool test_kernel_mem_isolation(void) {
     uint64_t initial_frames = pmm_free_frame_count();
     uint64_t initial_heap = heap_active_allocation_count();
 
-    /* Ring 3 user payload attempting to access higher-half kernel memory:
-     * movabs rax, 0xFFFFFFFF80000000
-     * mov rbx, [rax] (Hardware page fault!)
-     * mov rax, 4
-     * mov rdi, 99
-     * int 0x80
-     * jmp $
-     */
-    static const uint8_t kmem_code[] = {
-        0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, /* movabs rax, 0xFFFFFFFF80000000 */
-        0x48, 0x8B, 0x18,                                            /* mov rbx, [rax] (Page fault!) */
-        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
-        0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
-        0xCD, 0x80,                                                 /* int 0x80 */
-        0xEB, 0xFE                                                  /* jmp $ */
-    };
+    /* Subtest 3a: Ring 3 attempts to read 0xFFFFFFFF80000000 (higher-half kernel text/data) */
+    {
+        static const uint8_t kmem_code_1[] = {
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, /* movabs rax, 0xFFFFFFFF80000000 */
+            0x48, 0x8B, 0x18,                                            /* mov rbx, [rax] (Hardware page fault!) */
+            0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
+            0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
+            0xCD, 0x80,                                                 /* int 0x80 */
+            0xEB, 0xFE                                                  /* jmp $ */
+        };
 
-    uint8_t elf_buf[512];
-    uint64_t elf_size = 0;
-    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, kmem_code, sizeof(kmem_code))) {
-        log_error("  [FAIL] Failed to construct kernel_mem test ELF image");
-        return false;
+        uint8_t elf_buf[512];
+        uint64_t elf_size = 0;
+        if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, kmem_code_1, sizeof(kmem_code_1))) {
+            log_error("  [FAIL] Failed to construct kmem1 test ELF image");
+            return false;
+        }
+
+        if (!vfs_write_file("D:/kmem1.elf", elf_buf, elf_size)) {
+            log_error("  [FAIL] Failed to write D:/kmem1.elf to ramfs");
+            return false;
+        }
+
+        struct process *child = process_create("kmem_proc1");
+        if (child == NULL) {
+            log_error("  [FAIL] Failed to create kmem_proc1 child process");
+            vfs_unlink_file("D:/kmem1.elf");
+            return false;
+        }
+
+        struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/kmem1.elf", "kmem1_t");
+        if (t == NULL) {
+            log_error("  [FAIL] Failed to create kmem1_t thread");
+            process_destroy(child);
+            vfs_unlink_file("D:/kmem1.elf");
+            return false;
+        }
+
+        int exit_code = 0;
+        bool wait_ok = process_wait(child, &exit_code, 3000);
+        vfs_unlink_file("D:/kmem1.elf");
+        task_yield();
+
+        if (!wait_ok || exit_code != -11 || child->state != PROCESS_STATE_DEAD) {
+            log_errorf("  [FAIL] 3a: Expected SIGSEGV (-11) reading 0xFFFFFFFF80000000, got wait=%d exit=%d state=%d",
+                       (int)wait_ok, exit_code, (int)child->state);
+            return false;
+        }
+        log_info("  [PASS] 3a: Access to 0xFFFFFFFF80000000 cleanly trapped (SIGSEGV -11).");
     }
 
-    if (!vfs_write_file("D:/kmem.elf", elf_buf, elf_size)) {
-        log_error("  [FAIL] Failed to write D:/kmem.elf to ramfs");
-        return false;
-    }
+    /* Subtest 3b: Ring 3 attempts to read 0xFFFF800000000000 (higher-half direct physical map) */
+    {
+        static const uint8_t kmem_code_2[] = {
+            0x48, 0xB8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, /* movabs rax, 0xFFFF800000000000 */
+            0x48, 0x8B, 0x18,                                            /* mov rbx, [rax] (Hardware page fault!) */
+            0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
+            0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
+            0xCD, 0x80,                                                 /* int 0x80 */
+            0xEB, 0xFE                                                  /* jmp $ */
+        };
 
-    struct process *child = process_create("kmem_proc");
-    if (child == NULL) {
-        log_error("  [FAIL] Failed to create kmem_proc child process");
-        vfs_unlink_file("D:/kmem.elf");
-        return false;
-    }
+        uint8_t elf_buf[512];
+        uint64_t elf_size = 0;
+        if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, kmem_code_2, sizeof(kmem_code_2))) {
+            log_error("  [FAIL] Failed to construct kmem2 test ELF image");
+            return false;
+        }
 
-    struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/kmem.elf", "kmem_t");
-    if (t == NULL) {
-        log_error("  [FAIL] Failed to create kmem_t thread");
-        process_destroy(child);
-        vfs_unlink_file("D:/kmem.elf");
-        return false;
-    }
+        if (!vfs_write_file("D:/kmem2.elf", elf_buf, elf_size)) {
+            log_error("  [FAIL] Failed to write D:/kmem2.elf to ramfs");
+            return false;
+        }
 
-    int exit_code = 0;
-    bool wait_ok = process_wait(child, &exit_code, 3000);
-    vfs_unlink_file("D:/kmem.elf");
-    task_yield();
+        struct process *child = process_create("kmem_proc2");
+        if (child == NULL) {
+            log_error("  [FAIL] Failed to create kmem_proc2 child process");
+            vfs_unlink_file("D:/kmem2.elf");
+            return false;
+        }
 
-    if (!wait_ok) {
-        log_error("  [FAIL] process_wait timed out for kmem_proc");
-        return false;
-    }
+        struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/kmem2.elf", "kmem2_t");
+        if (t == NULL) {
+            log_error("  [FAIL] Failed to create kmem2_t thread");
+            process_destroy(child);
+            vfs_unlink_file("D:/kmem2.elf");
+            return false;
+        }
 
-    if (exit_code != -11) {
-        log_errorf("  [FAIL] Expected SIGSEGV (-11), got exit_code=%d", exit_code);
-        return false;
-    }
+        int exit_code = 0;
+        bool wait_ok = process_wait(child, &exit_code, 3000);
+        vfs_unlink_file("D:/kmem2.elf");
+        task_yield();
 
-    if (child->state != PROCESS_STATE_DEAD) {
-        log_error("  [FAIL] kmem_proc was not cleanly reaped to DEAD");
-        return false;
+        if (!wait_ok || exit_code != -11 || child->state != PROCESS_STATE_DEAD) {
+            log_errorf("  [FAIL] 3b: Expected SIGSEGV (-11) reading 0xFFFF800000000000, got wait=%d exit=%d state=%d",
+                       (int)wait_ok, exit_code, (int)child->state);
+            return false;
+        }
+        log_info("  [PASS] 3b: Access to 0xFFFF800000000000 cleanly trapped (SIGSEGV -11).");
     }
 
     uint64_t final_frames = pmm_free_frame_count();
     uint64_t final_heap = heap_active_allocation_count();
     if (final_frames != initial_frames) {
-        log_errorf("  [FAIL] kmem_proc leaked frames: before=%llu, after=%llu",
+        log_errorf("  [FAIL] kmem tests leaked frames: before=%llu, after=%llu",
                    (unsigned long long)initial_frames, (unsigned long long)final_frames);
         return false;
     }
     if (final_heap != initial_heap) {
-        log_errorf("  [FAIL] kmem_proc leaked heap: before=%llu, after=%llu",
+        log_errorf("  [FAIL] kmem tests leaked heap: before=%llu, after=%llu",
                    (unsigned long long)initial_heap, (unsigned long long)final_heap);
         return false;
     }
 
-    log_info("  [PASS] Test 3: Kernel memory isolation enforcement (SIGSEGV -11 trapped, 0 leaks)");
+    log_info("  [PASS] Test 3: Kernel memory isolation enforcement (2 higher-half addresses, SIGSEGV -11 trapped, 0 leaks)");
     return true;
 }
 
@@ -2536,70 +2601,106 @@ static bool test_stack_guard_containment(void) {
     uint64_t initial_frames = pmm_free_frame_count();
     uint64_t initial_heap = heap_active_allocation_count();
 
-    /* Ring 3 user payload attempting to write to the stack guard page:
-     * USER_STACK_GUARD_PAGE is 0x00007FFFFFFED000ull
-     * Address 0x00007FFFFFFEDFF8 is inside the unmapped guard page.
-     * movabs rax, 0x00007FFFFFFEDFF8
-     * mov qword ptr [rax], 0x1234 (Hardware page fault!)
-     * mov rax, 4
-     * mov rdi, 99
-     * int 0x80
-     * jmp $
-     */
-    static const uint8_t guard_code[] = {
-        0x48, 0xB8, 0xF8, 0xDF, 0xFE, 0xFF, 0xFF, 0x7F, 0x00, 0x00, /* movabs rax, 0x00007FFFFFFEDFF8 */
-        0x48, 0xC7, 0x00, 0x34, 0x12, 0x00, 0x00,                   /* mov qword [rax], 0x1234 (Page fault!) */
-        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
-        0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
-        0xCD, 0x80,                                                 /* int 0x80 */
-        0xEB, 0xFE                                                  /* jmp $ */
-    };
+    /* Subtest 4a: Write to top of guard page: 0x00007FFFFFFEDFF8 */
+    {
+        static const uint8_t guard_code_1[] = {
+            0x48, 0xB8, 0xF8, 0xDF, 0xFE, 0xFF, 0xFF, 0x7F, 0x00, 0x00, /* movabs rax, 0x00007FFFFFFEDFF8 */
+            0x48, 0xC7, 0x00, 0x34, 0x12, 0x00, 0x00,                   /* mov qword [rax], 0x1234 (Page fault!) */
+            0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
+            0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
+            0xCD, 0x80,                                                 /* int 0x80 */
+            0xEB, 0xFE                                                  /* jmp $ */
+        };
 
-    uint8_t elf_buf[512];
-    uint64_t elf_size = 0;
-    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, guard_code, sizeof(guard_code))) {
-        log_error("  [FAIL] Failed to construct guard_test test ELF image");
-        return false;
+        uint8_t elf_buf[512];
+        uint64_t elf_size = 0;
+        if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, guard_code_1, sizeof(guard_code_1))) {
+            log_error("  [FAIL] Failed to construct guard1 test ELF image");
+            return false;
+        }
+
+        if (!vfs_write_file("D:/guard1.elf", elf_buf, elf_size)) {
+            log_error("  [FAIL] Failed to write D:/guard1.elf to ramfs");
+            return false;
+        }
+
+        struct process *child = process_create("guard_proc1");
+        if (child == NULL) {
+            log_error("  [FAIL] Failed to create guard_proc1 child process");
+            vfs_unlink_file("D:/guard1.elf");
+            return false;
+        }
+
+        struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/guard1.elf", "guard1_t");
+        if (t == NULL) {
+            log_error("  [FAIL] Failed to create guard1_t thread");
+            process_destroy(child);
+            vfs_unlink_file("D:/guard1.elf");
+            return false;
+        }
+
+        int exit_code = 0;
+        bool wait_ok = process_wait(child, &exit_code, 3000);
+        vfs_unlink_file("D:/guard1.elf");
+        task_yield();
+
+        if (!wait_ok || exit_code != -11 || child->state != PROCESS_STATE_DEAD) {
+            log_errorf("  [FAIL] 4a: Expected SIGSEGV (-11), got wait=%d exit=%d state=%d",
+                       (int)wait_ok, exit_code, (int)child->state);
+            return false;
+        }
+        log_info("  [PASS] 4a: Guard page top access cleanly trapped (SIGSEGV -11).");
     }
 
-    if (!vfs_write_file("D:/guard.elf", elf_buf, elf_size)) {
-        log_error("  [FAIL] Failed to write D:/guard.elf to ramfs");
-        return false;
-    }
+    /* Subtest 4b: Write to base of guard page: 0x00007FFFFFFED000 */
+    {
+        static const uint8_t guard_code_2[] = {
+            0x48, 0xB8, 0x00, 0xD0, 0xFE, 0xFF, 0xFF, 0x7F, 0x00, 0x00, /* movabs rax, 0x00007FFFFFFED000 */
+            0x48, 0xC7, 0x00, 0x78, 0x56, 0x00, 0x00,                   /* mov qword [rax], 0x5678 (Page fault!) */
+            0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
+            0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
+            0xCD, 0x80,                                                 /* int 0x80 */
+            0xEB, 0xFE                                                  /* jmp $ */
+        };
 
-    struct process *child = process_create("guard_proc");
-    if (child == NULL) {
-        log_error("  [FAIL] Failed to create guard_proc child process");
-        vfs_unlink_file("D:/guard.elf");
-        return false;
-    }
+        uint8_t elf_buf[512];
+        uint64_t elf_size = 0;
+        if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, guard_code_2, sizeof(guard_code_2))) {
+            log_error("  [FAIL] Failed to construct guard2 test ELF image");
+            return false;
+        }
 
-    struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/guard.elf", "guard_t");
-    if (t == NULL) {
-        log_error("  [FAIL] Failed to create guard_t thread");
-        process_destroy(child);
-        vfs_unlink_file("D:/guard.elf");
-        return false;
-    }
+        if (!vfs_write_file("D:/guard2.elf", elf_buf, elf_size)) {
+            log_error("  [FAIL] Failed to write D:/guard2.elf to ramfs");
+            return false;
+        }
 
-    int exit_code = 0;
-    bool wait_ok = process_wait(child, &exit_code, 3000);
-    vfs_unlink_file("D:/guard.elf");
-    task_yield();
+        struct process *child = process_create("guard_proc2");
+        if (child == NULL) {
+            log_error("  [FAIL] Failed to create guard_proc2 child process");
+            vfs_unlink_file("D:/guard2.elf");
+            return false;
+        }
 
-    if (!wait_ok) {
-        log_error("  [FAIL] process_wait timed out for guard_proc");
-        return false;
-    }
+        struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/guard2.elf", "guard2_t");
+        if (t == NULL) {
+            log_error("  [FAIL] Failed to create guard2_t thread");
+            process_destroy(child);
+            vfs_unlink_file("D:/guard2.elf");
+            return false;
+        }
 
-    if (exit_code != -11) {
-        log_errorf("  [FAIL] Expected SIGSEGV (-11), got exit_code=%d", exit_code);
-        return false;
-    }
+        int exit_code = 0;
+        bool wait_ok = process_wait(child, &exit_code, 3000);
+        vfs_unlink_file("D:/guard2.elf");
+        task_yield();
 
-    if (child->state != PROCESS_STATE_DEAD) {
-        log_error("  [FAIL] guard_proc was not cleanly reaped to DEAD");
-        return false;
+        if (!wait_ok || exit_code != -11 || child->state != PROCESS_STATE_DEAD) {
+            log_errorf("  [FAIL] 4b: Expected SIGSEGV (-11), got wait=%d exit=%d state=%d",
+                       (int)wait_ok, exit_code, (int)child->state);
+            return false;
+        }
+        log_info("  [PASS] 4b: Guard page base access cleanly trapped (SIGSEGV -11).");
     }
 
     uint64_t final_frames = pmm_free_frame_count();
@@ -2615,7 +2716,7 @@ static bool test_stack_guard_containment(void) {
         return false;
     }
 
-    log_info("  [PASS] Test 4: User stack guard page containment (SIGSEGV -11 trapped, 0 leaks)");
+    log_info("  [PASS] Test 4: User stack guard page containment (2 guard boundaries trapped, 0 leaks)");
     return true;
 }
 
@@ -2699,6 +2800,11 @@ static bool test_preemption_hardware(void) {
 
     uint64_t elapsed_ticks = (ticks_after >= ticks_before) ? (ticks_after - ticks_before) : 0;
     log_infof("  Preemption test elapsed timer ticks: %llu", (unsigned long long)elapsed_ticks);
+
+    if (elapsed_ticks == 0) {
+        log_error("  [FAIL] Preemption test finished without any timer ticks elapsed!");
+        return false;
+    }
 
     uint64_t final_frames = pmm_free_frame_count();
     uint64_t final_heap = heap_active_allocation_count();
@@ -2800,17 +2906,13 @@ static bool test_leak_50_iterations(void) {
 }
 
 static void command_usertest(const char *arguments) {
-    while (arguments != NULL && *arguments == ' ') {
-        arguments++;
-    }
-
-    bool run_all = (arguments == NULL || *arguments == '\0' || usertest_streq(arguments, "all"));
-    bool run_valid = run_all || usertest_streq(arguments, "valid");
-    bool run_corrupted = run_all || usertest_streq(arguments, "corrupted");
-    bool run_kernel_mem = run_all || usertest_streq(arguments, "kernel_mem");
-    bool run_stack_overflow = run_all || usertest_streq(arguments, "stack_overflow");
-    bool run_preemption = run_all || usertest_streq(arguments, "preemption");
-    bool run_leak = run_all || usertest_streq(arguments, "leak");
+    bool run_all = usertest_is_empty(arguments) || usertest_match_arg(arguments, "all");
+    bool run_valid = run_all || usertest_match_arg(arguments, "valid");
+    bool run_corrupted = run_all || usertest_match_arg(arguments, "corrupted");
+    bool run_kernel_mem = run_all || usertest_match_arg(arguments, "kernel_mem");
+    bool run_stack_overflow = run_all || usertest_match_arg(arguments, "stack_overflow");
+    bool run_preemption = run_all || usertest_match_arg(arguments, "preemption");
+    bool run_leak = run_all || usertest_match_arg(arguments, "leak");
 
     if (!run_valid && !run_corrupted && !run_kernel_mem && !run_stack_overflow && !run_preemption && !run_leak) {
         log_error("Usage: usertest [all|valid|corrupted|kernel_mem|stack_overflow|preemption|leak]");
@@ -3667,6 +3769,740 @@ static void command_kstress(const char *arguments) {
     log_info("==================================================");
 }
 
+/* ========================================================================= */
+/* Storage & Block Device Commands & Tests (Milestones K16 & K17)            */
+/* ========================================================================= */
+
+static void command_fdisk(const char *arguments) {
+    (void)arguments;
+    log_info("=== Block Devices & Partitions ===");
+    uint32_t count = block_device_count();
+    if (count == 0) {
+        log_info("  (no block devices registered)");
+        return;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        struct block_device *dev = block_device_get_at(i);
+        if (dev == NULL) continue;
+
+        const char *type_str = "UNKNOWN";
+        if (dev->type == BLOCK_TYPE_RAMDISK) type_str = "RAMDISK";
+        else if (dev->type == BLOCK_TYPE_AHCI) type_str = "AHCI-SATA";
+        else if (dev->type == BLOCK_TYPE_VIRTIO) type_str = "VIRTIO-BLK";
+        else if (dev->type == BLOCK_TYPE_PARTITION) type_str = "PARTITION";
+
+        uint64_t mib = (dev->total_blocks * dev->block_size) / (1024 * 1024);
+        log_infof("Device: %-12s Type: %-10s Blocks: %-10llu Size: %llu MiB State: %s",
+                  dev->name, type_str, (unsigned long long)dev->total_blocks,
+                  (unsigned long long)mib, dev->state == BLOCK_DEVICE_ONLINE ? "ONLINE" : "OFFLINE");
+
+        if (dev->type == BLOCK_TYPE_PARTITION && dev->parent != NULL) {
+            log_infof("  └─ Parent: %s, Start LBA: %llu, Index: %u, MBR Type: 0x%02X",
+                      dev->parent->name, (unsigned long long)dev->start_lba,
+                      (unsigned int)dev->partition_index, (unsigned int)dev->partition_type_mbr);
+        }
+    }
+}
+
+static void command_mount(const char *arguments) {
+    while (*arguments == ' ') arguments++;
+    if (*arguments == '\0') {
+        log_info("=== Mounted Volumes ===");
+        for (uint64_t i = 0; i < vfs_volume_count(); i++) {
+            struct vfs_volume_info info;
+            if (vfs_volume_info_at(i, &info)) {
+                log_infof("  %c: [Label: %s] Files: %llu",
+                          info.letter, info.label ? info.label : "", (unsigned long long)info.file_count);
+            }
+        }
+        return;
+    }
+
+    /* Parse: mount <dev> <letter> [label] */
+    char dev_name[32];
+    int pos = 0;
+    while (*arguments != ' ' && *arguments != '\0' && pos + 1 < 32) {
+        dev_name[pos++] = *arguments++;
+    }
+    dev_name[pos] = '\0';
+    while (*arguments == ' ') arguments++;
+
+    if (*arguments == '\0') {
+        log_error("mount: syntax error. Use: mount <dev_name> <drive_letter:> [label]");
+        return;
+    }
+
+    char letter = *arguments;
+    if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
+    arguments++;
+    if (*arguments == ':') arguments++;
+    while (*arguments == ' ') arguments++;
+
+    const char *label = (*arguments != '\0') ? arguments : "VOLUME";
+
+    struct block_device *dev = block_device_find_by_name(dev_name);
+    if (dev == NULL) {
+        log_errorf("mount: block device '%s' not found.", dev_name);
+        return;
+    }
+
+    if (volume_manager_mount_device(dev, letter, label)) {
+        log_infof("mount: successfully mounted %s as %c: (%s)", dev_name, letter, label);
+    } else {
+        log_errorf("mount: failed to mount %s (unsupported filesystem or drive letter in use)", dev_name);
+    }
+}
+
+static void command_umount(const char *arguments) {
+    while (*arguments == ' ') arguments++;
+    if (*arguments == '\0') {
+        log_error("umount: missing drive letter. Use: umount <letter:>");
+        return;
+    }
+
+    char letter = *arguments;
+    if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
+
+    if (letter == 'C') {
+        log_error("umount: cannot unmount system volume C:");
+        return;
+    }
+
+    if (volume_manager_unmount_letter(letter)) {
+        log_infof("umount: unmounted volume %c:", letter);
+    } else {
+        log_errorf("umount: failed to unmount volume %c:", letter);
+    }
+}
+
+static void command_sync(const char *arguments) {
+    (void)arguments;
+    if (volume_manager_sync_all()) {
+        log_info("sync: all block caches synchronized to disk successfully.");
+    } else {
+        log_error("sync: errors occurred while flushing dirty blocks.");
+    }
+}
+
+static void command_touch(const char *arguments) {
+    while (*arguments == ' ') arguments++;
+    if (*arguments == '\0') {
+        log_error("touch: missing file path. Use: touch <path>");
+        return;
+    }
+    if (vfs_write_file(arguments, (const uint8_t *)"", 0)) {
+        log_infof("touch: created file '%s'", arguments);
+    } else {
+        log_errorf("touch: failed to create file '%s'", arguments);
+    }
+}
+
+static void command_mkdir(const char *arguments) {
+    while (*arguments == ' ') arguments++;
+    if (*arguments == '\0') {
+        log_error("mkdir: missing path. Use: mkdir <path>");
+        return;
+    }
+
+    char letter = 'C';
+    const char *rel_path = arguments;
+    if (arguments[0] != '\0' && arguments[1] == ':') {
+        letter = arguments[0];
+        if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
+        rel_path = arguments + 2;
+    }
+
+    const struct volume_entry *vol_ent = volume_manager_find_by_letter(letter);
+    if (vol_ent != NULL && kstrcmp(vol_ent->fs_type, "FAT32") == 0) {
+        if (fat32_mkdir((struct fat32_volume *)vol_ent->fs_handle, rel_path)) {
+            log_infof("mkdir: directory '%s' created on %c:", rel_path, letter);
+            return;
+        }
+    }
+    log_errorf("mkdir: failed to create directory '%s'", arguments);
+}
+
+static void command_rm(const char *arguments) {
+    while (*arguments == ' ') arguments++;
+    if (*arguments == '\0') {
+        log_error("rm: missing file path. Use: rm <path>");
+        return;
+    }
+    if (vfs_unlink_file(arguments)) {
+        log_infof("rm: removed file '%s'", arguments);
+    } else {
+        log_errorf("rm: failed to remove '%s'", arguments);
+    }
+}
+
+static void command_mv(const char *arguments) {
+    while (*arguments == ' ') arguments++;
+    if (*arguments == '\0') {
+        log_error("mv: use: mv <old_path> <new_path>");
+        return;
+    }
+
+    char src[128];
+    int pos = 0;
+    while (*arguments != ' ' && *arguments != '\0' && pos + 1 < 128) {
+        src[pos++] = *arguments++;
+    }
+    src[pos] = '\0';
+    while (*arguments == ' ') arguments++;
+
+    if (*arguments == '\0') {
+        log_error("mv: missing destination path. Use: mv <old_path> <new_path>");
+        return;
+    }
+
+    const uint8_t *data = NULL;
+    uint64_t size = 0;
+    if (!vfs_read_file(src, &data, &size)) {
+        log_errorf("mv: source file '%s' not found", src);
+        return;
+    }
+
+    if (!vfs_write_file(arguments, data, size)) {
+        log_errorf("mv: failed to write destination file '%s'", arguments);
+        return;
+    }
+
+    vfs_unlink_file(src);
+    log_infof("mv: moved '%s' -> '%s' (%llu bytes)", src, arguments, (unsigned long long)size);
+}
+
+/* Diagnostic Test: Block Device Core */
+static void command_blocktest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info(">>> STARTING BLOCK DEVICE SUBSYSTEM TEST <<<");
+    log_info("==================================================");
+
+    bool all_ok = true;
+
+    /* 1. Create a 1 MiB RAM Block Device (2048 sectors of 512 bytes = 1048576 bytes) */
+    struct block_device *ram_dev = ramdisk_create("test_ram0", 2048ULL * 512, 512);
+    if (ram_dev == NULL) {
+        log_error("  [FAIL] Failed to create test ramdisk");
+        return;
+    }
+    log_infof("  [OK] Created ramdisk: %s (%llu blocks, %llu bytes)",
+              ram_dev->name, (unsigned long long)ram_dev->total_blocks, (unsigned long long)ram_dev->capacity_bytes);
+
+    /* 2. Test lookup */
+    if (block_device_find_by_name("test_ram0") != ram_dev) {
+        log_error("  [FAIL] block_device_find_by_name failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] block_device_find_by_name matched");
+    }
+
+    /* 3. Write pattern to multiple sectors */
+    uint8_t write_buf[1024];
+    for (int i = 0; i < 1024; i++) {
+        write_buf[i] = (uint8_t)(i ^ 0xA5);
+    }
+
+    if (!block_write(ram_dev, 10, 2, write_buf)) {
+        log_error("  [FAIL] block_write sectors 10-11 failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] block_write 2 sectors at LBA 10 passed");
+    }
+
+    /* 4. Read back and verify integrity */
+    uint8_t read_buf[1024];
+    kmemset(read_buf, 0, sizeof(read_buf));
+
+    if (!block_read(ram_dev, 10, 2, read_buf)) {
+        log_error("  [FAIL] block_read sectors 10-11 failed");
+        all_ok = false;
+    } else if (kmemcmp(write_buf, read_buf, 1024) != 0) {
+        log_error("  [FAIL] Data mismatch after block_read!");
+        all_ok = false;
+    } else {
+        log_info("  [OK] block_read data verified 100% match");
+    }
+
+    /* 5. Bounds checking */
+    if (block_read(ram_dev, 2047, 2, read_buf)) {
+        log_error("  [FAIL] Out-of-bounds read was allowed!");
+        all_ok = false;
+    } else {
+        log_info("  [OK] Out-of-bounds LBA read correctly rejected");
+    }
+
+    if (block_write(ram_dev, 10, 0, write_buf)) {
+        log_error("  [FAIL] Zero-count write was allowed!");
+        all_ok = false;
+    } else {
+        log_info("  [OK] Zero-count write correctly rejected");
+    }
+
+    /* 6. Test Flush */
+    if (!block_flush(ram_dev)) {
+        log_error("  [FAIL] block_flush returned false");
+        all_ok = false;
+    } else {
+        log_info("  [OK] block_flush succeeded");
+    }
+
+    /* 7. Destroy test device */
+    if (!ramdisk_destroy(ram_dev)) {
+        log_error("  [FAIL] ramdisk_destroy returned false");
+        all_ok = false;
+    } else if (block_device_find_by_name("test_ram0") != NULL) {
+        log_error("  [FAIL] Device still present after destroy");
+        all_ok = false;
+    } else {
+        log_info("  [OK] ramdisk_destroy and unregistration clean");
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] BLOCK DEVICE SUBSYSTEM TEST PASSED <<<");
+    } else {
+        log_error(">>> [FAIL] BLOCK DEVICE SUBSYSTEM TEST FAILED <<<");
+    }
+    log_info("==================================================");
+}
+
+/* Diagnostic Test: MBR Parser */
+static void command_mbrtest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info(">>> STARTING MBR PARTITION PARSER TEST <<<");
+    log_info("==================================================");
+
+    bool all_ok = true;
+
+    /* Create a 4 MiB ramdisk (8192 sectors = 4194304 bytes) */
+    struct block_device *disk = ramdisk_create("mbr_disk", 8192ULL * 512, 512);
+    if (disk == NULL) {
+        log_error("  [FAIL] Could not create test disk");
+        return;
+    }
+
+    /* Construct MBR with 2 partitions */
+    uint8_t mbr_sec[512];
+    kmemset(mbr_sec, 0, 512);
+
+    struct mbr_partition_entry *p1 = (struct mbr_partition_entry *)(mbr_sec + 0x1BE);
+    p1->boot_indicator = 0x80; /* Bootable */
+    p1->partition_type = 0x0C; /* FAT32 LBA */
+    p1->start_lba = 2048;
+    p1->sector_count = 2048;
+
+    struct mbr_partition_entry *p2 = (struct mbr_partition_entry *)(mbr_sec + 0x1CE);
+    p2->boot_indicator = 0x00;
+    p2->partition_type = 0x83; /* Linux native */
+    p2->start_lba = 4096;
+    p2->sector_count = 2048;
+
+    /* Signature */
+    mbr_sec[510] = 0x55;
+    mbr_sec[511] = 0xAA;
+
+    block_write(disk, 0, 1, mbr_sec);
+
+    /* Run partition scanner */
+    uint32_t parts = partition_scan(disk);
+    if (parts != 2) {
+        log_errorf("  [FAIL] Expected 2 partitions, found %u", (unsigned int)parts);
+        all_ok = false;
+    } else {
+        log_info("  [OK] partition_scan detected 2 MBR partitions");
+    }
+
+    struct block_device *part1 = block_device_find_by_name("mbr_diskp1");
+    struct block_device *part2 = block_device_find_by_name("mbr_diskp2");
+
+    if (part1 == NULL || part2 == NULL) {
+        log_error("  [FAIL] Sub-block devices mbr_diskp1/mbr_diskp2 not registered!");
+        all_ok = false;
+    } else {
+        log_infof("  [OK] Found %s (Start LBA: %llu, Blocks: %llu)",
+                  part1->name, (unsigned long long)part1->start_lba, (unsigned long long)part1->total_blocks);
+        log_infof("  [OK] Found %s (Start LBA: %llu, Blocks: %llu)",
+                  part2->name, (unsigned long long)part2->start_lba, (unsigned long long)part2->total_blocks);
+
+        /* Write to part1 at LBA 0 */
+        uint8_t pbuf[512];
+        kmemset(pbuf, 0x77, 512);
+        block_write(part1, 0, 1, pbuf);
+
+        /* Read parent disk at LBA 2048 directly */
+        uint8_t parent_read[512];
+        block_read(disk, 2048, 1, parent_read);
+        if (kmemcmp(pbuf, parent_read, 512) != 0) {
+            log_error("  [FAIL] Partition LBA translation offset mismatch!");
+            all_ok = false;
+        } else {
+            log_info("  [OK] Partition offset translation to parent disk verified 100%");
+        }
+    }
+
+    ramdisk_destroy(disk);
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] MBR PARTITION PARSER TEST PASSED <<<");
+    } else {
+        log_error(">>> [FAIL] MBR PARTITION PARSER TEST FAILED <<<");
+    }
+    log_info("==================================================");
+}
+
+/* Diagnostic Test: GPT Parser */
+static void command_gpttest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info(">>> STARTING GPT PARTITION PARSER TEST <<<");
+    log_info("==================================================");
+
+    bool all_ok = true;
+
+    /* Create an 8 MiB ramdisk (16384 sectors = 8388608 bytes) */
+    struct block_device *disk = ramdisk_create("gpt_disk", 16384ULL * 512, 512);
+    if (disk == NULL) {
+        log_error("  [FAIL] Could not create test disk");
+        return;
+    }
+
+    /* 1. Protective MBR at LBA 0 */
+    uint8_t pmbr[512];
+    kmemset(pmbr, 0, 512);
+    struct mbr_partition_entry *p = (struct mbr_partition_entry *)(pmbr + 0x1BE);
+    p->partition_type = 0xEE; /* Protective GPT */
+    p->start_lba = 1;
+    p->sector_count = 16383;
+    pmbr[510] = 0x55;
+    pmbr[511] = 0xAA;
+    block_write(disk, 0, 1, pmbr);
+
+    /* 2. GPT Partition Array at LBA 2 */
+    uint8_t gpt_array[512 * 32]; /* 128 entries of 128 bytes = 16 KiB = 32 sectors */
+    kmemset(gpt_array, 0, sizeof(gpt_array));
+
+    struct gpt_partition_entry *ge = (struct gpt_partition_entry *)gpt_array;
+    /* Basic Data Partition GUID: EBD0A0A2-B9E5-4433-87C0-68B6B72699C7 */
+    ge[0].type_guid[0] = 0xA2; ge[0].type_guid[1] = 0xA0; ge[0].type_guid[2] = 0xD0; ge[0].type_guid[3] = 0xEB;
+    ge[0].type_guid[4] = 0xE5; ge[0].type_guid[5] = 0xB9; ge[0].type_guid[6] = 0x33; ge[0].type_guid[7] = 0x44;
+    ge[0].type_guid[8] = 0x87; ge[0].type_guid[9] = 0xC0; ge[0].type_guid[10] = 0x68; ge[0].type_guid[11] = 0xB6;
+    ge[0].type_guid[12] = 0xB7; ge[0].type_guid[13] = 0x26; ge[0].type_guid[14] = 0x99; ge[0].type_guid[15] = 0xC7;
+
+    ge[0].unique_partition_guid[0] = 0x12; ge[0].unique_partition_guid[1] = 0x34;
+    ge[0].starting_lba = 2048;
+    ge[0].ending_lba = 6143; /* 4096 sectors = 2 MiB */
+    ge[0].attributes = 0;
+
+    block_write(disk, 2, 32, gpt_array);
+    uint32_t array_crc = partition_crc32(gpt_array, 128 * sizeof(struct gpt_partition_entry));
+
+    /* 3. GPT Header at LBA 1 */
+    uint8_t hdr_sec[512];
+    kmemset(hdr_sec, 0, 512);
+    struct gpt_header *hdr = (struct gpt_header *)hdr_sec;
+    kmemcpy(hdr->signature, "EFI PART", 8);
+    hdr->revision = 0x00010000;
+    hdr->header_size = sizeof(struct gpt_header);
+    hdr->header_crc32 = 0;
+    hdr->current_lba = 1;
+    hdr->backup_lba = 16383;
+    hdr->first_usable_lba = 34;
+    hdr->last_usable_lba = 16350;
+    hdr->partition_entries_lba = 2;
+    hdr->num_partition_entries = 128;
+    hdr->size_partition_entry = 128;
+    hdr->partition_array_crc32 = array_crc;
+
+    hdr->header_crc32 = partition_crc32((const uint8_t *)hdr, hdr->header_size);
+    block_write(disk, 1, 1, hdr_sec);
+
+    /* 4. Scan GPT */
+    uint32_t found = partition_scan(disk);
+    if (found != 1) {
+        log_errorf("  [FAIL] Expected 1 GPT partition, detected %u", (unsigned int)found);
+        all_ok = false;
+    } else {
+        log_info("  [OK] GPT Header & CRC32 verification passed, found 1 partition");
+    }
+
+    struct block_device *gpt_part = block_device_find_by_name("gpt_diskp1");
+    if (gpt_part == NULL) {
+        log_error("  [FAIL] gpt_diskp1 sub-device not registered");
+        all_ok = false;
+    } else {
+        log_infof("  [OK] Found %s (Start LBA: %llu, Blocks: %llu, GUID present: %s)",
+                  gpt_part->name, (unsigned long long)gpt_part->start_lba,
+                  (unsigned long long)gpt_part->total_blocks, gpt_part->has_guid ? "YES" : "NO");
+    }
+
+    ramdisk_destroy(disk);
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] GPT PARTITION PARSER TEST PASSED <<<");
+    } else {
+        log_error(">>> [FAIL] GPT PARTITION PARSER TEST FAILED <<<");
+    }
+    log_info("==================================================");
+}
+
+/* Diagnostic Test: Block Cache */
+static void command_cachetest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info(">>> STARTING BLOCK CACHE TEST <<<");
+    log_info("==================================================");
+
+    bool all_ok = true;
+
+    /* Create a 2 MiB ramdisk (4096 sectors = 2097152 bytes) */
+    struct block_device *disk = ramdisk_create("cache_disk", 4096ULL * 512, 512);
+    if (disk == NULL) {
+        log_error("  [FAIL] Could not create cache test disk");
+        return;
+    }
+
+    /* 1. Write 64 sectors through block cache */
+    uint8_t wbuf[512];
+    for (uint32_t i = 0; i < 64; i++) {
+        kmemset(wbuf, (uint8_t)(i + 1), 512);
+        if (!block_cache_write(disk, i, 1, wbuf)) {
+            log_errorf("  [FAIL] block_cache_write failed at LBA %u", (unsigned int)i);
+            all_ok = false;
+            break;
+        }
+    }
+
+    /* 2. Read back 64 sectors from cache */
+    uint8_t rbuf[512];
+    for (uint32_t i = 0; i < 64; i++) {
+        if (!block_cache_read(disk, i, 1, rbuf)) {
+            log_errorf("  [FAIL] block_cache_read failed at LBA %u", (unsigned int)i);
+            all_ok = false;
+            break;
+        }
+        if (rbuf[0] != (uint8_t)(i + 1)) {
+            log_errorf("  [FAIL] Cache read data mismatch at LBA %u", (unsigned int)i);
+            all_ok = false;
+            break;
+        }
+    }
+
+    /* 3. Check stats */
+    struct block_cache_stats stats;
+    block_cache_get_stats(&stats);
+    log_infof("  [OK] Cache Stats - Reads: %llu, Hits: %llu, Misses: %llu, Writes: %llu",
+              (unsigned long long)stats.reads, (unsigned long long)stats.hits,
+              (unsigned long long)stats.misses, (unsigned long long)stats.writes);
+
+    /* 4. Flush cache */
+    if (!block_cache_flush_device(disk)) {
+        log_error("  [FAIL] block_cache_flush_device failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] block_cache_flush_device succeeded");
+    }
+
+    /* Verify backing ramdisk received flushed data */
+    uint8_t raw_check[512];
+    block_read(disk, 10, 1, raw_check);
+    if (raw_check[0] != 11) {
+        log_error("  [FAIL] Direct disk read did not match flushed cache data!");
+        all_ok = false;
+    } else {
+        log_info("  [OK] Direct disk read matches dirty writeback data");
+    }
+
+    block_cache_invalidate_device(disk);
+    ramdisk_destroy(disk);
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] BLOCK CACHE TEST PASSED <<<");
+    } else {
+        log_error(">>> [FAIL] BLOCK CACHE TEST FAILED <<<");
+    }
+    log_info("==================================================");
+}
+
+/* Diagnostic Test: FAT32 Filesystem Engine */
+static void command_fattest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info(">>> STARTING FAT32 FILESYSTEM ENGINE TEST <<<");
+    log_info("==================================================");
+
+    bool all_ok = true;
+
+    /* Create a 16 MiB Ramdisk (32768 sectors of 512 bytes = 16777216 bytes) */
+    struct block_device *disk = ramdisk_create("fat_disk", 32768ULL * 512, 512);
+    if (disk == NULL) {
+        log_error("  [FAIL] Could not create FAT32 test disk");
+        return;
+    }
+
+    /* 1. Format disk as FAT32 */
+    uint8_t bpb_sec[512];
+    kmemset(bpb_sec, 0, 512);
+    struct fat32_bpb *bpb = (struct fat32_bpb *)bpb_sec;
+    bpb->jmp_boot[0] = 0xEB; bpb->jmp_boot[1] = 0x58; bpb->jmp_boot[2] = 0x90;
+    kmemcpy(bpb->oem_name, "MSWIN4.1", 8);
+    bpb->bytes_per_sector = 512;
+    bpb->sectors_per_cluster = 8; /* 4 KiB clusters */
+    bpb->reserved_sector_count = 32;
+    bpb->num_fats = 2;
+    bpb->media = 0xF8;
+    bpb->total_sectors_32 = 32768;
+    bpb->fat_size_32 = 64; /* 64 sectors per FAT */
+    bpb->root_cluster = 2;
+    bpb->fs_info_sector = 1;
+    bpb->boot_signature = 0x29;
+    bpb->volume_id = 0x12345678;
+    kmemcpy(bpb->volume_label, "KOS_FAT32  ", 11);
+    kmemcpy(bpb->fs_type, "FAT32   ", 8);
+    bpb_sec[510] = 0x55;
+    bpb_sec[511] = 0xAA;
+    block_write(disk, 0, 1, bpb_sec);
+
+    /* Initialize FAT tables: cluster 0 = 0x0FFFFFF8, cluster 1 = 0x0FFFFFFF, cluster 2 (root) = 0x0FFFFFFF */
+    uint8_t fat_sec[512];
+    kmemset(fat_sec, 0, 512);
+    uint32_t *fat_entries = (uint32_t *)fat_sec;
+    fat_entries[0] = 0x0FFFFFF8;
+    fat_entries[1] = 0x0FFFFFFF;
+    fat_entries[2] = 0x0FFFFFFF; /* End of root dir chain */
+
+    /* Write FAT 1 & 2 */
+    block_write(disk, 32, 1, fat_sec);
+    block_write(disk, 32 + 64, 1, fat_sec);
+
+    /* Zero root directory cluster (cluster 2 start LBA = 32 + 2*64 = 160) */
+    uint8_t zero_cluster[512 * 8];
+    kmemset(zero_cluster, 0, sizeof(zero_cluster));
+    block_write(disk, 160, 8, zero_cluster);
+
+    /* 2. Mount FAT32 */
+    struct fat32_volume *vol = fat32_mount(disk);
+    if (vol == NULL) {
+        log_error("  [FAIL] fat32_mount failed");
+        all_ok = false;
+        ramdisk_destroy(disk);
+        return;
+    }
+    log_info("  [OK] FAT32 filesystem mounted successfully");
+
+    /* 3. Test File Write (Small File) */
+    const char *test_str = "Hello FAT32 from KOS Kernel!";
+    uint64_t test_len = kstrlen(test_str);
+    if (!fat32_write_file(vol, "HELLO.TXT", (const uint8_t *)test_str, test_len)) {
+        log_error("  [FAIL] fat32_write_file HELLO.TXT failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] fat32_write_file HELLO.TXT passed");
+    }
+
+    /* 4. Test File Read */
+    const uint8_t *read_data = NULL;
+    uint64_t read_size = 0;
+    if (!fat32_read_file(vol, "HELLO.TXT", &read_data, &read_size)) {
+        log_error("  [FAIL] fat32_read_file HELLO.TXT failed");
+        all_ok = false;
+    } else if (read_size != test_len || kmemcmp(read_data, test_str, test_len) != 0) {
+        log_error("  [FAIL] Read data mismatch on HELLO.TXT");
+        all_ok = false;
+    } else {
+        log_infof("  [OK] fat32_read_file verified: '%s' (%llu bytes)",
+                  (const char *)read_data, (unsigned long long)read_size);
+    }
+    if (read_data != NULL && read_size > 0) kfree((void *)read_data);
+
+    /* 5. Test Multi-Cluster File (> 8 KiB across 3 clusters) */
+    uint64_t big_size = 12288;
+    uint8_t *big_buf = (uint8_t *)kmalloc(big_size);
+    if (big_buf != NULL) {
+        for (uint64_t i = 0; i < big_size; i++) {
+            big_buf[i] = (uint8_t)((i * 17) & 0xFF);
+        }
+        if (!fat32_write_file(vol, "BIGFILE.DAT", big_buf, big_size)) {
+            log_error("  [FAIL] Multi-cluster write failed");
+            all_ok = false;
+        } else {
+            log_info("  [OK] Multi-cluster (12 KiB) write passed");
+        }
+
+        const uint8_t *big_read = NULL;
+        uint64_t big_read_size = 0;
+        if (!fat32_read_file(vol, "BIGFILE.DAT", &big_read, &big_read_size)) {
+            log_error("  [FAIL] Multi-cluster read failed");
+            all_ok = false;
+        } else if (big_read_size != big_size || kmemcmp(big_read, big_buf, big_size) != 0) {
+            log_error("  [FAIL] Multi-cluster data integrity mismatch!");
+            all_ok = false;
+        } else {
+            log_info("  [OK] Multi-cluster file verified 100% byte-for-byte");
+        }
+        if (big_read != NULL && big_read_size > 0) kfree((void *)big_read);
+        kfree(big_buf);
+    }
+
+    /* 6. Test Directory Creation & Subdirectory Files */
+    if (!fat32_mkdir(vol, "DOCS")) {
+        log_error("  [FAIL] fat32_mkdir /DOCS failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] fat32_mkdir /DOCS passed");
+    }
+
+    const char *doc_content = "Subdirectory file content test!";
+    if (!fat32_write_file(vol, "DOCS/NOTE.TXT", (const uint8_t *)doc_content, kstrlen(doc_content))) {
+        log_error("  [FAIL] Writing file inside subdirectory failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] Writing file inside subdirectory passed");
+    }
+
+    const uint8_t *sub_read = NULL;
+    uint64_t sub_len = 0;
+    if (!fat32_read_file(vol, "DOCS/NOTE.TXT", &sub_read, &sub_len) || kmemcmp(sub_read, doc_content, sub_len) != 0) {
+        log_error("  [FAIL] Reading file inside subdirectory failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] Reading file inside subdirectory verified");
+    }
+    if (sub_read != NULL && sub_len > 0) kfree((void *)sub_read);
+
+    /* 7. Test Rename & Unlink */
+    if (!fat32_rename(vol, "HELLO.TXT", "GREETING.TXT")) {
+        log_error("  [FAIL] fat32_rename failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] fat32_rename HELLO.TXT -> GREETING.TXT passed");
+    }
+
+    if (!fat32_unlink_file(vol, "GREETING.TXT")) {
+        log_error("  [FAIL] fat32_unlink_file failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] fat32_unlink_file passed");
+    }
+
+    /* 8. Unmount & Cleanup */
+    fat32_unmount(vol);
+    ramdisk_destroy(disk);
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] FAT32 FILESYSTEM ENGINE TEST PASSED <<<");
+    } else {
+        log_error(">>> [FAIL] FAT32 FILESYSTEM ENGINE TEST FAILED <<<");
+    }
+    log_info("==================================================");
+}
+
 static const struct command_entry command_registry[] = {
     { "help", command_help },
     { "clear", command_clear },
@@ -3698,6 +4534,20 @@ static const struct command_entry command_registry[] = {
     { "ls", command_ls },
     { "cat", command_cat },
     { "elfinfo", command_elfinfo },
+    { "fdisk", command_fdisk },
+    { "blkinfo", command_fdisk },
+    { "mount", command_mount },
+    { "umount", command_umount },
+    { "sync", command_sync },
+    { "touch", command_touch },
+    { "mkdir", command_mkdir },
+    { "rm", command_rm },
+    { "mv", command_mv },
+    { "blocktest", command_blocktest },
+    { "mbrtest", command_mbrtest },
+    { "gpttest", command_gpttest },
+    { "cachetest", command_cachetest },
+    { "fattest", command_fattest },
     { "handletest", command_handletest },
     { "waittest", command_waittest },
     { "synctest", command_synctest },

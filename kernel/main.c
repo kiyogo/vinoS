@@ -24,6 +24,14 @@
 #include <kos/task.h>
 #include <kos/vmm.h>
 #include <kos/vfs.h>
+#include <kos/block.h>
+#include <kos/ramdisk.h>
+#include <kos/virtio_blk.h>
+#include <kos/ahci.h>
+#include <kos/block_cache.h>
+#include <kos/partition.h>
+#include <kos/fat32.h>
+#include <kos/volume.h>
 #include <limine.h>
 
 static KOS_NORETURN void kernel_halt(void) {
@@ -333,6 +341,14 @@ KOS_NORETURN void kernel_main(void) {
     log_info(e1000_is_initialized()
         ? "Intel e1000 built-in driver: RX/TX DMA rings initialized."
         : "Intel e1000 built-in driver: no compatible PCI adapter.");
+
+    /* Initialize storage and block device subsystem */
+    block_subsystem_init();
+    ramdisk_init();
+    virtio_blk_initialize();
+    ahci_initialize();
+    block_cache_init();
+
     const struct limine_file *initramfs_module = find_initramfs_module();
     if (initramfs_module == 0 || !initramfs_initialize(initramfs_module->address,
             initramfs_module->size)
@@ -345,6 +361,10 @@ KOS_NORETURN void kernel_main(void) {
     log_info_u64("VFS mounted volumes: ", vfs_volume_count());
     log_info_u64("C: initramfs files: ", vfs_file_count_on_volume('C'));
     log_info_u64("D: RAM volume files: ", vfs_file_count_on_volume('D'));
+
+    /* Initialize volume manager to auto-discover and mount storage partitions */
+    volume_manager_init();
+
     if (!vfs_volume_self_test()) {
         log_error("VFS multi-volume self-test failed.");
         kernel_halt();
@@ -416,6 +436,12 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("pftest");
     (void)kernel_command_execute("panictest");
     (void)kernel_command_execute("kstress");
+    (void)kernel_command_execute("blocktest");
+    (void)kernel_command_execute("mbrtest");
+    (void)kernel_command_execute("gpttest");
+    (void)kernel_command_execute("cachetest");
+    (void)kernel_command_execute("fattest");
+    (void)kernel_command_execute("fdisk");
     if (!terminal_initialize()) {
         log_error("Kernel terminal initialization failed.");
         kernel_halt();

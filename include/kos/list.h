@@ -60,4 +60,23 @@ static inline bool list_empty(const struct list_head *head) {
 #define list_first_entry(ptr, type, member) \
     list_entry((ptr)->next, type, member)
 
+#define list_last_entry(ptr, type, member) \
+    list_entry((ptr)->prev, type, member)
+
+#define list_for_each(pos, head) \
+    for (pos = (head)->next; pos != (head); pos = pos->next)
+
+#define list_for_each_prev(pos, head) \
+    for (pos = (head)->prev; pos != (head); pos = pos->prev)
+
+#define list_for_each_entry(pos, head, member) \
+    for (pos = list_entry((head)->next, __typeof__(*pos), member); \
+         &pos->member != (head); \
+         pos = list_entry(pos->member.next, __typeof__(*pos), member))
+
+#define list_for_each_entry_reverse(pos, head, member) \
+    for (pos = list_entry((head)->prev, __typeof__(*pos), member); \
+         &pos->member != (head); \
+         pos = list_entry(pos->member.prev, __typeof__(*pos), member))
+
 #endif /* KOS_LIST_H */

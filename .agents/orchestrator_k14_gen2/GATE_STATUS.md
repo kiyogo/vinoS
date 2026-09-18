@@ -53,3 +53,17 @@ Gate Result: **PASS**
 | auditor_m4_1_gen2 | teamwork_preview_auditor | CLEAN | handoff.md |
 
 Gate Result: **PASS**
+
+---
+
+## Gate — Milestone M5 (Iteration 1)
+| Agent | Role | Verdict | Source |
+|-------|------|---------|--------|
+| worker_m5_gen2_1 | teamwork_preview_worker | DONE (build passed, 6/6 QEMU tests passed) | handoff.md |
+| reviewer_m5_1_gen2 | teamwork_preview_reviewer | APPROVE | handoff.md |
+| reviewer_m5_2_gen2 | teamwork_preview_reviewer | APPROVE | handoff.md |
+| challenger_m5_1_gen2 | teamwork_preview_challenger | APPROVE | handoff.md |
+| challenger_m5_2_gen2 | teamwork_preview_challenger | APPROVE | handoff.md |
+| auditor_m5_1_gen2 | teamwork_preview_auditor | CLEAN | handoff.md |
+
+Gate Result: **PASS**

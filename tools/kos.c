@@ -23,12 +23,15 @@
 static const char *const c_sources[] = {
     "boot/limine_requests.c", "arch/x86_64/cpu_control.c", "arch/x86_64/descriptors.c",
     "arch/x86_64/interrupts.c", "arch/x86_64/pci.c", "arch/x86_64/pic.c",
-    "drivers/driver.c", "drivers/e1000.c", "drivers/framebuffer.c", "drivers/keyboard.c", "drivers/serial.c",
-    "drivers/timer.c", "fs/elf.c", "fs/initramfs.c", "fs/ramfs.c", "fs/vfs.c", "kernel/command.c",
-    "kernel/console.c", "kernel/log.c", "kernel/main.c", "kernel/mutex.c", "kernel/panic.c", "kernel/spinlock.c", "kernel/symbol.c",
-    "kernel/syscall.c", "kernel/system.c", "kernel/process.c", "kernel/task.c", "kernel/object.c", "kernel/handle.c", "kernel/wait.c",
+    "drivers/ahci.c", "drivers/block.c", "drivers/driver.c", "drivers/e1000.c", "drivers/framebuffer.c",
+    "drivers/keyboard.c", "drivers/ramdisk.c", "drivers/serial.c", "drivers/timer.c", "drivers/virtio_blk.c",
+    "fs/block_cache.c", "fs/elf.c", "fs/fat32.c", "fs/initramfs.c", "fs/partition.c", "fs/ramfs.c", "fs/vfs.c", "fs/volume.c",
+    "kernel/command.c", "kernel/console.c", "kernel/log.c", "kernel/main.c", "kernel/mutex.c",
+    "kernel/panic.c", "kernel/spinlock.c", "kernel/symbol.c", "kernel/syscall.c", "kernel/system.c",
+    "kernel/process.c", "kernel/task.c", "kernel/object.c", "kernel/handle.c", "kernel/wait.c",
     "lib/crypto.c", "lib/memory.c",
-    "net/arp.c", "net/dhcp.c", "net/dns.c", "net/ethernet.c", "net/http.c", "net/httpd.c", "net/icmp.c", "net/ipv4.c", "net/socket.c", "net/tcp.c", "net/tls.c",
+    "net/arp.c", "net/dhcp.c", "net/dns.c", "net/ethernet.c", "net/http.c", "net/httpd.c", "net/icmp.c",
+    "net/ipv4.c", "net/socket.c", "net/tcp.c", "net/tls.c",
     "kernel/terminal.c", "mm/heap.c", "mm/pmm.c", "mm/vmm.c",
 };
 

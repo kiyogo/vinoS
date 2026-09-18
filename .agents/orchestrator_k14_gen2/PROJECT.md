@@ -32,7 +32,7 @@ Milestone K14 implements the user-mode execution and process lifecycle layer for
 | M2 | VMM Address Space & ELF64 Loader | vmm_create/destroy_address_space, elf_load_binary, user stack & guard page, System V ABI | M1 | DONE |
 | M3 | Ring 3 Transition & Fault Recovery | enter_userspace (iretq), user page fault & exception routing to process_exit | M1, M2 | DONE |
 | M4 | Process Lifecycle & Reclamation | process_exec, parent/child hierarchy, zombie reaping, full resource cleanup | M2, M3 | DONE |
-| M5 | Automated Build & QEMU E2E Verification | usertest command, acceptance criteria validation, QEMU test runs | M1, M2, M3, M4 | IN_PROGRESS |
+| M5 | Automated Build & QEMU E2E Verification | usertest command, acceptance criteria validation, QEMU test runs | M1, M2, M3, M4 | DONE |
 
 ## Interface Contracts
 
