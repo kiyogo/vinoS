@@ -4,9 +4,8 @@ KOS is an independent x86_64 desktop operating-system project. Its long-term goa
 
 ## Key Highlights
 
-- Aore AI OS: Dedicated system architecture for AI agents to run and control the operating system natively.
-- Windows Drive System: Windows style drive letters like C and D for easy use and future Windows software support.
-- Interface Installer: Choose custom desktop environments downloaded from the network or use the default offline interface during installation.
+- Aore AI OS: Dedicated system architecture for AI agents to run and control the operating system natively, near future goal.
+- Interface Installer: Choose custom desktop environments downloaded from the network or use the default offline interface during installation, near future goal.
 
 ## Current Features
 
