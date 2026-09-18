@@ -84,13 +84,19 @@ bool qa_run_regression_suite(void) {
     qa_resource_snapshot_verify(&snap2, "regression_path_traversal");
 
     /* Regression 3: Multi-core spinlock re-entrancy & contention */
-    log_info("[regression] 3. Verifying Spinlock IRQ-save re-entrancy...");
+    log_info("[regression] 3. Verifying Spinlock IRQ-save & Try-lock...");
     struct qa_resource_snapshot snap3;
     qa_resource_snapshot_take(&snap3);
     kos_spinlock_t lk = SPINLOCK_INIT;
     uint64_t f1 = spinlock_lock_irqsave(&lk);
-    uint64_t f2 = spinlock_lock_irqsave(&lk);
-    spinlock_unlock_irqrestore(&lk, f2);
+    if (!spinlock_is_locked(&lk)) {
+        log_error("  [FAIL] Spinlock was not marked locked after lock_irqsave!");
+        all_ok = false;
+    }
+    if (spinlock_try_lock(&lk)) {
+        log_error("  [FAIL] spinlock_try_lock succeeded on already locked spinlock!");
+        all_ok = false;
+    }
     spinlock_unlock_irqrestore(&lk, f1);
     if (spinlock_is_locked(&lk)) {
         log_error("  [FAIL] Spinlock remained locked after restore!");

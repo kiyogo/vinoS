@@ -18,7 +18,7 @@ cmd = [
     '-drive', 'if=pflash,format=raw,file=' + VARS,
     '-drive', 'format=raw,file=fat:rw:build/esp',
     '-serial', 'stdio', '-monitor', 'none', '-no-reboot',
-    '-netdev', 'user,id=kosnet,ipv4=on,ipv6=off,hostfwd=tcp::8080-:80',
+    '-netdev', 'user,id=kosnet,ipv4=on,ipv6=off,hostfwd=tcp::18080-:80',
     '-device', 'e1000,netdev=kosnet,mac=52:54:00:12:34:56',
     '-display', 'none'
 ]
