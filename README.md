@@ -25,14 +25,5 @@ KOS is an independent x86_64 desktop operating-system project. Its long-term goa
 - Windows application compatibility layer
 - Online desktop interface installer
 
-## Documentation
-
-- [Scope and Roadmap](docs/roadmap.md)
-- [Product Vision](docs/product-vision.md)
-- [VFS Volumes](docs/vfs-volumes.md)
-- [Networking Roadmap](docs/networking-roadmap.md)
-- [Architecture](docs/architecture.md)
-- [Boot Process](docs/boot-process.md)
-- [Environment Setup](docs/environment.md)
 
 
