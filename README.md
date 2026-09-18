@@ -28,23 +28,6 @@ KOS is an independent x86_64 desktop operating-system project. Its long-term goa
 - Online desktop interface installer
 - Native web browser engine
 
-## Target
-
-- Architecture: x86_64
-- Firmware: UEFI
-- Bootloader: Limine
-- Emulator: QEMU
-
-## Build and Run
-
-```sh
-clang -std=c17 -O2 -Wall -Wextra -Werror tools/kos.c -o tools/kos-tool.exe
-tools\kos-tool.exe bootstrap-limine
-tools\kos-tool.exe bootstrap-assets
-tools\kos-tool.exe build
-tools\kos-tool.exe run
-```
-
 ## Documentation
 
 - [Scope and Roadmap](docs/roadmap.md)
