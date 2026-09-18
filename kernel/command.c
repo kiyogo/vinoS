@@ -4048,7 +4048,22 @@ static void command_blocktest(const char *arguments) {
         log_info("  [OK] block_flush succeeded");
     }
 
-    /* 7. Destroy test device */
+    /* 7. Test Universal DMA Page Allocation */
+    void *dma_virt = NULL;
+    uint64_t dma_phys = 0;
+    if (!block_alloc_dma_pages(2, &dma_virt, &dma_phys) || dma_virt == NULL || dma_phys == 0) {
+        log_error("  [FAIL] block_alloc_dma_pages failed");
+        all_ok = false;
+    } else if (((uintptr_t)dma_virt & 4095) != 0 || (dma_phys & 4095) != 0) {
+        log_error("  [FAIL] DMA buffer is not 4096-byte aligned");
+        all_ok = false;
+    } else {
+        log_infof("  [OK] block_alloc_dma_pages 2 pages (phys=0x%llx, virt=%p)",
+                  (unsigned long long)dma_phys, dma_virt);
+        block_free_dma_pages(dma_virt, dma_phys, 2);
+    }
+
+    /* 8. Destroy test device */
     if (!ramdisk_destroy(ram_dev)) {
         log_error("  [FAIL] ramdisk_destroy returned false");
         all_ok = false;

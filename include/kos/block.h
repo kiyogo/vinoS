@@ -92,4 +92,8 @@ bool block_read(struct block_device *dev, uint64_t lba, uint32_t count, void *bu
 bool block_write(struct block_device *dev, uint64_t lba, uint32_t count, const void *buffer);
 bool block_flush(struct block_device *dev);
 
+/* Universal DMA Allocation Helpers for Block Drivers (AHCI, VirtIO, etc.) */
+bool block_alloc_dma_pages(uint32_t count, void **out_virt, uint64_t *out_phys);
+void block_free_dma_pages(void *virt, uint64_t phys, uint32_t count);
+
 #endif /* KOS_BLOCK_H */

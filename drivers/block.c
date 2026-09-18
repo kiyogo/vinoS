@@ -6,7 +6,9 @@
 #include <kos/heap.h>
 #include <kos/log.h>
 #include <kos/memory.h>
+#include <kos/pmm.h>
 #include <kos/spinlock.h>
+#include <kos/vmm.h>
 
 static struct block_device block_devices[BLOCK_MAX_DEVICES];
 static struct list_head block_device_list = LIST_HEAD_INIT(block_device_list);
@@ -367,4 +369,30 @@ bool block_flush(struct block_device *dev) {
         return dev->ops->flush(dev);
     }
     return true;
+}
+
+bool block_alloc_dma_pages(uint32_t count, void **out_virt, uint64_t *out_phys) {
+    if (count == 0 || out_virt == NULL || out_phys == NULL) {
+        return false;
+    }
+    uint64_t phys = pmm_alloc_pages((uint64_t)count);
+    if (phys == 0) {
+        return false;
+    }
+    void *virt = vmm_physical_to_virtual(phys);
+    if (virt == NULL) {
+        pmm_free_pages(phys, (uint64_t)count);
+        return false;
+    }
+    memset(virt, 0, (size_t)count * 4096);
+    *out_virt = virt;
+    *out_phys = phys;
+    return true;
+}
+
+void block_free_dma_pages(void *virt, uint64_t phys, uint32_t count) {
+    (void)virt;
+    if (phys != 0 && count > 0) {
+        pmm_free_pages(phys, (uint64_t)count);
+    }
 }

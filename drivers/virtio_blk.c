@@ -85,24 +85,23 @@ struct virtio_blk_device {
     uint16_t queue_size;
     uint16_t last_used_idx;
 
-    /* Single page DMA queue structures */
-    void *queue_raw;
-    uint8_t *queue_mem;
+    /* 2 contiguous pages (8192 bytes) DMA queue structures */
+    void *queue_virt;
     uint64_t queue_phys;
 
     struct vring_desc *desc;
     struct vring_avail *avail;
     struct vring_used *used;
 
-    /* Request header and status DMA memory */
-    void *req_raw;
+    /* Request header and status DMA memory (1 page) */
+    void *req_virt;
     struct virtio_blk_req_hdr *req_hdr;
     uint64_t req_hdr_phys;
     volatile uint8_t *status_byte;
     uint64_t status_byte_phys;
 
-    /* Bounce buffer for aligned DMA transfers */
-    void *bounce_raw;
+    /* Bounce buffer for aligned DMA transfers (16 pages = 64 KiB = 128 sectors) */
+    void *bounce_virt;
     uint8_t *bounce_buffer;
     uint64_t bounce_phys;
     uint32_t bounce_capacity_blocks;
@@ -114,32 +113,6 @@ struct virtio_blk_device {
 #define VIRTIO_BLK_MAX_DEVICES 4
 static struct virtio_blk_device virtio_devices[VIRTIO_BLK_MAX_DEVICES];
 static uint32_t virtio_device_count = 0;
-
-/* Helper: Allocate contiguous page for DMA */
-static bool virtio_alloc_dma_page(uint64_t size, void **raw_out, uint8_t **virt_out, uint64_t *phys_out) {
-    if (raw_out == NULL || virt_out == NULL || phys_out == NULL || size == 0) {
-        return false;
-    }
-    uint8_t *raw = (uint8_t *)kmalloc(size + 4096);
-    if (raw == NULL) {
-        return false;
-    }
-    uint64_t aligned = ((uint64_t)(uintptr_t)raw + 4095) & ~4095ULL;
-    uint64_t first_phys;
-    uint64_t last_phys;
-    if (!vmm_query_page(aligned, &first_phys, 0) ||
-        !vmm_query_page(aligned + size - 1, &last_phys, 0) ||
-        (first_phys + size - 1 != last_phys)) {
-        kfree(raw);
-        return false;
-    }
-
-    *raw_out = raw;
-    *virt_out = (uint8_t *)(uintptr_t)aligned;
-    *phys_out = first_phys;
-    kmemset(*virt_out, 0, size);
-    return true;
-}
 
 static bool virtio_blk_submit_io(struct virtio_blk_device *vdev, uint32_t type, uint64_t lba, uint32_t count, void *buffer) {
     uint64_t flags = spinlock_lock_irqsave(&vdev->lock);
@@ -316,36 +289,38 @@ static bool virtio_blk_probe_pci(const struct pci_device *pci) {
     vdev->queue_size = qsize > 128 ? 128 : qsize;
     vdev->last_used_idx = 0;
 
-    /* 5. Allocate DMA memory for Virtqueue */
-    /* Layout: desc (16*N) + avail (4+2*N) + padding to 4096 + used (4+8*N) <= 4096 */
-    if (!virtio_alloc_dma_page(4096, &vdev->queue_raw, &vdev->queue_mem, &vdev->queue_phys)) {
-        log_error("[virtio-blk] Failed to allocate virtqueue DMA memory");
+    /* 5. Allocate 2 DMA pages for Virtqueue (8192 bytes) */
+    if (!block_alloc_dma_pages(2, &vdev->queue_virt, &vdev->queue_phys)) {
+        log_error("[virtio-blk] Failed to allocate virtqueue DMA pages");
         return false;
     }
 
-    vdev->desc = (struct vring_desc *)vdev->queue_mem;
-    vdev->avail = (struct vring_avail *)(vdev->queue_mem + (16 * vdev->queue_size));
-    /* Used ring starts on 4096 boundary or right after avail */
-    vdev->used = (struct vring_used *)(vdev->queue_mem + 2048);
+    vdev->desc = (struct vring_desc *)vdev->queue_virt;
+    vdev->avail = (struct vring_avail *)((uint8_t *)vdev->queue_virt + (16 * vdev->queue_size));
+    vdev->used = (struct vring_used *)((uint8_t *)vdev->queue_virt + 4096);
 
     /* Program queue address into PFN */
     io_out32(io_base + VIRTIO_REG_QUEUE_ADDRESS, (uint32_t)(vdev->queue_phys >> 12));
 
-    /* 6. Allocate DMA memory for request header and status */
-    if (!virtio_alloc_dma_page(4096, &vdev->req_raw, (uint8_t **)&vdev->req_hdr, &vdev->req_hdr_phys)) {
+    /* 6. Allocate DMA memory for request header and status (1 page) */
+    if (!block_alloc_dma_pages(1, &vdev->req_virt, &vdev->req_hdr_phys)) {
         log_error("[virtio-blk] Failed to allocate request DMA memory");
+        block_free_dma_pages(vdev->queue_virt, vdev->queue_phys, 2);
         return false;
     }
+    vdev->req_hdr = (struct virtio_blk_req_hdr *)vdev->req_virt;
     vdev->status_byte = (volatile uint8_t *)((uint8_t *)vdev->req_hdr + 256);
     vdev->status_byte_phys = vdev->req_hdr_phys + 256;
 
-    /* 7. Allocate 64 KiB bounce buffer (128 sectors) */
+    /* 7. Allocate 64 KiB bounce buffer (16 pages = 128 sectors) */
     vdev->bounce_capacity_blocks = 128;
-    uint64_t bounce_size = vdev->bounce_capacity_blocks * BLOCK_DEFAULT_SECTOR_SIZE;
-    if (!virtio_alloc_dma_page(bounce_size, &vdev->bounce_raw, &vdev->bounce_buffer, &vdev->bounce_phys)) {
+    if (!block_alloc_dma_pages(16, &vdev->bounce_virt, &vdev->bounce_phys)) {
         log_error("[virtio-blk] Failed to allocate bounce buffer DMA memory");
+        block_free_dma_pages(vdev->req_virt, vdev->req_hdr_phys, 1);
+        block_free_dma_pages(vdev->queue_virt, vdev->queue_phys, 2);
         return false;
     }
+    vdev->bounce_buffer = (uint8_t *)vdev->bounce_virt;
 
     /* 8. Set DRIVER_OK status */
     io_out8(io_base + VIRTIO_REG_DEVICE_STATUS,

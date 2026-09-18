@@ -46,29 +46,19 @@ static struct ahci_port_device ahci_devices[AHCI_MAX_DEV_INSTANCES];
 static uint32_t ahci_device_num = 0;
 
 static bool ahci_alloc_dma(uint64_t size, uint64_t alignment, void **raw_out, uint8_t **virt_out, uint64_t *phys_out) {
+    (void)alignment;
     if (raw_out == NULL || virt_out == NULL || phys_out == NULL || size == 0) {
         return false;
     }
-    if (alignment < 4096) alignment = 4096;
-
-    uint8_t *raw = (uint8_t *)kmalloc(size + alignment);
-    if (raw == NULL) {
+    uint32_t pages = (uint32_t)((size + 4095) / 4096);
+    void *virt = NULL;
+    uint64_t phys = 0;
+    if (!block_alloc_dma_pages(pages, &virt, &phys)) {
         return false;
     }
-    uint64_t aligned = ((uint64_t)(uintptr_t)raw + alignment - 1) & ~(alignment - 1);
-    uint64_t first_phys;
-    uint64_t last_phys;
-    if (!vmm_query_page(aligned, &first_phys, 0) ||
-        !vmm_query_page(aligned + size - 1, &last_phys, 0) ||
-        (first_phys + size - 1 != last_phys)) {
-        kfree(raw);
-        return false;
-    }
-
-    *raw_out = raw;
-    *virt_out = (uint8_t *)(uintptr_t)aligned;
-    *phys_out = first_phys;
-    kmemset(*virt_out, 0, size);
+    *raw_out = virt;
+    *virt_out = (uint8_t *)virt;
+    *phys_out = phys;
     return true;
 }
 
