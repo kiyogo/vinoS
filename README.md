@@ -1,6 +1,6 @@
 # KOS vinoS
 
-KOS is an independent x86_64 desktop operating system.
+KOS is an independent x86_64 desktop operating-system project. Its long-term goal is a polished graphical OS in the broad category of macOS, Windows, and desktop Linux; it is not a clone of, nor binary-compatible with, any of them.
 
 ## Key Highlights
 
