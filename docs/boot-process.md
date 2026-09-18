@@ -1,32 +1,14 @@
-# Planned boot process
+# KOS Boot Process
 
-This document describes the intended flow for Phase 2 onward. It records the
-contract for the code before that code exists.
+KOS uses the Limine bootloader under UEFI to boot the 64-bit kernel ELF image.
 
-```text
-QEMU
-  -> UEFI firmware
-    -> Limine boot manager
-      -> loads the KOS ELF kernel
-        -> architecture entry stub establishes the initial stack
-          -> kernel_main receives boot information
-            -> serial logger
-            -> framebuffer console
-            -> CPU tables and exception handlers
-            -> memory managers
-            -> timer and keyboard drivers
-            -> kernel debug console
-```
+## Boot Sequence
 
-## Boot information required from Limine
-
-- Framebuffer location, dimensions, pitch, and pixel format.
-- UEFI memory map with usable and reserved regions.
-- Kernel physical/virtual addresses and loaded image bounds.
-- HHDM offset if the selected Limine protocol exposes one.
-
-## Early constraints
-
-Before paging and the heap are explicitly initialized, code must not assume that
-dynamic memory allocation, normal C runtime initialization, or device drivers
-exist. Early logs must use a static serial implementation.
+1. Firmware Init: UEFI firmware discovers ESP partition and loads Limine bootloader.
+2. Kernel Handover: Limine parses boot configuration, maps kernel ELF into high memory, and provides boot information requests.
+3. Early Core Setup: Kernel initializes serial output, text console, and GDT and IDT descriptor tables.
+4. Memory Setup: Bitmap frame allocator initializes physical RAM. Paging and kernel heap allocator start up.
+5. Hardware Discovery: ACPI tables are parsed. APIC and IOAPIC controllers are initialized along with PCI device probing.
+6. Multiprocessing: Application Processors are brought online across available CPU cores.
+7. Drivers and Storage: Storage controllers and network interfaces initialize. Block devices and volumes are mounted.
+8. Scheduler and Userspace: Preemptive multitasking scheduler starts and launches the initial userspace processes.

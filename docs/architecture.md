@@ -1,51 +1,32 @@
-# KOS v0.1 architecture
+# KOS Architecture
 
-## Design intent
+KOS is a 64-bit monolithic operating system designed for x86_64 systems running UEFI firmware.
 
-KOS is an educational, command-line-first kernel. Early development favors
-observability and simple, correct boundaries over feature count. Every subsystem
-must be able to emit diagnostic logs to the serial console.
+## Core Subsystems
 
-## Platform decisions
+### Memory Management
+- Physical Memory Manager: Frame allocation using bitmap tracking.
+- Virtual Memory Manager: Four-level paging with PML4, supervisor protection, and non-executable page enforcement.
+- Kernel Heap: Dynamic memory allocator with slab caching and memory recycling.
 
-| Concern | Decision | Reason |
-| --- | --- | --- |
-| CPU | x86_64 | Well documented and fully supported by QEMU. |
-| Firmware | UEFI | Modern, deterministic virtual firmware path. |
-| Bootloader | Limine | It handles firmware/ELF loading and passes framebuffer and memory-map data. |
-| Kernel model | Monolithic | Keeps the first kernel small and reduces early IPC complexity. |
-| Primary language | Freestanding C | Direct control of hardware and a small runtime surface. |
-| Assembly | Minimal x86_64 Assembly | Used only where C cannot safely express the operation. |
-| Main test target | QEMU | Enables fast, reproducible testing before real hardware. |
+### Multitasking and Scheduling
+- Multiprocessing: Symmetric Multiprocessing support for multicore CPUs via APIC and IOAPIC.
+- Thread Scheduler: Preemptive round-robin scheduler managing kernel and user threads.
+- Synchronization: Spinlocks, mutexes, and wait queues for concurrency control.
 
-## Layering
+### Userspace and Security
+- Ring 3 Isolation: Hardware enforced separation between kernel space and user space.
+- Fast Syscall Dispatch: Hardware SYSCALL and SYSRET instructions with user pointer verification.
+- ELF Loader: Execution of 64-bit ELF user binaries.
 
-```text
-QEMU + UEFI firmware
-        |
-     Limine
-        |
-  boot protocol boundary
-        |
- kernel core ---- arch/x86_64
-   |       \         |
- memory    drivers   interrupts/timer
-   |          |
-   +---- kernel debug console
-```
+### Storage and Filesystem
+- Block Device Drivers: AHCI SATA, NVMe, VirtIO Block, and RAM disk.
+- Partition Support: MBR and GPT partition table decoding.
+- Caching: LRU block cache layer for high throughput block access.
+- Volume Manager: Drive letter assignment for Windows style paths.
+- Filesystems: FAT32 read and write engine, Initramfs, and RAMFS.
 
-The debug console belongs to the kernel in v0.1. It is deliberately not treated
-as user space. A later version may replace it with a terminal emulator and shell.
-
-## Memory policy for v0.1
-
-- Page size: 4 KiB.
-- The physical memory manager owns only frames marked usable by the boot memory map.
-- Kernel image, bootloader-owned regions, framebuffer, and firmware-reserved areas
-  are never allocated as free frames.
-- Dynamic allocations are kernel-only; no user address space exists in v0.1.
-
-## Error policy
-
-An unrecoverable kernel condition enters `panic`: write a concise reason and any
-available CPU state to serial and framebuffer, then halt. Silent hangs are bugs.
+### Network and Cryptography
+- Network Driver: Intel e1000 Gigabit Ethernet PCI driver.
+- Network Stack: IPv4, Ethernet, ARP, ICMP, DHCP, DNS, UDP, and TCP.
+- Web and Security: HTTP and HTTPS client, lightweight HTTP daemon, TLS 1.3 record layer, X509 certificates, and AES cryptographic primitives.
