@@ -5,15 +5,18 @@
 #include <kos/log.h>
 #include <kos/net.h>
 #include <kos/timer.h>
+#include <kos/tls.h>
 
 enum {
     HTTP_MAX_REDIRECTS = 3,
     HTTP_DEFAULT_PORT = 80,
+    HTTPS_DEFAULT_PORT = 443,
     HTTP_MAX_HOST = 64,
     HTTP_MAX_PATH = 256,
 };
 
 struct parsed_url {
+    bool is_https;
     char host[HTTP_MAX_HOST];
     uint16_t port;
     char path[HTTP_MAX_PATH];
@@ -84,8 +87,13 @@ static bool parse_http_url(const char *url, struct parsed_url *parsed) {
         return false;
     }
 
+    parsed->is_https = false;
     const char *p = url;
-    if (str_starts_with_case_insensitive(p, "http://")) {
+    if (str_starts_with_case_insensitive(p, "https://")) {
+        parsed->is_https = true;
+        p += 8;
+    } else if (str_starts_with_case_insensitive(p, "http://")) {
+        parsed->is_https = false;
         p += 7;
     }
 
@@ -98,7 +106,7 @@ static bool parse_http_url(const char *url, struct parsed_url *parsed) {
         return false;
     }
 
-    parsed->port = HTTP_DEFAULT_PORT;
+    parsed->port = parsed->is_https ? HTTPS_DEFAULT_PORT : HTTP_DEFAULT_PORT;
     if (*p == ':') {
         ++p;
         uint32_t port_val = 0;
@@ -239,6 +247,17 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
         return false;
     }
 
+    struct net_tls_session tls;
+    bool use_tls = parsed->is_https || parsed->port == HTTPS_DEFAULT_PORT;
+    if (use_tls) {
+        net_tls_session_initialize(&tls, parsed->host, false);
+        enum net_tls_error terr = net_tls_client_handshake(&tls, sock, timer_frequency_hz() * 5);
+        if (terr != NET_TLS_ERROR_NONE) {
+            tcp_close(sock);
+            return false;
+        }
+    }
+
     /* Build HTTP/1.1 request */
     char req[512];
     uint64_t r_pos = 0;
@@ -248,7 +267,9 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
     const char *part2 = " HTTP/1.1\r\nHost: ";
     for (uint64_t i = 0; part2[i] != '\0'; ++i) req[r_pos++] = part2[i];
     for (uint64_t i = 0; parsed->host[i] != '\0'; ++i) req[r_pos++] = parsed->host[i];
-    if (parsed->port != HTTP_DEFAULT_PORT) {
+
+    uint16_t default_port = use_tls ? HTTPS_DEFAULT_PORT : HTTP_DEFAULT_PORT;
+    if (parsed->port != default_port) {
         req[r_pos++] = ':';
         uint32_t p_val = parsed->port;
         uint32_t p_digits = 0;
@@ -265,8 +286,15 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
     for (uint64_t i = 0; part3[i] != '\0'; ++i) req[r_pos++] = part3[i];
     req[r_pos] = '\0';
 
-    int sent = tcp_send(sock, (const uint8_t *)req, r_pos);
+    int sent = 0;
+    if (use_tls) {
+        sent = net_tls_send(&tls, sock, (const uint8_t *)req, r_pos);
+    } else {
+        sent = tcp_send(sock, (const uint8_t *)req, r_pos);
+    }
+
     if (sent <= 0) {
+        if (use_tls) net_tls_close(&tls, sock);
         tcp_close(sock);
         return false;
     }
@@ -274,7 +302,13 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
     /* Receive full response */
     uint64_t total_read = 0;
     while (total_read + 1 < capacity) {
-        int r = tcp_receive(sock, (uint8_t *)&response_buffer[total_read], capacity - total_read - 1);
+        int r = 0;
+        if (use_tls) {
+            r = net_tls_recv(&tls, sock, (uint8_t *)&response_buffer[total_read], capacity - total_read - 1);
+        } else {
+            r = tcp_receive(sock, (uint8_t *)&response_buffer[total_read], capacity - total_read - 1);
+        }
+
         if (r <= 0) {
             break;
         }
@@ -311,6 +345,10 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
         }
     }
     response_buffer[total_read] = '\0';
+
+    if (use_tls) {
+        net_tls_close(&tls, sock);
+    }
     tcp_close(sock);
 
     if (total_read == 0) {
@@ -405,7 +443,7 @@ bool net_http_get(const char *url, char *response_buffer, uint64_t capacity, uin
             /* If redirect target is relative path, prepend host */
             if (redirect_location[0] == '/') {
                 uint64_t p_len = 0;
-                const char *prefix = "http://";
+                const char *prefix = parsed.is_https ? "https://" : "http://";
                 for (uint64_t i = 0; prefix[i] != '\0'; ++i) current_url[p_len++] = prefix[i];
                 for (uint64_t i = 0; parsed.host[i] != '\0'; ++i) current_url[p_len++] = parsed.host[i];
                 for (uint64_t i = 0; redirect_location[i] != '\0'; ++i) current_url[p_len++] = redirect_location[i];

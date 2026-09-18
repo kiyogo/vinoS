@@ -41,23 +41,23 @@ enter_userspace:
     ; Disable interrupts while preparing the iretq stack frame
     cli
 
-    ; Load data segment registers (DS, ES, FS, GS) with 0x33 (GDT_USER_DS)
-    mov ax, 0x33
+    ; Load data segment registers (DS, ES, FS, GS) with 0x2b (GDT_USER_DS)
+    mov ax, 0x2b
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
 
     ; Push 5 quadwords for iretq:
-    ;   [rsp + 32] SS:     0x33 (GDT_USER_DS)
+    ;   [rsp + 32] SS:     0x2b (GDT_USER_DS)
     ;   [rsp + 24] RSP:    rsi  (user_rsp)
     ;   [rsp + 16] RFLAGS: 0x202 (IF=1, bit 1=1)
-    ;   [rsp + 8]  CS:     0x2b (GDT_USER_CS)
+    ;   [rsp + 8]  CS:     0x33 (GDT_USER_CS)
     ;   [rsp + 0]  RIP:    rdi  (entry_point)
-    push qword 0x33
+    push qword 0x2b
     push rsi
     push qword 0x202
-    push qword 0x2b
+    push qword 0x33
     push rdi
 
     ; Zero all general-purpose registers to prevent kernel information leakage

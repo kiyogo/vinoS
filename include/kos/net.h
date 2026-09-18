@@ -76,7 +76,17 @@ struct net_arp_cache_entry {
     uint32_t ipv4_address;
     uint8_t mac_address[NET_ETHERNET_ADDRESS_SIZE];
     uint64_t learned_at_tick;
+    uint64_t expires_at_tick;
 };
+
+void net_arp_cache_prune(void);
+void net_arp_receive(const uint8_t source[NET_ETHERNET_ADDRESS_SIZE], const uint8_t *payload, uint64_t size);
+void net_ipv4_receive(const uint8_t source[NET_ETHERNET_ADDRESS_SIZE], const uint8_t *packet, uint64_t size);
+bool net_icmp_send_dest_unreachable(uint32_t destination, uint8_t code,
+    const uint8_t *original_ipv4_and_payload, uint64_t original_len);
+bool net_icmp_send_time_exceeded(uint32_t destination, uint8_t code,
+    const uint8_t *original_ipv4_and_payload, uint64_t original_len);
+void net_icmp_receive(uint32_t source, const uint8_t *packet, uint64_t size);
 
 bool net_initialize(void);
 bool net_is_initialized(void);

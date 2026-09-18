@@ -627,3 +627,20 @@ static bool vmm_self_test(void) {
 
     return true;
 }
+
+void *vmm_map_mmio(uint64_t physical_address, uint64_t size_bytes) {
+    if (size_bytes == 0) {
+        return 0;
+    }
+    uint64_t page_offset = physical_address & (PAGE_SIZE - 1);
+    uint64_t start_phys = physical_address & ~(PAGE_SIZE - 1);
+    uint64_t end_phys = (physical_address + size_bytes + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    for (uint64_t p = start_phys; p < end_phys; p += PAGE_SIZE) {
+        uint64_t v = (uint64_t)vmm_physical_to_virtual(p);
+        if (!vmm_is_mapped(v)) {
+            vmm_map_page(v, p, VMM_PAGE_WRITABLE | VMM_PAGE_NO_EXECUTE);
+        }
+    }
+    return (void *)((uint64_t)vmm_physical_to_virtual(start_phys) + page_offset);
+}
+

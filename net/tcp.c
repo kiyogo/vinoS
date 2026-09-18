@@ -51,6 +51,20 @@ struct tcp_socket {
     uint16_t rcv_wnd;
     uint16_t mss;
 
+    /* Congestion control */
+    uint32_t cwnd;
+    uint32_t ssthresh;
+
+    /* Dynamic RTO Jacobson/Karn */
+    uint32_t srtt;
+    uint32_t rttvar;
+    uint32_t rtt_seq;
+    uint64_t rtt_sent_tick;
+    bool rtt_measuring;
+
+    /* TIME_WAIT timer */
+    uint64_t time_wait_start;
+
     bool retransmit_pending;
     uint64_t last_sent_tick;
     uint32_t rto_ticks;
@@ -229,6 +243,8 @@ int tcp_connect(uint32_t address, uint16_t port) {
         .rcv_wnd = TCP_RX_BUFFER_CAPACITY,
         .snd_wnd = NET_TCP_DEFAULT_WINDOW,
         .mss = NET_TCP_DEFAULT_MSS,
+        .cwnd = 2 * NET_TCP_DEFAULT_MSS,
+        .ssthresh = 65535,
         .rto_ticks = NET_TCP_RTO_TICKS,
         .retry_count = 0,
     };
@@ -262,6 +278,9 @@ int tcp_connect(uint32_t address, uint16_t port) {
     s->pending_packet_size = total_len;
     s->retransmit_pending = true;
     s->last_sent_tick = timer_ticks();
+    s->rtt_seq = s->snd_isn;
+    s->rtt_sent_tick = s->last_sent_tick;
+    s->rtt_measuring = true;
 
     spinlock_unlock_irqrestore(&tcp_lock, lock_flags);
 
@@ -325,6 +344,10 @@ int tcp_send(int socket_id, const uint8_t *data, uint64_t size) {
         if (chunk_size > s->mss) {
             chunk_size = s->mss;
         }
+        uint32_t eff_wnd = s->snd_wnd < s->cwnd ? s->snd_wnd : s->cwnd;
+        if (eff_wnd < chunk_size && eff_wnd > 0) {
+            chunk_size = eff_wnd;
+        }
 
         uint32_t seq = s->snd_nxt;
         uint32_t ack = s->rcv_nxt;
@@ -351,7 +374,14 @@ int tcp_send(int socket_id, const uint8_t *data, uint64_t size) {
         s->retransmit_pending = true;
         s->retry_count = 0;
         s->last_sent_tick = timer_ticks();
-        s->rto_ticks = NET_TCP_RTO_TICKS;
+        if (s->srtt == 0) {
+            s->rto_ticks = NET_TCP_RTO_TICKS;
+        }
+        if (!s->rtt_measuring) {
+            s->rtt_seq = seq + (uint32_t)chunk_size;
+            s->rtt_sent_tick = s->last_sent_tick;
+            s->rtt_measuring = true;
+        }
         s->snd_nxt += (uint32_t)chunk_size;
 
         uint32_t src_ip = s->local_ip;
@@ -897,6 +927,37 @@ void net_tcp_receive(uint32_t source, uint32_t destination, const uint8_t *packe
     if (s->state == TCP_STATE_ESTABLISHED) {
         if (flags & TCP_FLAG_ACK) {
             if (ack > s->snd_una && ack <= s->snd_nxt) {
+                if (s->rtt_measuring && ack >= s->rtt_seq) {
+                    uint64_t now_tick = timer_ticks();
+                    uint32_t m = (uint32_t)(now_tick - s->rtt_sent_tick);
+                    s->rtt_measuring = false;
+                    if (s->srtt == 0) {
+                        s->srtt = m;
+                        s->rttvar = m / 2;
+                    } else {
+                        int32_t delta = (int32_t)m - (int32_t)s->srtt;
+                        if (delta < 0) {
+                            delta = -delta;
+                        }
+                        s->rttvar = (3 * s->rttvar + (uint32_t)delta) / 4;
+                        s->srtt = (7 * s->srtt + m) / 8;
+                    }
+                    uint32_t rto = s->srtt + 4 * s->rttvar;
+                    if (rto < 2) {
+                        rto = 2;
+                    }
+                    if (rto > timer_frequency_hz() * 60) {
+                        rto = (uint32_t)timer_frequency_hz() * 60;
+                    }
+                    s->rto_ticks = rto;
+                }
+
+                if (s->cwnd < s->ssthresh) {
+                    s->cwnd += s->mss;
+                } else {
+                    s->cwnd += (s->mss * s->mss) / (s->cwnd > 0 ? s->cwnd : 1);
+                }
+
                 s->snd_una = ack;
                 s->retransmit_pending = false;
             }
@@ -1000,7 +1061,8 @@ void net_tcp_receive(uint32_t source, uint32_t destination, const uint8_t *packe
         bool need_ack = false;
         if (flags & TCP_FLAG_FIN) {
             s->rcv_nxt += 1;
-            s->state = TCP_STATE_CLOSED;
+            s->state = TCP_STATE_TIME_WAIT;
+            s->time_wait_start = timer_ticks();
             need_ack = true;
         }
         uint32_t a_src_ip = s->local_ip;
@@ -1026,6 +1088,13 @@ void net_tcp_poll(void) {
     uint64_t lock_flags = spinlock_lock_irqsave(&tcp_lock);
     for (int index = 0; index < NET_TCP_SOCKET_MAX; ++index) {
         struct tcp_socket *s = &tcp_sockets[index];
+        if (s->in_use && s->state == TCP_STATE_TIME_WAIT) {
+            if (timer_ticks() - s->time_wait_start >= NET_TCP_RTO_TICKS * 2) {
+                s->state = TCP_STATE_CLOSED;
+                s->in_use = false;
+            }
+            continue;
+        }
         if (s->in_use && s->retransmit_pending) {
             if (timer_ticks() - s->last_sent_tick >= s->rto_ticks) {
                 if (s->retry_count < TCP_MAX_RETRIES) {
@@ -1034,6 +1103,12 @@ void net_tcp_poll(void) {
                     (void)__atomic_add_fetch(&segments_sent, 1, __ATOMIC_RELAXED);
                     s->last_sent_tick = timer_ticks();
                     s->rto_ticks *= 2;
+                    s->rtt_measuring = false;
+                    s->ssthresh = s->cwnd / 2;
+                    if (s->ssthresh < 2 * s->mss) {
+                        s->ssthresh = 2 * s->mss;
+                    }
+                    s->cwnd = s->mss;
                     uint8_t packet_copy[NET_ETHERNET_FRAME_MAX];
                     uint64_t packet_size = s->pending_packet_size;
                     for (uint64_t i = 0; i < packet_size; ++i) {

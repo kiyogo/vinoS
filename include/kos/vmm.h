@@ -28,5 +28,7 @@ bool vmm_query_page(uint64_t virtual_address, uint64_t *physical_address, uint64
 bool vmm_query_page_in(uint64_t pml4_phys, uint64_t virtual_address, uint64_t *physical_address, uint64_t *flags);
 bool vmm_map_pages(uint64_t virtual_address, uint64_t physical_address, uint64_t page_count, uint64_t flags);
 uint64_t vmm_unmap_pages(uint64_t virtual_address, uint64_t page_count);
+void *vmm_map_mmio(uint64_t physical_address, uint64_t size_bytes);
 
 #endif
+

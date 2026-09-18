@@ -17,9 +17,6 @@ task_switch:
     mov [rdi + 48], rsp
     lea rax, [rel .resume]
     mov [rdi + 56], rax
-    pushfq
-    pop rax
-    mov [rdi + 64], rax
 
     mov rbx, [rsi + 0]
     mov rbp, [rsi + 8]

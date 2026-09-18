@@ -4,13 +4,15 @@
 #include <kos/cpu.h>
 #include <kos/net.h>
 #include <kos/task.h>
-#include <kos/task.h>
 #include <kos/timer.h>
+#include <kos/log.h>
 
 enum {
     ICMP_PROTOCOL = 1,
     ICMP_ECHO_REPLY = 0,
+    ICMP_DEST_UNREACHABLE = 3,
     ICMP_ECHO_REQUEST = 8,
+    ICMP_TIME_EXCEEDED = 11,
     ICMP_HEADER_SIZE = 8,
     ICMP_PING_PAYLOAD_SIZE = 16,
     ICMP_IDENTIFIER = 0x4b4f,
@@ -28,6 +30,8 @@ struct icmp_ping_waiter {
 static struct icmp_ping_waiter ping_waiter;
 static uint64_t echo_requests_sent;
 static uint64_t echo_replies_received;
+static uint64_t dest_unreach_sent;
+static uint64_t time_exceeded_sent;
 
 static uint16_t read_u16_be(const uint8_t *data) {
     return ((uint16_t)data[0] << 8) | data[1];
@@ -74,22 +78,89 @@ static bool icmp_send_echo_reply(uint32_t destination, const uint8_t *request, u
     return net_ipv4_send(ICMP_PROTOCOL, destination, reply, size);
 }
 
+bool net_icmp_send_dest_unreachable(uint32_t destination, uint8_t code,
+        const uint8_t *orig_ip_header, uint64_t orig_len) {
+    if (destination == 0 || orig_ip_header == 0 || orig_len == 0) {
+        return false;
+    }
+    /* RFC 792: ICMP error includes IPv4 header + 8 bytes of original payload */
+    uint64_t include_len = orig_len < 28 ? orig_len : 28;
+    uint8_t packet[ICMP_HEADER_SIZE + 28];
+    uint64_t total_len = ICMP_HEADER_SIZE + include_len;
+
+    packet[0] = ICMP_DEST_UNREACHABLE;
+    packet[1] = code;
+    packet[2] = 0;
+    packet[3] = 0;
+    packet[4] = 0;
+    packet[5] = 0;
+    packet[6] = 0;
+    packet[7] = 0;
+
+    for (uint64_t i = 0; i < include_len; ++i) {
+        packet[ICMP_HEADER_SIZE + i] = orig_ip_header[i];
+    }
+
+    write_u16_be(&packet[2], icmp_checksum(packet, total_len));
+    dest_unreach_sent++;
+    return net_ipv4_send(ICMP_PROTOCOL, destination, packet, total_len);
+}
+
+bool net_icmp_send_time_exceeded(uint32_t destination, uint8_t code,
+        const uint8_t *orig_ip_header, uint64_t orig_len) {
+    if (destination == 0 || orig_ip_header == 0 || orig_len < 20) {
+        return false;
+    }
+    uint64_t include_len = orig_len < 28 ? orig_len : 28;
+    uint8_t packet[ICMP_HEADER_SIZE + 28];
+    uint64_t total_len = ICMP_HEADER_SIZE + include_len;
+
+    packet[0] = ICMP_TIME_EXCEEDED;
+    packet[1] = code;
+    packet[2] = 0;
+    packet[3] = 0;
+    packet[4] = 0;
+    packet[5] = 0;
+    packet[6] = 0;
+    packet[7] = 0;
+
+    for (uint64_t i = 0; i < include_len; ++i) {
+        packet[ICMP_HEADER_SIZE + i] = orig_ip_header[i];
+    }
+
+    write_u16_be(&packet[2], icmp_checksum(packet, total_len));
+    time_exceeded_sent++;
+    return net_ipv4_send(ICMP_PROTOCOL, destination, packet, total_len);
+}
+
 void net_icmp_receive(uint32_t source, const uint8_t *packet, uint64_t size) {
     if (packet == 0 || size < ICMP_HEADER_SIZE || icmp_checksum(packet, size) != 0) {
         return;
     }
-    if (packet[0] == ICMP_ECHO_REQUEST && packet[1] == 0) {
+    uint8_t type = packet[0];
+    uint8_t code = packet[1];
+
+    if (type == ICMP_ECHO_REQUEST && code == 0) {
         (void)icmp_send_echo_reply(source, packet, size);
         return;
     }
-    if (packet[0] != ICMP_ECHO_REPLY || packet[1] != 0
-        || read_u16_be(&packet[4]) != ICMP_IDENTIFIER || !ping_waiter.waiting
-        || source != ping_waiter.destination || read_u16_be(&packet[6]) != ping_waiter.sequence) {
+    if (type == ICMP_ECHO_REPLY && code == 0) {
+        if (read_u16_be(&packet[4]) == ICMP_IDENTIFIER && ping_waiter.waiting
+            && source == ping_waiter.destination && read_u16_be(&packet[6]) == ping_waiter.sequence) {
+            ping_waiter.round_trip_ticks = timer_ticks() - ping_waiter.sent_at_tick;
+            ping_waiter.reply_received = true;
+            ++echo_replies_received;
+        }
         return;
     }
-    ping_waiter.round_trip_ticks = timer_ticks() - ping_waiter.sent_at_tick;
-    ping_waiter.reply_received = true;
-    ++echo_replies_received;
+    if (type == ICMP_DEST_UNREACHABLE) {
+        log_warn("ICMP Destination Unreachable received");
+        return;
+    }
+    if (type == ICMP_TIME_EXCEEDED) {
+        log_warn("ICMP Time Exceeded received");
+        return;
+    }
 }
 
 bool net_icmp_ping(uint32_t destination, uint16_t sequence, uint64_t timeout_ticks,
@@ -124,7 +195,11 @@ bool net_icmp_ping(uint32_t destination, uint16_t sequence, uint64_t timeout_tic
             ping_waiter.waiting = false;
             return true;
         }
-        cpu_wait_for_interrupt();
+        if (task_is_multitasking_active()) {
+            task_sleep(1);
+        } else {
+            cpu_wait_for_interrupt();
+        }
     }
     ping_waiter.waiting = false;
     return false;

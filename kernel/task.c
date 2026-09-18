@@ -10,6 +10,7 @@
 #include <kos/log.h>
 #include <kos/memory.h>
 #include <kos/process.h>
+#include <kos/smp.h>
 #include <kos/spinlock.h>
 #include <kos/task.h>
 #include <kos/timer.h>
@@ -297,6 +298,10 @@ void schedule(void) {
     next->state = THREAD_STATE_RUNNING;
     next->quantum_remaining = TASK_DEFAULT_QUANTUM;
     current_task = next;
+    struct percpu_data *cpu = smp_get_current_cpu();
+    if (cpu != 0) {
+        cpu->current_task = next;
+    }
 
     if (next->process != NULL && next->process->pml4_physical != 0) {
         if (previous == NULL || previous->process != next->process) {
@@ -311,9 +316,8 @@ void schedule(void) {
         tss_set_rsp0((uint64_t)kos_boot_stack_top);
     }
 
+    previous->context.rflags = flags;
     task_switch(&previous->context, &next->context);
-
-    cpu_interrupt_restore(flags);
 }
 
 void task_yield(void) {
@@ -371,7 +375,14 @@ void task_unblock(struct task *task) {
 }
 
 struct task *task_current(void) {
-    return initialized ? current_task : 0;
+    if (!initialized) {
+        return 0;
+    }
+    struct percpu_data *cpu = smp_get_current_cpu();
+    if (cpu != 0 && cpu->current_task != 0) {
+        return cpu->current_task;
+    }
+    return current_task;
 }
 
 enum task_state task_get_state(const struct task *task) {
@@ -379,10 +390,11 @@ enum task_state task_get_state(const struct task *task) {
 }
 
 uint64_t task_current_tid(void) {
-    if (!initialized || current_task == 0) {
+    struct task *cur = task_current();
+    if (!initialized || cur == 0) {
         return 1;
     }
-    return current_task->tid;
+    return cur->tid;
 }
 
 uint64_t task_get_current_tid(void) {

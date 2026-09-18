@@ -2,6 +2,7 @@
 #define KOS_MEMORY_H
 
 #include <stdint.h>
+#include <stddef.h>
 
 /* The base mapping/allocation granularity used by PMM, VMM, and kernel heap. */
 #define KOS_PAGE_SIZE 4096ull
@@ -23,5 +24,10 @@ uint64_t kstrlen(const char *s);
 int kstrcmp(const char *s1, const char *s2);
 int kstrncmp(const char *s1, const char *s2, uint64_t n);
 char *kstrncpy(char *dst, const char *src, uint64_t n);
+
+static inline uint64_t strlen(const char *s) { return kstrlen(s); }
+static inline int strcmp(const char *s1, const char *s2) { return kstrcmp(s1, s2); }
+static inline int strncmp(const char *s1, const char *s2, uint64_t n) { return kstrncmp(s1, s2, n); }
+static inline char *strncpy(char *dst, const char *src, uint64_t n) { return kstrncpy(dst, src, n); }
 
 #endif

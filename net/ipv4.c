@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include <kos/net.h>
+#include <kos/net_device.h>
 #include <kos/sync.h>
 #include <kos/timer.h>
 
@@ -9,8 +10,26 @@ enum {
     IPV4_HEADER_SIZE = 20,
     IPV4_ETHERTYPE = 0x0800,
     IPV4_DEFAULT_TTL = 64,
+    IPV4_MAX_FRAGMENT_PAYLOAD = 1480, /* 1500 MTU - 20 IP header */
+    IPV4_REASM_SLOTS = 8,
+    IPV4_REASM_MAX_SIZE = 65536,
+    IPV4_REASM_TIMEOUT_TICKS = 3000, /* 30 seconds at 100 Hz */
 };
 
+struct ipv4_reasm_slot {
+    bool active;
+    uint32_t src_ip;
+    uint32_t dst_ip;
+    uint16_t id;
+    uint8_t protocol;
+    uint64_t created_tick;
+    uint64_t total_size;
+    uint64_t received_bytes;
+    uint8_t buffer[IPV4_REASM_MAX_SIZE];
+    bool block_present[IPV4_REASM_MAX_SIZE / 8];
+};
+
+static struct ipv4_reasm_slot reasm_slots[IPV4_REASM_SLOTS];
 static struct net_interface_info interface;
 static uint16_t next_identification;
 static struct kos_spinlock ipv4_lock = KOS_SPINLOCK_INITIALIZER;
@@ -20,6 +39,8 @@ void net_udp_receive(uint32_t source, uint32_t destination, const uint8_t *packe
     uint64_t size);
 void net_tcp_receive(uint32_t source, uint32_t destination, const uint8_t *packet,
     uint64_t size);
+bool net_icmp_send_time_exceeded(uint32_t destination, uint8_t code,
+    const uint8_t *orig_ip_header, uint64_t orig_len);
 
 static uint16_t read_u16_be(const uint8_t *data) {
     return ((uint16_t)data[0] << 8) | data[1];
@@ -28,6 +49,13 @@ static uint16_t read_u16_be(const uint8_t *data) {
 static void write_u16_be(uint8_t *data, uint16_t value) {
     data[0] = (uint8_t)(value >> 8);
     data[1] = (uint8_t)value;
+}
+
+static void write_u32_be(uint8_t *data, uint32_t value) {
+    data[0] = (uint8_t)(value >> 24);
+    data[1] = (uint8_t)(value >> 16);
+    data[2] = (uint8_t)(value >> 8);
+    data[3] = (uint8_t)value;
 }
 
 static uint16_t ipv4_checksum(const uint8_t *data, uint64_t size) {
@@ -42,13 +70,6 @@ static uint16_t ipv4_checksum(const uint8_t *data, uint64_t size) {
         sum = (sum & 0xffffu) + (sum >> 16);
     }
     return (uint16_t)~sum;
-}
-
-static void write_u32_be(uint8_t *data, uint32_t value) {
-    data[0] = (uint8_t)(value >> 24);
-    data[1] = (uint8_t)(value >> 16);
-    data[2] = (uint8_t)(value >> 8);
-    data[3] = (uint8_t)value;
 }
 
 bool net_interface_info(struct net_interface_info *info) {
@@ -72,6 +93,7 @@ bool net_ipv4_initialize_interface(const uint8_t mac_address[NET_ETHERNET_ADDRES
     if (mac_address == 0) {
         return false;
     }
+    uint64_t flags = spinlock_lock_irqsave(&ipv4_lock);
     interface = (struct net_interface_info){
         .available = true,
         .ipv4_address = NET_QEMU_STATIC_ADDRESS,
@@ -85,6 +107,7 @@ bool net_ipv4_initialize_interface(const uint8_t mac_address[NET_ETHERNET_ADDRES
         interface.mac_address[index] = mac_address[index];
     }
     next_identification = (uint16_t)timer_ticks();
+    spinlock_unlock_irqrestore(&ipv4_lock, flags);
     return true;
 }
 
@@ -112,9 +135,105 @@ void net_ipv4_set_dhcp_state(enum net_dhcp_state state) {
     spinlock_unlock_irqrestore(&ipv4_lock, flags);
 }
 
-void net_ipv4_receive(const uint8_t source[NET_ETHERNET_ADDRESS_SIZE], const uint8_t *packet,
+static void ipv4_dispatch_payload(uint8_t protocol, uint32_t source, uint32_t destination,
+        const uint8_t *payload, uint64_t payload_size) {
+    if (protocol == 1) {
+        net_icmp_receive(source, payload, payload_size);
+    }
+    else if (protocol == 17) {
+        net_udp_receive(source, destination, payload, payload_size);
+    }
+    else if (protocol == 6) {
+        net_tcp_receive(source, destination, payload, payload_size);
+    }
+}
+
+static void ipv4_handle_fragment(uint32_t source, uint32_t destination, uint8_t protocol,
+        uint16_t id, uint16_t frag_offset, bool more_fragments,
+        const uint8_t *payload, uint64_t payload_size, const uint8_t *orig_pkt, uint64_t orig_len) {
+    uint64_t now = timer_ticks();
+    int slot_idx = -1;
+
+    for (int i = 0; i < IPV4_REASM_SLOTS; ++i) {
+        if (reasm_slots[i].active) {
+            if (now - reasm_slots[i].created_tick >= IPV4_REASM_TIMEOUT_TICKS) {
+                /* Discard expired reassembly and send ICMP Time Exceeded */
+                reasm_slots[i].active = false;
+                (void)net_icmp_send_time_exceeded(reasm_slots[i].src_ip, 1, orig_pkt, orig_len);
+                continue;
+            }
+            if (reasm_slots[i].src_ip == source && reasm_slots[i].dst_ip == destination
+                && reasm_slots[i].id == id && reasm_slots[i].protocol == protocol) {
+                slot_idx = i;
+                break;
+            }
+        }
+    }
+
+    if (slot_idx < 0) {
+        for (int i = 0; i < IPV4_REASM_SLOTS; ++i) {
+            if (!reasm_slots[i].active) {
+                slot_idx = i;
+                break;
+            }
+        }
+        if (slot_idx < 0) {
+            return;
+        }
+        struct ipv4_reasm_slot *slot = &reasm_slots[slot_idx];
+        slot->active = true;
+        slot->src_ip = source;
+        slot->dst_ip = destination;
+        slot->id = id;
+        slot->protocol = protocol;
+        slot->created_tick = now;
+        slot->total_size = 0;
+        slot->received_bytes = 0;
+        for (uint64_t b = 0; b < IPV4_REASM_MAX_SIZE / 8; ++b) {
+            slot->block_present[b] = false;
+        }
+    }
+
+    struct ipv4_reasm_slot *slot = &reasm_slots[slot_idx];
+    if (frag_offset + payload_size > IPV4_REASM_MAX_SIZE) {
+        slot->active = false;
+        return;
+    }
+
+    for (uint64_t i = 0; i < payload_size; ++i) {
+        slot->buffer[frag_offset + i] = payload[i];
+    }
+    uint64_t start_block = frag_offset / 8;
+    uint64_t block_count = (payload_size + 7) / 8;
+    for (uint64_t b = 0; b < block_count && (start_block + b) < (IPV4_REASM_MAX_SIZE / 8); ++b) {
+        slot->block_present[start_block + b] = true;
+    }
+    slot->received_bytes += payload_size;
+
+    if (!more_fragments) {
+        slot->total_size = frag_offset + payload_size;
+    }
+
+    if (slot->total_size > 0) {
+        uint64_t required_blocks = (slot->total_size + 7) / 8;
+        bool complete = true;
+        for (uint64_t b = 0; b < required_blocks; ++b) {
+            if (!slot->block_present[b]) {
+                complete = false;
+                break;
+            }
+        }
+        if (complete) {
+            ipv4_dispatch_payload(slot->protocol, slot->src_ip, slot->dst_ip,
+                slot->buffer, slot->total_size);
+            slot->active = false;
+        }
+    }
+}
+
+void net_ipv4_receive(const uint8_t source_mac[NET_ETHERNET_ADDRESS_SIZE], const uint8_t *packet,
         uint64_t size) {
-    (void)source;
+    (void)source_mac;
     if (packet == 0 || size < IPV4_HEADER_SIZE || (packet[0] >> 4) != 4) {
         ++interface.ipv4_packets_dropped;
         return;
@@ -122,55 +241,82 @@ void net_ipv4_receive(const uint8_t source[NET_ETHERNET_ADDRESS_SIZE], const uin
     uint64_t header_size = (packet[0] & 0x0f) * 4u;
     uint64_t total_size = read_u16_be(&packet[2]);
     if (header_size < IPV4_HEADER_SIZE || header_size > size || total_size < header_size
-        || total_size > size || ipv4_checksum(packet, header_size) != 0
-        || (read_u16_be(&packet[6]) & 0x3fffu) != 0) {
+        || total_size > size || ipv4_checksum(packet, header_size) != 0) {
         ++interface.ipv4_packets_dropped;
         return;
     }
+
+    uint16_t identification = read_u16_be(&packet[4]);
+    uint16_t flags_offset = read_u16_be(&packet[6]);
+    bool more_fragments = (flags_offset & 0x2000) != 0;
+    uint16_t frag_offset = (uint16_t)((flags_offset & 0x1fff) * 8);
+
+    uint8_t protocol = packet[9];
     uint32_t source_address = ((uint32_t)packet[12] << 24) | ((uint32_t)packet[13] << 16)
         | ((uint32_t)packet[14] << 8) | packet[15];
     uint32_t destination = ((uint32_t)packet[16] << 24) | ((uint32_t)packet[17] << 16)
         | ((uint32_t)packet[18] << 8) | packet[19];
+
     bool in_dhcp_negotiation = (interface.dhcp_state == NET_DHCP_DISCOVERING
         || interface.dhcp_state == NET_DHCP_REQUESTING);
     if (!interface.available
         || (destination != interface.ipv4_address && destination != 0xffffffffu
-            && !(in_dhcp_negotiation && packet[9] == 17))) {
+            && (destination >> 24) != 127
+            && !(in_dhcp_negotiation && protocol == 17))) {
         ++interface.ipv4_packets_dropped;
         return;
     }
     ++interface.ipv4_packets_received;
-    if (packet[9] == 1) {
-        net_icmp_receive(source_address, &packet[header_size], total_size - header_size);
+
+    const uint8_t *payload = &packet[header_size];
+    uint64_t payload_size = total_size - header_size;
+
+    if (!more_fragments && frag_offset == 0) {
+        ipv4_dispatch_payload(protocol, source_address, destination, payload, payload_size);
     }
-    else if (packet[9] == 17) {
-        net_udp_receive(source_address, destination, &packet[header_size], total_size - header_size);
+    else {
+        ipv4_handle_fragment(source_address, destination, protocol, identification,
+            frag_offset, more_fragments, payload, payload_size, packet, size);
     }
-    else if (packet[9] == 6) {
-        net_tcp_receive(source_address, destination, &packet[header_size], total_size - header_size);
+}
+
+static bool ipv4_emit_fragment(uint8_t protocol, uint32_t source, uint32_t destination,
+        uint16_t identification, uint16_t flags_offset,
+        const uint8_t destination_mac[NET_ETHERNET_ADDRESS_SIZE],
+        const uint8_t *chunk_data, uint64_t chunk_len) {
+    uint8_t packet[NET_ETHERNET_FRAME_MAX - 14];
+    packet[0] = 0x45;
+    packet[1] = 0;
+    write_u16_be(&packet[2], (uint16_t)(IPV4_HEADER_SIZE + chunk_len));
+    write_u16_be(&packet[4], identification);
+    write_u16_be(&packet[6], flags_offset);
+    packet[8] = IPV4_DEFAULT_TTL;
+    packet[9] = protocol;
+    packet[10] = 0;
+    packet[11] = 0;
+    write_u32_be(&packet[12], source);
+    write_u32_be(&packet[16], destination);
+    write_u16_be(&packet[10], ipv4_checksum(packet, IPV4_HEADER_SIZE));
+    for (uint64_t index = 0; index < chunk_len; ++index) {
+        packet[IPV4_HEADER_SIZE + index] = chunk_data[index];
     }
+    return net_ethernet_send(destination_mac, IPV4_ETHERTYPE, packet, IPV4_HEADER_SIZE + chunk_len);
 }
 
 bool net_ipv4_send_from(uint8_t protocol, uint32_t source, uint32_t destination,
         const uint8_t *payload, uint64_t payload_size) {
     if (!interface.available || payload == 0 || payload_size == 0
-        || payload_size > NET_ETHERNET_FRAME_MAX - 14 - IPV4_HEADER_SIZE
         || (source != 0 && source != interface.ipv4_address)) {
         return false;
     }
+
+    /* Loopback routing */
     if (destination == interface.ipv4_address || (destination >> 24) == 127) {
         uint32_t loop_src = source != 0 ? source : interface.ipv4_address;
-        if (protocol == 6) {
-            net_tcp_receive(loop_src, destination, payload, payload_size);
-        }
-        else if (protocol == 17) {
-            net_udp_receive(loop_src, destination, payload, payload_size);
-        }
-        else if (protocol == 1) {
-            net_icmp_receive(loop_src, payload, payload_size);
-        }
+        ipv4_dispatch_payload(protocol, loop_src, destination, payload, payload_size);
         return true;
     }
+
     uint8_t destination_mac[NET_ETHERNET_ADDRESS_SIZE];
     if (destination == 0xffffffffu) {
         for (uint64_t index = 0; index < NET_ETHERNET_ADDRESS_SIZE; ++index) {
@@ -185,23 +331,34 @@ bool net_ipv4_send_from(uint8_t protocol, uint32_t source, uint32_t destination,
             return false;
         }
     }
-    uint8_t packet[NET_ETHERNET_FRAME_MAX - 14];
-    packet[0] = 0x45;
-    packet[1] = 0;
-    write_u16_be(&packet[2], (uint16_t)(IPV4_HEADER_SIZE + payload_size));
-    write_u16_be(&packet[4], next_identification++);
-    write_u16_be(&packet[6], 0x4000);
-    packet[8] = IPV4_DEFAULT_TTL;
-    packet[9] = protocol;
-    packet[10] = 0;
-    packet[11] = 0;
-    write_u32_be(&packet[12], source);
-    write_u32_be(&packet[16], destination);
-    write_u16_be(&packet[10], ipv4_checksum(packet, IPV4_HEADER_SIZE));
-    for (uint64_t index = 0; index < payload_size; ++index) {
-        packet[IPV4_HEADER_SIZE + index] = payload[index];
+
+    uint32_t src_ip = source != 0 ? source : interface.ipv4_address;
+    uint16_t ident = next_identification++;
+
+    /* Unfragmented path */
+    if (payload_size <= IPV4_MAX_FRAGMENT_PAYLOAD) {
+        return ipv4_emit_fragment(protocol, src_ip, destination, ident, 0x4000,
+            destination_mac, payload, payload_size);
     }
-    return net_ethernet_send(destination_mac, IPV4_ETHERTYPE, packet, IPV4_HEADER_SIZE + payload_size);
+
+    /* Fragmented transmission */
+    uint64_t offset = 0;
+    while (offset < payload_size) {
+        uint64_t chunk_len = payload_size - offset;
+        if (chunk_len > IPV4_MAX_FRAGMENT_PAYLOAD) {
+            chunk_len = IPV4_MAX_FRAGMENT_PAYLOAD;
+        }
+        bool is_last = (offset + chunk_len >= payload_size);
+        uint16_t frag_offset = (uint16_t)(offset / 8);
+        uint16_t flags_offset = (uint16_t)((is_last ? 0 : 0x2000) | (frag_offset & 0x1fff));
+
+        if (!ipv4_emit_fragment(protocol, src_ip, destination, ident, flags_offset,
+                destination_mac, &payload[offset], chunk_len)) {
+            return false;
+        }
+        offset += chunk_len;
+    }
+    return true;
 }
 
 bool net_ipv4_send(uint8_t protocol, uint32_t destination, const uint8_t *payload,

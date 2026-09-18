@@ -25,6 +25,7 @@ enum block_device_type {
     BLOCK_TYPE_AHCI    = 2,
     BLOCK_TYPE_VIRTIO  = 3,
     BLOCK_TYPE_PARTITION = 4,
+    BLOCK_TYPE_NVME    = 5,
 };
 
 struct block_device;

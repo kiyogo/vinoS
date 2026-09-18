@@ -423,6 +423,10 @@ static void default_exception_panic(const struct interrupt_context *context) {
                        exception_name(context->vector), (unsigned long)context->vector);
 }
 
+#include <kos/apic.h>
+
+extern void smp_handle_tlb_shootdown_ipi(void);
+
 void interrupt_dispatch(const struct interrupt_context *context) {
     /* Stage 1: Syscall (vector 0x80) */
     if (context->vector == KOS_SYSCALL_VECTOR) {
@@ -432,22 +436,49 @@ void interrupt_dispatch(const struct interrupt_context *context) {
         return;
     }
 
-    /* Stage 2: Hardware PIC IRQs (vectors 32 to 47) */
+    /* Stage 1.5: APIC Special Vectors & IPIs */
+    if (context->vector == KOS_APIC_SPURIOUS_VECTOR) {
+        return; /* Spurious interrupt: no EOI */
+    }
+    if (context->vector == KOS_IPI_RESCHEDULE_VECTOR) {
+        lapic_eoi();
+        if (task_is_multitasking_active()) {
+            task_reschedule_if_needed();
+        }
+        return;
+    }
+    if (context->vector == KOS_IPI_TLB_SHOOTDOWN_VECTOR) {
+        smp_handle_tlb_shootdown_ipi();
+        lapic_eoi();
+        return;
+    }
+    if (context->vector == KOS_IPI_GENERIC_VECTOR) {
+        lapic_eoi();
+        return;
+    }
+
+    /* Stage 2: Hardware IRQs (vectors 32 to 47) */
     if (vector_is_pic_irq(context->vector)) {
-        uint8_t irq = (uint8_t)(context->vector - KOS_PIC_MASTER_VECTOR);
-        if (pic_is_spurious_irq(irq)) {
+        uint8_t irq = (uint8_t)(context->vector - 32);
+        if (irq < 16 && !lapic_is_enabled() && pic_is_spurious_irq(irq)) {
             pic_send_spurious_eoi(irq);
             return;
         }
-        ++irq_counts[irq];
-        irq_handler handler = irq_handlers[irq];
-        if (handler != 0) {
-            handler(irq, (void *)context);
+        if (irq < 16) {
+            ++irq_counts[irq];
+            irq_handler handler = irq_handlers[irq];
+            if (handler != 0) {
+                handler(irq, (void *)context);
+            }
+            else {
+                ++irq_unhandled_counts[irq];
+            }
         }
-        else {
-            ++irq_unhandled_counts[irq];
+        if (lapic_is_enabled()) {
+            lapic_eoi();
+        } else if (irq < 16) {
+            pic_send_eoi(irq);
         }
-        pic_send_eoi(irq);
 
         /* Preemptive reschedule hook upon return from hardware interrupt */
         if (task_is_multitasking_active() && (context->rflags & (1ull << 9))) {
@@ -569,3 +600,12 @@ void idt_initialize(void) {
     }
     log_info("Page fault handler registered at vector 14 (K12.2 passed).");
 }
+
+void idt_reload(void) {
+    const struct idt_pointer pointer = {
+        .limit = sizeof(idt_entries) - 1,
+        .base = (uint64_t)idt_entries,
+    };
+    idt_load(&pointer);
+}
+

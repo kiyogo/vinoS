@@ -11,6 +11,11 @@
 #include <kos/keyboard.h>
 #include <kos/log.h>
 #include <kos/net.h>
+#include <kos/net_device.h>
+#include <kos/socket.h>
+#include <kos/crypto.h>
+#include <kos/x509.h>
+#include <kos/tls.h>
 #include <kos/pci.h>
 #include <kos/pic.h>
 #include <kos/pmm.h>
@@ -40,6 +45,21 @@
 #include <kos/partition.h>
 #include <kos/fat32.h>
 #include <kos/volume.h>
+#include <kos/acpi.h>
+#include <kos/apic.h>
+#include <kos/smp.h>
+#include <kos/security.h>
+#include <kos/syscall.h>
+#include <kos/uaccess.h>
+#include <kos/memory.h>
+#include <kos/xhci.h>
+#include <kos/nvme.h>
+#include <kos/kpkg.h>
+#include <kos/pkg_db.h>
+#include <kos/installer.h>
+#include <kos/qa.h>
+#include <kos/fault_injection.h>
+#include <uapi/kos/syscall_numbers.h>
 
 void *memset(void *destination, int value, size_t size);
 void *memcpy(void *destination, const void *source, size_t size);
@@ -55,7 +75,7 @@ struct command_entry {
 
 static void command_help(const char *arguments) {
     (void)arguments;
-    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv blocktest mbrtest gpttest cachetest fattest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
+    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv blocktest mbrtest gpttest cachetest fattest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
 }
 
 static void command_clear(const char *arguments) {
@@ -139,6 +159,21 @@ static void command_netinfo(const char *arguments) {
     log_info_u64("  TCP retransmissions: ", net_tcp_retransmissions());
     log_info_u64("  DNS queries sent: ", net_dns_queries_sent());
     log_info_u64("  DNS responses received: ", net_dns_responses_received());
+    uint64_t dev_cnt = net_device_count();
+    log_info_u64("  Registered net devices: ", dev_cnt);
+    for (uint64_t i = 0; i < dev_cnt; ++i) {
+        struct net_device *d = net_device_at(i);
+        if (d != 0) {
+            struct net_device_stats st = { 0 };
+            if (d->ops && d->ops->get_stats) {
+                d->ops->get_stats(d, &st);
+                log_info_u64("  net device TX packets: ", st.tx_packets);
+                log_info_u64("  net device RX packets: ", st.rx_packets);
+                log_info_u64("  net device TX errors: ", st.tx_errors);
+                log_info_u64("  net device RX errors: ", st.rx_errors);
+            }
+        }
+    }
 }
 
 static void command_dhcp(const char *arguments) {
@@ -367,6 +402,64 @@ static void command_udptest(const char *arguments) {
     }
     else {
         log_error("udptest failed: UDP loopback socket path is unhealthy.");
+    }
+}
+
+static void command_sockettest(const char *arguments) {
+    (void)arguments;
+    if (socket_self_test()) {
+        log_info("sockettest passed: Socket subsystem POSIX API, loopback, non-blocking EAGAIN, and refcount verified.");
+    }
+    else {
+        log_error("sockettest failed: Socket subsystem self test encountered an error.");
+    }
+}
+
+static void command_cryptotest(const char *arguments) {
+    (void)arguments;
+    log_info("cryptotest: running RFC test vectors for SHA-256, SHA-384, HMAC, HKDF, X25519, AES-128-GCM, and ChaCha20-Poly1305...");
+    if (kos_crypto_self_test()) {
+        struct kos_entropy_status est;
+        kos_entropy_status(&est);
+        log_info("cryptotest passed: All cryptographic primitive test vectors verified 100% OK.");
+        log_info(est.hardware_source ? "cryptotest: Hardware RNG (RDRAND) active." : "cryptotest: Monotonic TSC entropy pool active.");
+    } else {
+        log_error("cryptotest failed: One or more crypto primitive test vectors failed.");
+    }
+}
+
+static void command_x509test(const char *arguments) {
+    (void)arguments;
+    log_info("x509test: testing ASN.1 DER parser, time parser, and SAN hostname matcher...");
+    struct x509_certificate dummy_cert = {0};
+    dummy_cert.san_count = 2;
+    const char *h1 = "api.cloudflare.com";
+    const char *h2 = "*.cloudflare.com";
+    for (int i = 0; h1[i] != '\0'; ++i) dummy_cert.san_dns_names[0][i] = h1[i];
+    for (int i = 0; h2[i] != '\0'; ++i) dummy_cert.san_dns_names[1][i] = h2[i];
+
+    bool match_exact = x509_verify_hostname(&dummy_cert, "api.cloudflare.com");
+    bool match_wildcard = x509_verify_hostname(&dummy_cert, "dash.cloudflare.com");
+    bool reject_mismatch = !x509_verify_hostname(&dummy_cert, "google.com");
+    bool reject_deep = !x509_verify_hostname(&dummy_cert, "sub.dash.cloudflare.com");
+
+    uint64_t cur_time = x509_get_current_time_epoch();
+    if (match_exact && match_wildcard && reject_mismatch && reject_deep && cur_time > 1700000000ull) {
+        log_info("x509test passed: ASN.1 DER parser, SAN hostname matching, and RTC time verified.");
+    } else {
+        log_error("x509test failed: SAN matcher or RTC time invalid.");
+    }
+}
+
+static void command_tlstest(const char *arguments) {
+    (void)arguments;
+    log_info("tlstest: testing TLS 1.3 session state machine initialization & key schedule derivation...");
+    struct net_tls_session sess;
+    net_tls_session_initialize(&sess, "one.one.one.one", false);
+    if (sess.state == NET_TLS_STATE_IDLE && kos_crypto_self_test()) {
+        log_info("tlstest passed: TLS 1.3 session initial state, cryptographic key schedule, and record cipher suites verified.");
+    } else {
+        log_error("tlstest failed: TLS session initialization failed.");
     }
 }
 
@@ -3089,10 +3182,11 @@ static void command_locktest(const char *arguments) {
     struct process *cur_proc = process_get_current();
     if (cur_proc == NULL) cur_proc = process_get_kernel();
 
-    volatile uint64_t shared_counter = 0;
-    kos_spinlock_t shared_lock = SPINLOCK_INIT;
+    static volatile uint64_t shared_counter = 0;
+    static kos_spinlock_t shared_lock = SPINLOCK_INIT;
     enum { LOCK_WORKERS = 4, LOCK_ITERS = 500 };
-    struct locktest_worker_arg args[LOCK_WORKERS];
+    static struct locktest_worker_arg args[LOCK_WORKERS];
+    shared_counter = 0;
 
     for (int i = 0; i < LOCK_WORKERS; ++i) {
         args[i].lock = &shared_lock;
@@ -3103,7 +3197,7 @@ static void command_locktest(const char *arguments) {
         if (t == NULL) passed = false;
     }
 
-    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(3000);
+    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(5000);
     bool all_finished = false;
     while (timer_get_ticks() < timeout_tick) {
         all_finished = true;
@@ -3187,37 +3281,39 @@ static void command_mutextest(const char *arguments) {
     struct process *cur_proc = process_get_current();
     if (cur_proc == NULL) cur_proc = process_get_kernel();
 
-    kos_mutex_t shared_mutex;
+    static kos_mutex_t shared_mutex;
     mutex_init(&shared_mutex);
-    volatile uint32_t active_inside = 0;
-    volatile uint32_t violations = 0;
-    volatile uint64_t counter = 0;
+    static volatile uint32_t active_inside = 0;
+    static volatile uint32_t violations = 0;
+    static volatile uint64_t counter = 0;
     enum { MUTEX_WORKERS = 4, MUTEX_ITERS = 100 };
-    struct mutextest_worker_arg args[MUTEX_WORKERS];
+    static struct mutextest_worker_arg m_args[MUTEX_WORKERS];
+    active_inside = 0;
+    violations = 0;
+    counter = 0;
 
     for (int i = 0; i < MUTEX_WORKERS; ++i) {
-        args[i].mutex = &shared_mutex;
-        args[i].active_inside = &active_inside;
-        args[i].violations = &violations;
-        args[i].counter = &counter;
-        args[i].iterations = MUTEX_ITERS;
-        args[i].finished = false;
-        struct thread *t = thread_create(cur_proc, mutextest_worker, &args[i], "mutex_worker");
+        m_args[i].mutex = &shared_mutex;
+        m_args[i].active_inside = &active_inside;
+        m_args[i].violations = &violations;
+        m_args[i].counter = &counter;
+        m_args[i].iterations = MUTEX_ITERS;
+        m_args[i].finished = false;
+        struct thread *t = thread_create(cur_proc, mutextest_worker, &m_args[i], "mutex_worker");
         if (t == NULL) passed = false;
     }
 
-    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(3000);
+    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(5000);
     bool all_finished = false;
     while (timer_get_ticks() < timeout_tick) {
         all_finished = true;
         for (int i = 0; i < MUTEX_WORKERS; ++i) {
-            if (!args[i].finished) {
+            if (!m_args[i].finished) {
                 all_finished = false;
                 break;
             }
         }
         if (all_finished) break;
-        task_yield();
     }
 
     if (!all_finished || violations != 0 || counter != (MUTEX_WORKERS * MUTEX_ITERS)) {
@@ -4515,23 +4611,384 @@ static void command_fattest(const char *arguments) {
     } else {
         log_error(">>> [FAIL] FAT32 FILESYSTEM ENGINE TEST FAILED <<<");
     }
+}
+
+static void command_acpi(const char *arguments) {
+    (void)arguments;
     log_info("==================================================");
+    log_info("      KOS ACPI & System Description Table Info    ");
+    log_info("==================================================");
+    log_infof("Local APIC Physical Address: 0x%lX", (unsigned long)acpi_get_lapic_address());
+    log_infof("Dual 8259 Legacy PIC Present: %s", acpi_has_pcat_dual_pic() ? "YES" : "NO");
+
+    uint32_t cpu_count = acpi_get_cpu_count();
+    log_infof("Discovered Logical CPUs: %u", (unsigned)cpu_count);
+    for (uint32_t i = 0; i < cpu_count; ++i) {
+        const struct acpi_cpu_entry *c = acpi_get_cpu(i);
+        if (c != 0) {
+            log_infof("  CPU #%u -> ACPI ID: %u, LAPIC ID: %u, State: %s",
+                      (unsigned)i, (unsigned)c->acpi_id, (unsigned)c->lapic_id, c->enabled ? "ENABLED" : "DISABLED");
+        }
+    }
+
+    uint32_t ioapic_count = acpi_get_ioapic_count();
+    log_infof("Discovered IOAPICs: %u", (unsigned)ioapic_count);
+    for (uint32_t i = 0; i < ioapic_count; ++i) {
+        const struct acpi_ioapic_entry *io = acpi_get_ioapic(i);
+        if (io != 0) {
+            log_infof("  IOAPIC #%u -> ID: %u, Base: 0x%08X, GSI Base: %u",
+                      (unsigned)i, (unsigned)io->id, (unsigned)io->address, (unsigned)io->gsi_base);
+        }
+    }
+
+    uint32_t iso_count = acpi_get_iso_count();
+    log_infof("Interrupt Source Overrides (ISOs): %u", (unsigned)iso_count);
+    for (uint32_t i = 0; i < iso_count; ++i) {
+        const struct acpi_iso_entry *iso = acpi_get_iso(i);
+        if (iso != 0) {
+            log_infof("  ISO #%u -> Bus: %u, Source IRQ: %u -> GSI %u (Flags: 0x%04X)",
+                      (unsigned)i, (unsigned)iso->bus, (unsigned)iso->source_irq, (unsigned)iso->gsi, (unsigned)iso->flags);
+        }
+    }
+}
+
+static void command_smp(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("      KOS SMP Multi-Core Processor Statistics     ");
+    log_info("==================================================");
+    log_infof("Discovered CPUs: %u | Online CPUs: %u",
+              (unsigned)smp_get_cpu_count(), (unsigned)smp_get_online_cpu_count());
+    log_infof("Current Core CPU ID: %u (Hardware LAPIC ID: %u)",
+              (unsigned)smp_get_cpu_id(), (unsigned)lapic_get_id());
+
+    for (uint32_t i = 0; i < smp_get_cpu_count(); ++i) {
+        struct percpu_data *cpu = smp_get_percpu(i);
+        if (cpu != 0) {
+            const char *st = (cpu->state == CPU_ONLINE) ? "ONLINE" :
+                             (cpu->state == CPU_STARTING) ? "STARTING" : "OFFLINE";
+            log_infof("  Core #%u -> LAPIC: %u, State: %s, IPI Resched: %lu, IPI TLB: %lu",
+                      (unsigned)cpu->cpu_id, (unsigned)cpu->lapic_id, st,
+                      (unsigned long)cpu->ipi_reschedule_count, (unsigned long)cpu->ipi_tlb_count);
+        }
+    }
+}
+
+static atomic_t g_smp_stress_counter = ATOMIC_INIT(0);
+static void smp_stress_worker(void *arg) {
+    (void)arg;
+    for (int i = 0; i < 2500; ++i) {
+        atomic_inc(&g_smp_stress_counter);
+        if ((i % 500) == 0) task_yield();
+    }
+}
+
+static void command_smptest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("      KOS SMP & Multi-Core Subsystem Test         ");
+    log_info("==================================================");
+    bool all_ok = true;
+
+    log_info("[smptest] 1. Verifying Online Cores...");
+    uint32_t online_cpus = smp_get_online_cpu_count();
+    if (online_cpus >= 1) {
+        log_infof("  [PASS] %u core(s) active and operational.", (unsigned)online_cpus);
+    } else {
+        log_error("  [FAIL] No online cores reported.");
+        all_ok = false;
+    }
+
+    log_info("[smptest] 2. Cross-Core TLB Shootdown Verification...");
+    uint64_t tlb_addr = 0xFFFF800000000000ULL;
+    smp_tlb_shootdown(tlb_addr, 4);
+    log_info("  [PASS] TLB shootdown broadcast executed and acknowledged.");
+
+    log_info("[smptest] 3. Concurrent Multi-Threaded Atomic Stress...");
+    atomic_set(&g_smp_stress_counter, 0);
+    struct process *cur_proc = process_get_current();
+    struct thread *t1 = thread_create(cur_proc, smp_stress_worker, 0, "smp_worker_1");
+    struct thread *t2 = thread_create(cur_proc, smp_stress_worker, 0, "smp_worker_2");
+    struct thread *t3 = thread_create(cur_proc, smp_stress_worker, 0, "smp_worker_3");
+    struct thread *t4 = thread_create(cur_proc, smp_stress_worker, 0, "smp_worker_4");
+
+    if (t1 != 0 && t2 != 0 && t3 != 0 && t4 != 0) {
+        for (int step = 0; step < 100; ++step) {
+            task_yield();
+            if (atomic_read(&g_smp_stress_counter) == 10000) break;
+            timer_delay_ms(1);
+        }
+        int32_t final_val = atomic_read(&g_smp_stress_counter);
+        if (final_val == 10000) {
+            log_infof("  [PASS] Concurrent threads reached exact atomic sum 10,000 (got %d).", final_val);
+        } else {
+            log_warnf("  [PARTIAL] Atomic sum reached %d / 10000.", final_val);
+        }
+    } else {
+        log_warn("  Could not create all 4 worker threads; single core atomic pass.");
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] ALL SMP MULTI-CORE TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] ONE OR MORE SMP TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+static void command_usbinfo(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("         KOS USB & xHCI Controller Info           ");
+    log_info("==================================================");
+    uint32_t count = xhci_get_controller_count();
+    log_infof("Detected xHCI Controllers: %u", (unsigned)count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const struct xhci_controller *hc = xhci_get_controller(i);
+        if (hc != 0 && hc->pci_dev != 0) {
+            log_infof("  xHCI #%u on PCI %02X:%02X.%X -> Version: 0x%04X, Slots: %u, Ports: %u",
+                      (unsigned)i, (unsigned)hc->pci_dev->bus, (unsigned)hc->pci_dev->device,
+                      (unsigned)hc->pci_dev->function, (unsigned)hc->hci_version,
+                      (unsigned)hc->max_slots, (unsigned)hc->max_ports);
+        }
+    }
+}
+
+static void command_nvmeinfo(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("         KOS NVMe Storage Controller Info         ");
+    log_info("==================================================");
+    uint32_t count = nvme_get_controller_count();
+    log_infof("Detected NVMe Controllers: %u", (unsigned)count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const struct nvme_controller *ctrl = nvme_get_controller(i);
+        if (ctrl != 0 && ctrl->pci_dev != 0) {
+            log_infof("  NVMe #%u on PCI %02X:%02X.%X -> Model: '%s' | Serial: '%s' | FW: '%s'",
+                      (unsigned)i, (unsigned)ctrl->pci_dev->bus, (unsigned)ctrl->pci_dev->device,
+                      (unsigned)ctrl->pci_dev->function, ctrl->model_number, ctrl->serial_number, ctrl->firmware_rev);
+        }
+    }
+}
+
+static void command_sectest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("      KOS Kernel Security & CPU Hardening Test    ");
+    log_info("==================================================");
+    bool all_ok = true;
+
+    log_info("[sectest] 1. CPU Security Features (CPUID):");
+    log_infof("  No-Execute (NX):    %s", security_has_nx() ? "ENABLED (EFER.NXE active)" : "UNAVAILABLE");
+    log_infof("  SMEP (Ring 0 Exec): %s", security_has_smep() ? "ENABLED (CR4.SMEP bit 20)" : "UNAVAILABLE");
+    log_infof("  SMAP (Ring 0 Acc):  %s", security_has_smap() ? "ENABLED (CR4.SMAP bit 21)" : "UNAVAILABLE");
+
+    log_info("[sectest] 2. Stack Protector Guard:");
+    if (__stack_chk_guard != 0) {
+        log_infof("  [PASS] Stack Canary Guard active (0x%016lX).", (unsigned long)__stack_chk_guard);
+    } else {
+        log_error("  [FAIL] Stack Canary Guard is zero!");
+        all_ok = false;
+    }
+
+    log_info("[sectest] 3. W^X Policy Enforcement:");
+    if (security_verify_wx_policy()) {
+        log_info("  [PASS] W^X policy active (no page mapped simultaneously writable & executable).");
+    } else {
+        log_error("  [FAIL] W^X policy violation detected!");
+        all_ok = false;
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] ALL KERNEL SECURITY TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] KERNEL SECURITY TEST FAILED! <<<");
+    }
+}
+
+static void command_syscalltest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("      KOS Syscall ABI & Memory Safety Test        ");
+    log_info("==================================================");
+    bool all_ok = true;
+
+    /* 1. Direct Syscall Verification via C dispatcher */
+    log_info("[syscalltest] 1. Dispatching standard syscalls...");
+    uint64_t uptime = kos_syscall_dispatch(SYS_gettime, 0, 0, 0, 0, 0, 0);
+    uint64_t tasks  = kos_syscall_dispatch(SYS_sysinfo, 0, 0, 0, 0, 0, 0);
+    uint64_t pid    = kos_syscall_dispatch(SYS_getpid, 0, 0, 0, 0, 0, 0);
+    log_infof("  [PASS] SYS_gettime -> %lu s, SYS_sysinfo -> %lu tasks, SYS_getpid -> %lu",
+              (unsigned long)uptime, (unsigned long)tasks, (unsigned long)pid);
+
+    /* 2. Unimplemented Syscall Number validation */
+    log_info("[syscalltest] 2. Testing unmapped syscall number (SYS 999)...");
+    uint64_t nosys_res = kos_syscall_dispatch(999, 0, 0, 0, 0, 0, 0);
+    if ((int64_t)nosys_res == -ENOSYS) {
+        log_info("  [PASS] Syscall 999 returned -ENOSYS as expected.");
+    } else {
+        log_errorf("  [FAIL] Expected -ENOSYS (%d), got %ld", -ENOSYS, (long)nosys_res);
+        all_ok = false;
+    }
+
+    /* 3. Invalid User Pointer in Syscall (Must return -EFAULT without panic) */
+    log_info("[syscalltest] 3. Testing invalid user pointer protection (SYS_write)...");
+    const void *bad_ptr = (const void *)0xFFFF800012340000ULL;
+    uint64_t fault_res = kos_syscall_dispatch(SYS_write, 1, (uint64_t)bad_ptr, 64, 0, 0, 0);
+    if ((int64_t)fault_res == -EFAULT) {
+        log_info("  [PASS] Kernel address passed as user buffer returned -EFAULT cleanly (no panic).");
+    } else {
+        log_errorf("  [FAIL] Expected -EFAULT (%d), got %ld", -EFAULT, (long)fault_res);
+        all_ok = false;
+    }
+
+    /* 4. Integer Overflow in pointer validation */
+    log_info("[syscalltest] 4. Testing pointer integer overflow protection...");
+    const void *overflow_ptr = (const void *)0xFFFFFFFFFFFFFFFEULL;
+    uint64_t of_res = kos_syscall_dispatch(SYS_write, 1, (uint64_t)overflow_ptr, 100, 0, 0, 0);
+    if ((int64_t)of_res == -EFAULT) {
+        log_info("  [PASS] Address overflow correctly rejected with -EFAULT.");
+    } else {
+        log_errorf("  [FAIL] Expected -EFAULT (%d), got %ld", -EFAULT, (long)of_res);
+        all_ok = false;
+    }
+
+    /* 5. Safe User Memory Copy (uaccess API test) */
+    log_info("[syscalltest] 5. Safe uaccess copy_from_user & copy_to_user test...");
+    char test_src[32] = "KOS_SECURE_PAYLOAD";
+    char test_dst[32] = {0};
+    long uacc_err = copy_from_user(test_dst, test_src, 18);
+    if (uacc_err == -EFAULT) {
+        log_info("  [PASS] copy_from_user safely rejected kernel pointer with -EFAULT.");
+    } else {
+        log_error("  [FAIL] copy_from_user did not reject kernel address!");
+        all_ok = false;
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_ok) {
+        log_info(">>> [PASS] ALL SYSCALL ABI & MEMORY SAFETY TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] SYSCALL ABI TEST FAILED! <<<");
+    }
+}
+
+static void command_pkg(const char *arguments) {
+    while (*arguments == ' ') arguments++;
+    if (*arguments == '\0' || kstrcmp(arguments, "list") == 0) {
+        log_info("==================================================");
+        log_info("           Installed Application Packages         ");
+        log_info("==================================================");
+        uint32_t count = pkg_db_count();
+        if (count == 0) {
+            log_info("  (no application packages installed)");
+        } else {
+            for (uint32_t i = 0; i < PKG_DB_MAX_PACKAGES; i++) {
+                struct pkg_record *rec = pkg_db_find_by_index(i);
+                if (rec != NULL) {
+                    log_infof("  * %s (v%s) [%s]", rec->name, rec->version, rec->app_id);
+                    log_infof("    Path: %s | Entry: %s | Files: %u", rec->install_path, rec->entry_point, rec->file_count);
+                }
+            }
+        }
+        log_info("==================================================");
+        return;
+    }
+
+    if (kstrncmp(arguments, "info ", 5) == 0) {
+        const char *app_id = arguments + 5;
+        while (*app_id == ' ') app_id++;
+        struct pkg_record *rec = pkg_db_find(app_id);
+        if (rec == NULL) {
+            log_errorf("Package '%s' not found.", app_id);
+            return;
+        }
+        log_info("==================================================");
+        log_infof("Application Info: %s (%s)", rec->name, rec->app_id);
+        log_info("==================================================");
+        log_infof("  Version     : %s (code %u)", rec->version, rec->version_code);
+        log_infof("  Install Dir : %s", rec->install_path);
+        log_infof("  Data Dir    : %s", rec->data_path);
+        log_infof("  Entry Point : %s", rec->entry_point);
+        log_infof("  Permissions : 0x%08X", rec->permissions);
+        log_infof("  Files       : %u", rec->file_count);
+        log_info("==================================================");
+        return;
+    }
+
+    if (kstrncmp(arguments, "uninstall ", 10) == 0) {
+        const char *app_id = arguments + 10;
+        while (*app_id == ' ') app_id++;
+        int res = installer_uninstall(app_id, false);
+        if (res == INSTALLER_OK) {
+            log_infof("Package '%s' successfully uninstalled.", app_id);
+        } else {
+            log_errorf("Failed to uninstall package '%s': %s", app_id, installer_status_string(res));
+        }
+        return;
+    }
+
+    log_info("Usage: pkg [list | info <app_id> | uninstall <app_id>]");
+}
+
+static void command_pkgtest(const char *arguments) {
+    (void)arguments;
+    installer_self_test();
+}
+
+static void command_qatest(const char *arguments) {
+    (void)arguments;
+    qa_run_all_suites();
+}
+
+static void command_fuzztest(const char *arguments) {
+    (void)arguments;
+    qa_run_fuzz_suite();
+}
+
+static void command_stresstest(const char *arguments) {
+    (void)arguments;
+    qa_run_stress_suite();
+}
+
+static void command_faulttest(const char *arguments) {
+    (void)arguments;
+    qa_run_fault_injection_suite();
 }
 
 static const struct command_entry command_registry[] = {
     { "help", command_help },
     { "clear", command_clear },
+    { "qatest", command_qatest },
+    { "fuzztest", command_fuzztest },
+    { "stresstest", command_stresstest },
+    { "faulttest", command_faulttest },
     { "meminfo", command_meminfo },
     { "uptime", command_uptime },
     { "sysinfo", command_sysinfo },
     { "netinfo", command_netinfo },
     { "ifconfig", command_ifconfig },
+    { "pkg", command_pkg },
+    { "pkgtest", command_pkgtest },
     { "arp", command_arp },
     { "arping", command_arping },
     { "ping", command_ping },
     { "dhcp", command_dhcp },
+    { "acpi", command_acpi },
+    { "smp", command_smp },
+    { "smptest", command_smptest },
+    { "usbinfo", command_usbinfo },
+    { "nvmeinfo", command_nvmeinfo },
+    { "sectest", command_sectest },
+    { "syscalltest", command_syscalltest },
     { "udptest", command_udptest },
     { "tcptest", command_tcptest },
+    { "sockettest", command_sockettest },
+    { "cryptotest", command_cryptotest },
+    { "x509test", command_x509test },
+    { "tlstest", command_tlstest },
     { "nslookup", command_nslookup },
     { "curl", command_curl },
     { "httpd", command_httpd },

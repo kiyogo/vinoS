@@ -3,7 +3,7 @@
 
 #include <kos/cpu.h>
 #include <kos/net.h>
-#include <kos/e1000.h>
+#include <kos/net_device.h>
 #include <kos/sync.h>
 #include <kos/wait.h>
 #include <kos/task.h>
@@ -130,14 +130,18 @@ bool net_initialize(void) {
     datagrams_received = 0;
     datagrams_dropped = 0;
     next_ephemeral_port = NET_EPHEMERAL_PORT_START;
+    struct net_device *dev = net_device_get_default();
     uint8_t mac_address[NET_ETHERNET_ADDRESS_SIZE];
-    if (e1000_is_initialized() && !e1000_get_mac_address(mac_address)) {
-        spinlock_unlock_irqrestore(&network_lock, flags);
-        return false;
+    bool has_dev = false;
+    if (dev != 0) {
+        has_dev = true;
+        for (int i = 0; i < NET_ETHERNET_ADDRESS_SIZE; ++i) {
+            mac_address[i] = dev->mac_address[i];
+        }
     }
     initialized = true;
     spinlock_unlock_irqrestore(&network_lock, flags);
-    return !e1000_is_initialized() || net_ipv4_initialize_interface(mac_address);
+    return !has_dev || net_ipv4_initialize_interface(mac_address);
 }
 
 bool net_is_initialized(void) {
@@ -148,7 +152,7 @@ bool net_is_initialized(void) {
 }
 
 bool net_e1000_detected(void) {
-    return e1000_is_initialized();
+    return net_device_get_default() != 0;
 }
 
 uint64_t net_udp_datagrams_sent(void) {
@@ -385,6 +389,9 @@ void net_udp_receive(uint32_t source, uint32_t destination, const uint8_t *packe
     if (receiver == 0 || receiver->queue_count == NET_UDP_QUEUE_DEPTH) {
         ++datagrams_dropped;
         spinlock_unlock_irqrestore(&network_lock, flags);
+        if (receiver == 0 && destination != 0xffffffffu && (destination >> 24) != 127) {
+            (void)net_icmp_send_dest_unreachable(source, 3, packet, udp_length);
+        }
         return;
     }
 

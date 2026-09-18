@@ -14,6 +14,10 @@
 #include <kos/keyboard.h>
 #include <kos/log.h>
 #include <kos/net.h>
+#include <kos/socket.h>
+#include <kos/crypto.h>
+#include <kos/x509.h>
+#include <kos/tls.h>
 #include <kos/pmm.h>
 #include <kos/pic.h>
 #include <kos/pci.h>
@@ -32,6 +36,16 @@
 #include <kos/partition.h>
 #include <kos/fat32.h>
 #include <kos/volume.h>
+#include <kos/acpi.h>
+#include <kos/apic.h>
+#include <kos/smp.h>
+#include <kos/security.h>
+#include <kos/syscall.h>
+#include <kos/xhci.h>
+#include <kos/nvme.h>
+#include <kos/installer.h>
+#include <kos/qa.h>
+#include <kos/fault_injection.h>
 #include <limine.h>
 
 static KOS_NORETURN void kernel_halt(void) {
@@ -347,7 +361,22 @@ KOS_NORETURN void kernel_main(void) {
     ramdisk_init();
     virtio_blk_initialize();
     ahci_initialize();
+    nvme_initialize();
     block_cache_init();
+
+    /* Initialize ACPI, Local APIC, IOAPIC and SMP */
+    acpi_initialize();
+    lapic_initialize();
+    ioapic_initialize();
+    pic_disable();
+    smp_initialize();
+
+    /* Initialize Kernel Security (NX, SMEP, SMAP, Canary) and Fast Syscalls */
+    security_init_bsp();
+    syscall_subsystem_init();
+
+    /* Initialize USB Subsystem */
+    xhci_initialize();
 
     const struct limine_file *initramfs_module = find_initramfs_module();
     if (initramfs_module == 0 || !initramfs_initialize(initramfs_module->address,
@@ -365,6 +394,9 @@ KOS_NORETURN void kernel_main(void) {
     /* Initialize volume manager to auto-discover and mount storage partitions */
     volume_manager_init();
 
+    /* Initialize Application Package Database and Installer */
+    installer_subsystem_init();
+
     if (!vfs_volume_self_test()) {
         log_error("VFS multi-volume self-test failed.");
         kernel_halt();
@@ -375,6 +407,18 @@ KOS_NORETURN void kernel_main(void) {
         kernel_halt();
     }
     log_info("UDP loopback socket self-test passed.");
+    socket_subsystem_init();
+    if (!socket_self_test()) {
+        log_error("Socket subsystem self-test failed.");
+        kernel_halt();
+    }
+    log_info("Socket subsystem self-test passed.");
+    kos_entropy_initialize();
+    if (!kos_crypto_self_test()) {
+        log_error("Cryptographic primitives self-test failed.");
+        kernel_halt();
+    }
+    log_info("Cryptographic primitives self-test passed: SHA-256, SHA-384, HMAC, HKDF, X25519, AES-GCM, ChaCha20-Poly1305 OK.");
     if (!net_icmp_self_test()) {
         log_error("ICMP checksum self-test failed.");
         kernel_halt();
@@ -413,6 +457,22 @@ KOS_NORETURN void kernel_main(void) {
         log_error("Bootstrap command execution failure.");
         kernel_halt();
     }
+    /* Initialize Fault Injection Subsystem */
+    fault_injection_init();
+
+    (void)kernel_command_execute("sockettest");
+    (void)kernel_command_execute("cryptotest");
+    (void)kernel_command_execute("x509test");
+    (void)kernel_command_execute("tlstest");
+    (void)kernel_command_execute("acpi");
+    (void)kernel_command_execute("smp");
+    (void)kernel_command_execute("smptest");
+    (void)kernel_command_execute("usbinfo");
+    (void)kernel_command_execute("nvmeinfo");
+    (void)kernel_command_execute("sectest");
+    (void)kernel_command_execute("syscalltest");
+    (void)kernel_command_execute("pkgtest");
+    (void)kernel_command_execute("qatest");
     (void)kernel_command_execute("tcptest 1.1.1.1 80");
     (void)kernel_command_execute("nslookup example.com");
     (void)kernel_command_execute("curl http://example.com/");

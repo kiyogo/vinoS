@@ -21,23 +21,27 @@
 #define ARRAY_COUNT(items) (sizeof(items) / sizeof((items)[0]))
 
 static const char *const c_sources[] = {
-    "boot/limine_requests.c", "arch/x86_64/cpu_control.c", "arch/x86_64/descriptors.c",
-    "arch/x86_64/interrupts.c", "arch/x86_64/pci.c", "arch/x86_64/pic.c",
+    "boot/limine_requests.c", "arch/x86_64/acpi.c", "arch/x86_64/apic.c", "arch/x86_64/cpu_control.c",
+    "arch/x86_64/descriptors.c", "arch/x86_64/interrupts.c", "arch/x86_64/ioapic.c", "arch/x86_64/pci.c",
+    "arch/x86_64/pic.c", "arch/x86_64/security.c", "arch/x86_64/smp.c", "arch/x86_64/syscall_init.c",
     "drivers/ahci.c", "drivers/block.c", "drivers/driver.c", "drivers/e1000.c", "drivers/framebuffer.c",
-    "drivers/keyboard.c", "drivers/ramdisk.c", "drivers/serial.c", "drivers/timer.c", "drivers/virtio_blk.c",
+    "drivers/keyboard.c", "drivers/nvme.c", "drivers/ramdisk.c", "drivers/serial.c", "drivers/timer.c",
+    "drivers/virtio_blk.c", "drivers/usb/xhci.c", "drivers/usb/usb_hid.c",
     "fs/block_cache.c", "fs/elf.c", "fs/fat32.c", "fs/initramfs.c", "fs/partition.c", "fs/ramfs.c", "fs/vfs.c", "fs/volume.c",
     "kernel/command.c", "kernel/console.c", "kernel/log.c", "kernel/main.c", "kernel/mutex.c",
     "kernel/panic.c", "kernel/spinlock.c", "kernel/symbol.c", "kernel/syscall.c", "kernel/system.c",
-    "kernel/process.c", "kernel/task.c", "kernel/object.c", "kernel/handle.c", "kernel/wait.c",
-    "lib/crypto.c", "lib/memory.c",
+    "kernel/process.c", "kernel/task.c", "kernel/object.c", "kernel/handle.c", "kernel/uaccess.c", "kernel/wait.c",
+    "lib/asn1.c", "lib/crypto.c", "lib/kpkg.c", "lib/memory.c", "lib/x509.c",
+    "kernel/pkg_db.c", "kernel/installer.c",
+    "kernel/qa_framework.c", "kernel/qa_fuzz.c", "kernel/qa_stress.c", "kernel/fault_injection.c",
     "net/arp.c", "net/dhcp.c", "net/dns.c", "net/ethernet.c", "net/http.c", "net/httpd.c", "net/icmp.c",
-    "net/ipv4.c", "net/socket.c", "net/tcp.c", "net/tls.c",
+    "net/ipv4.c", "net/net_device.c", "net/socket.c", "net/socket_subsystem.c", "net/tcp.c", "net/tls.c",
     "kernel/terminal.c", "mm/heap.c", "mm/pmm.c", "mm/vmm.c",
 };
 
 static const char *const asm_sources[] = {
     "boot/entry.asm", "arch/x86_64/cpu.asm", "arch/x86_64/interrupt_stubs.asm",
-    "arch/x86_64/task_switch.asm",
+    "arch/x86_64/syscall_entry.asm", "arch/x86_64/task_switch.asm",
 };
 
 static int fail(const char *message) {

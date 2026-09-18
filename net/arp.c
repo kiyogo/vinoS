@@ -14,6 +14,7 @@ enum {
     ARP_OPERATION_REQUEST = 1,
     ARP_OPERATION_REPLY = 2,
     ARP_ETHERTYPE = 0x0806,
+    ARP_ENTRY_TTL_TICKS = 6000, /* 60 seconds at 100 Hz */
 };
 
 static struct net_arp_cache_entry arp_cache[NET_ARP_CACHE_MAX];
@@ -52,15 +53,33 @@ static bool mac_equal(const uint8_t left[NET_ETHERNET_ADDRESS_SIZE],
     return true;
 }
 
+void net_arp_cache_prune(void) {
+    uint64_t flags = spinlock_lock_irqsave(&arp_lock);
+    uint64_t now = timer_ticks();
+    for (uint64_t index = 0; index < NET_ARP_CACHE_MAX; ++index) {
+        if (arp_cache[index].valid && arp_cache[index].expires_at_tick > 0 && now >= arp_cache[index].expires_at_tick) {
+            arp_cache[index].valid = false;
+        }
+    }
+    spinlock_unlock_irqrestore(&arp_lock, flags);
+}
+
 static bool arp_lookup(uint32_t ipv4_address, uint8_t mac_address[NET_ETHERNET_ADDRESS_SIZE]) {
     uint64_t flags = spinlock_lock_irqsave(&arp_lock);
+    uint64_t now = timer_ticks();
     for (uint64_t index = 0; index < NET_ARP_CACHE_MAX; ++index) {
-        if (arp_cache[index].valid && arp_cache[index].ipv4_address == ipv4_address) {
-            for (uint64_t byte = 0; byte < NET_ETHERNET_ADDRESS_SIZE; ++byte) {
-                mac_address[byte] = arp_cache[index].mac_address[byte];
+        if (arp_cache[index].valid) {
+            if (arp_cache[index].expires_at_tick > 0 && now >= arp_cache[index].expires_at_tick) {
+                arp_cache[index].valid = false;
+                continue;
             }
-            spinlock_unlock_irqrestore(&arp_lock, flags);
-            return true;
+            if (arp_cache[index].ipv4_address == ipv4_address) {
+                for (uint64_t byte = 0; byte < NET_ETHERNET_ADDRESS_SIZE; ++byte) {
+                    mac_address[byte] = arp_cache[index].mac_address[byte];
+                }
+                spinlock_unlock_irqrestore(&arp_lock, flags);
+                return true;
+            }
         }
     }
     spinlock_unlock_irqrestore(&arp_lock, flags);
@@ -71,7 +90,12 @@ static void arp_remember(uint32_t ipv4_address, const uint8_t mac_address[NET_ET
     uint64_t flags = spinlock_lock_irqsave(&arp_lock);
     uint64_t slot = 0;
     uint64_t oldest_tick = UINT64_MAX;
+    uint64_t now = timer_ticks();
+
     for (uint64_t index = 0; index < NET_ARP_CACHE_MAX; ++index) {
+        if (arp_cache[index].valid && arp_cache[index].expires_at_tick > 0 && now >= arp_cache[index].expires_at_tick) {
+            arp_cache[index].valid = false;
+        }
         if (arp_cache[index].valid && arp_cache[index].ipv4_address == ipv4_address) {
             slot = index;
             oldest_tick = 0;
@@ -89,7 +113,8 @@ static void arp_remember(uint32_t ipv4_address, const uint8_t mac_address[NET_ET
     }
     arp_cache[slot].valid = true;
     arp_cache[slot].ipv4_address = ipv4_address;
-    arp_cache[slot].learned_at_tick = timer_ticks();
+    arp_cache[slot].learned_at_tick = now;
+    arp_cache[slot].expires_at_tick = now + ARP_ENTRY_TTL_TICKS;
     for (uint64_t byte = 0; byte < NET_ETHERNET_ADDRESS_SIZE; ++byte) {
         arp_cache[slot].mac_address[byte] = mac_address[byte];
     }
@@ -196,8 +221,13 @@ uint64_t net_arp_replies_received(void) { return arp_replies; }
 uint64_t net_arp_cache_count(void) {
     uint64_t flags = spinlock_lock_irqsave(&arp_lock);
     uint64_t count = 0;
+    uint64_t now = timer_ticks();
     for (uint64_t index = 0; index < NET_ARP_CACHE_MAX; ++index) {
         if (arp_cache[index].valid) {
+            if (arp_cache[index].expires_at_tick > 0 && now >= arp_cache[index].expires_at_tick) {
+                arp_cache[index].valid = false;
+                continue;
+            }
             ++count;
         }
     }
@@ -211,8 +241,13 @@ bool net_arp_cache_at(uint64_t index, struct net_arp_cache_entry *entry) {
     }
     uint64_t flags = spinlock_lock_irqsave(&arp_lock);
     uint64_t seen = 0;
+    uint64_t now = timer_ticks();
     for (uint64_t slot = 0; slot < NET_ARP_CACHE_MAX; ++slot) {
         if (arp_cache[slot].valid) {
+            if (arp_cache[slot].expires_at_tick > 0 && now >= arp_cache[slot].expires_at_tick) {
+                arp_cache[slot].valid = false;
+                continue;
+            }
             if (seen == index) {
                 *entry = arp_cache[slot];
                 spinlock_unlock_irqrestore(&arp_lock, flags);

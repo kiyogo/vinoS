@@ -69,6 +69,8 @@ _Static_assert(__builtin_offsetof(struct interrupt_context, ss) == 0xA8, "ss off
 typedef void (*irq_handler)(uint8_t irq, void *context);
 typedef void (*exception_handler_t)(struct interrupt_context *context);
 
+typedef void (*exception_handler_t)(struct interrupt_context *context);
+
 /* Hardware PIC IRQ (vectors 32 to 47) APIs */
 bool irq_register_handler(uint8_t irq, irq_handler handler);
 bool irq_unregister_handler(uint8_t irq, irq_handler handler);
@@ -84,5 +86,7 @@ uint64_t exception_dispatch_count(uint8_t vector);
 /* Self-test and verification */
 bool exception_self_test(void);
 uint8_t idt_get_gate_ist(uint8_t vector);
+void idt_initialize(void);
+void idt_reload(void);
 
 #endif /* KOS_INTERRUPTS_H */
