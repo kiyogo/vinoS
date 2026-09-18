@@ -4,29 +4,26 @@ KOS is an independent x86_64 desktop operating-system project. Its long-term goa
 
 ## Key Highlights
 
-- Aore AI OS: Dedicated system architecture for AI agents to run and control the operating system natively, near future goal.
-- Interface Installer: Choose custom desktop environments downloaded from the network or use the default offline interface during installation, near future goal.
+- Aore AI OS: Dedicated system for AI agents to control the OS natively, near future goal.
+- Interface Installer: Select custom online interfaces or use the default offline interface during install, near future goal.
 
 ## Current Features
 
-- 64-bit monolithic kernel on x86_64 with Limine bootloader
-- PMM, VMM, and dynamic kernel heap memory management
-- SMP multicore support and preemptive thread multitasking
-- Hardware interrupts, Ring 3 user mode isolation, and fast syscall path
-- AHCI SATA, NVMe, VirtIO Block, and RAM disk drivers
-- MBR and GPT partition support with block cache
-- Windows style volume manager and FAT32 filesystem
-- Intel e1000 network driver and IPv4 network stack with TCP, UDP, DHCP, DNS
-- HTTP, HTTPS, TLS 1.3, and cryptography support
-- ELF64 binary loader, package manager, and kernel terminal
+- 64-bit monolithic kernel with Limine bootloader
+- PMM, VMM, and dynamic kernel heap
+- SMP multicore and preemptive multitasking
+- Ring 3 isolation and fast syscall path
+- AHCI, NVMe, VirtIO Block, and RAM disk drivers
+- MBR, GPT, block cache, Windows volumes, and FAT32
+- Intel e1000 driver and IPv4 network stack with TCP, UDP, DHCP, DNS
+- HTTP, HTTPS, TLS 1.3, and crypto support
+- ELF64 loader, package manager, and debug terminal
 
 ## Future Goals
 
-- Aore AI core subsystem and agent automation APIs
+- Aore AI core subsystem and automation APIs
 - Windows application compatibility layer
-- Graphical desktop environment and window manager
 - Online desktop interface installer
-- Native web browser engine
 
 ## Documentation
 
@@ -37,4 +34,5 @@ KOS is an independent x86_64 desktop operating-system project. Its long-term goa
 - [Architecture](docs/architecture.md)
 - [Boot Process](docs/boot-process.md)
 - [Environment Setup](docs/environment.md)
+
 
