@@ -556,6 +556,17 @@ KOS_NORETURN void thread_exit(int exit_code) {
     cur->exit_code = exit_code;
     cur->state = THREAD_STATE_ZOMBIE;
 
+    struct process *proc = cur->process;
+    if (proc != NULL && proc != &kernel_process && proc != &idle_process) {
+        uint64_t pflags = spinlock_lock_irqsave(&proc->lock);
+        if (proc->state == PROCESS_STATE_ACTIVE) {
+            proc->exit_code = exit_code;
+            proc->state = PROCESS_STATE_ZOMBIE;
+            wait_queue_wake_all(&proc->exit_wq);
+        }
+        spinlock_unlock_irqrestore(&proc->lock, pflags);
+    }
+
     /* Enqueue onto reaper_queue and wake up reaper thread */
     uint64_t flags = spinlock_lock_irqsave(&reaper_lock);
     list_add_tail(&cur->reaper_node, &reaper_queue);

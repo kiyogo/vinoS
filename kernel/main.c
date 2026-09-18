@@ -405,6 +405,17 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("handletest");
     (void)kernel_command_execute("waittest");
     (void)kernel_command_execute("synctest");
+    (void)kernel_command_execute("atomictest");
+    (void)kernel_command_execute("locktest");
+    (void)kernel_command_execute("mutextest");
+    (void)kernel_command_execute("timertest");
+    (void)kernel_command_execute("sleeptest");
+    (void)kernel_command_execute("preempttest");
+    (void)kernel_command_execute("processtest");
+    (void)kernel_command_execute("stacktest");
+    (void)kernel_command_execute("pftest");
+    (void)kernel_command_execute("panictest");
+    (void)kernel_command_execute("kstress");
     if (!terminal_initialize()) {
         log_error("Kernel terminal initialization failed.");
         kernel_halt();

@@ -2883,20 +2883,20 @@ static void command_atomictest(const char *arguments) {
     if (atomic_read(&a32) != 100) passed = false;
     atomic_set(&a32, 200);
     if (atomic_read(&a32) != 200) passed = false;
-    atomic_add(50, &a32);
+    atomic_add(&a32, 50);
     if (atomic_read(&a32) != 250) passed = false;
-    atomic_sub(30, &a32);
+    atomic_sub(&a32, 30);
     if (atomic_read(&a32) != 220) passed = false;
     atomic_inc(&a32);
     if (atomic_read(&a32) != 221) passed = false;
     atomic_dec(&a32);
     if (atomic_read(&a32) != 220) passed = false;
-    if (atomic_add_return(10, &a32) != 230) passed = false;
-    if (atomic_sub_return(20, &a32) != 210) passed = false;
+    if (atomic_add_return(&a32, 10) != 230) passed = false;
+    if (atomic_sub_return(&a32, 20) != 210) passed = false;
     if (atomic_inc_return(&a32) != 211) passed = false;
     if (atomic_dec_return(&a32) != 210) passed = false;
-    if (atomic_fetch_add(5, &a32) != 210 || atomic_read(&a32) != 215) passed = false;
-    if (atomic_fetch_sub(15, &a32) != 215 || atomic_read(&a32) != 200) passed = false;
+    if (atomic_fetch_add(&a32, 5) != 210 || atomic_read(&a32) != 215) passed = false;
+    if (atomic_fetch_sub(&a32, 15) != 215 || atomic_read(&a32) != 200) passed = false;
     if (atomic_xchg(&a32, 500) != 200 || atomic_read(&a32) != 500) passed = false;
     if (atomic_cmpxchg(&a32, 500, 999) != 500 || atomic_read(&a32) != 999) passed = false;
     if (atomic_cmpxchg(&a32, 500, 111) != 999 || atomic_read(&a32) != 999) passed = false;
@@ -2906,16 +2906,16 @@ static void command_atomictest(const char *arguments) {
     if (atomic64_read(&a64) != (int64_t)0x1000000000ULL) passed = false;
     atomic64_set(&a64, 0x2000000000ULL);
     if (atomic64_read(&a64) != (int64_t)0x2000000000ULL) passed = false;
-    atomic64_add(0x1000, &a64);
+    atomic64_add(&a64, 0x1000);
     if (atomic64_read(&a64) != (int64_t)0x2000001000ULL) passed = false;
-    atomic64_sub(0x500, &a64);
+    atomic64_sub(&a64, 0x500);
     if (atomic64_read(&a64) != (int64_t)0x2000000B00ULL) passed = false;
     atomic64_inc(&a64);
     if (atomic64_read(&a64) != (int64_t)0x2000000B01ULL) passed = false;
     atomic64_dec(&a64);
     if (atomic64_read(&a64) != (int64_t)0x2000000B00ULL) passed = false;
-    if (atomic64_add_return(0x100, &a64) != (int64_t)0x2000000C00ULL) passed = false;
-    if (atomic64_sub_return(0x200, &a64) != (int64_t)0x2000000A00ULL) passed = false;
+    if (atomic64_add_return(&a64, 0x100) != (int64_t)0x2000000C00ULL) passed = false;
+    if (atomic64_sub_return(&a64, 0x200) != (int64_t)0x2000000A00ULL) passed = false;
     if (atomic64_inc_return(&a64) != (int64_t)0x2000000A01ULL) passed = false;
     if (atomic64_dec_return(&a64) != (int64_t)0x2000000A00ULL) passed = false;
     if (atomic64_xchg(&a64, 0x7777777777ULL) != (int64_t)0x2000000A00ULL || atomic64_read(&a64) != (int64_t)0x7777777777ULL) passed = false;
@@ -3393,6 +3393,16 @@ static void command_stacktest(const char *arguments) {
     log_info("==================================================");
 }
 
+static bool cmd_streq(const char *left, const char *right) {
+    if (left == NULL || right == NULL) return false;
+    while (*left != '\0' && *right != '\0') {
+        if (*left != *right) return false;
+        left++;
+        right++;
+    }
+    return *left == *right;
+}
+
 /* ========================================================================= */
 /* Diagnostic Command: pftest (K12.2)                                        */
 /* ========================================================================= */
@@ -3428,7 +3438,7 @@ static void command_pftest(const char *arguments) {
         log_error("  [FAIL] Page fault decoder flag extraction mismatch!");
     }
 
-    if (arguments != NULL && strings_equal(arguments, "crash")) {
+    if (arguments != NULL && cmd_streq(arguments, "crash")) {
         log_info("  Intentional CR2 page fault requested! Triggering write to 0xDEADBEEF000...");
         volatile uint64_t *ptr = (volatile uint64_t *)0xDEADBEEF000ULL;
         *ptr = 0x1234;
@@ -3457,10 +3467,10 @@ static void command_panictest(const char *arguments) {
     log_info("  - RBP stack frame unwinding with O(log N) symbol lookup");
     log_info("  - Atomic recursion guard preventing recursive panic loops");
 
-    if (arguments != NULL && strings_equal(arguments, "crash")) {
+    if (arguments != NULL && cmd_streq(arguments, "crash")) {
         log_info("Triggering intentional panic...");
         panic("Intentional kernel panic triggered via 'panictest crash' command");
-    } else if (arguments != NULL && strings_equal(arguments, "recursion")) {
+    } else if (arguments != NULL && cmd_streq(arguments, "recursion")) {
         log_info("Triggering intentional panic recursion guard test...");
         panic_test_recursion();
     } else {
@@ -3532,14 +3542,14 @@ static void kstress_ramfs_worker(void *arg) {
     static const uint8_t test_payload[] = "KOS Stress Test Payload 2026";
     for (uint32_t i = 0; i < w->iterations; ++i) {
         char filename[32];
-        filename[0] = 'D'; filename[1] = ':'; filename[2] = '\\';
+        filename[0] = 'D'; filename[1] = ':'; filename[2] = '/';
         filename[3] = 's'; filename[4] = 't'; filename[5] = 'r';
         filename[6] = 'e'; filename[7] = 's'; filename[8] = 's';
         filename[9] = '_'; filename[10] = (char)('0' + (w->worker_id % 10));
         filename[11] = '.'; filename[12] = 't'; filename[13] = 'x';
         filename[14] = 't'; filename[15] = '\0';
 
-        if (!ramfs_write_file(filename, test_payload, sizeof(test_payload))) {
+        if (!vfs_write_file(filename, test_payload, sizeof(test_payload))) {
             w->errors++;
         } else {
             const uint8_t *read_ptr = NULL;
@@ -3547,7 +3557,7 @@ static void kstress_ramfs_worker(void *arg) {
             if (!vfs_read_file(filename, &read_ptr, &read_sz) || read_sz != sizeof(test_payload)) {
                 w->errors++;
             }
-            if (!ramfs_unlink_file(filename)) {
+            if (!vfs_unlink_file(filename)) {
                 w->errors++;
             }
         }
@@ -3622,6 +3632,12 @@ static void command_kstress(const char *arguments) {
             log_errorf("  [FAIL] Worker %d recorded %u errors!", i, workers[i].errors);
             all_passed = false;
         }
+    }
+
+    /* Allow reaper thread to collect zombie worker stacks */
+    for (int r = 0; r < 5; ++r) {
+        task_reap_terminated();
+        task_yield();
     }
 
     /* Verify memory reclamation */
