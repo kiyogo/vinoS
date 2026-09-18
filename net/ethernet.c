@@ -23,19 +23,6 @@ static uint16_t read_u16_be(const uint8_t *data) {
 static uint64_t frames_sent;
 static uint64_t frames_received;
 static uint64_t frames_dropped;
-static uint64_t malformed_frames;
-static uint64_t unknown_protocols;
-
-static bool ethernet_destination_is_accepted(const uint8_t destination[NET_ETHERNET_ADDRESS_SIZE],
-        const uint8_t local[NET_ETHERNET_ADDRESS_SIZE]) {
-    bool broadcast = true;
-    bool local_match = true;
-    for (uint64_t index = 0; index < NET_ETHERNET_ADDRESS_SIZE; ++index) {
-        if (destination[index] != 0xff) broadcast = false;
-        if (destination[index] != local[index]) local_match = false;
-    }
-    return broadcast || local_match || (destination[0] & 1u) != 0;
-}
 
 bool net_ethernet_send(const uint8_t destination[NET_ETHERNET_ADDRESS_SIZE], uint16_t ether_type,
         const uint8_t *payload, uint64_t payload_size) {
@@ -44,8 +31,7 @@ bool net_ethernet_send(const uint8_t destination[NET_ETHERNET_ADDRESS_SIZE], uin
         return false;
     }
     struct net_interface_info interface;
-    if (!net_interface_info(&interface) || !interface.available
-        || interface.link_state != NET_LINK_UP) {
+    if (!net_interface_info(&interface) || !interface.available) {
         return false;
     }
     uint8_t frame[NET_ETHERNET_FRAME_MAX];
@@ -73,14 +59,8 @@ bool net_ethernet_wait_for_transmit(uint64_t timeout_ticks) {
 uint64_t net_ethernet_frames_sent(void) { return frames_sent; }
 uint64_t net_ethernet_frames_received(void) { return frames_received; }
 uint64_t net_ethernet_frames_dropped(void) { return frames_dropped; }
-uint64_t net_ethernet_malformed_frame_count(void) { return malformed_frames; }
-uint64_t net_ethernet_unknown_protocol_count(void) { return unknown_protocols; }
 
 void net_poll(void) {
-    e1000_service();
-    if (e1000_is_initialized()) {
-        net_ipv4_set_link_state(e1000_link_is_up() ? NET_LINK_UP : NET_LINK_DOWN);
-    }
     uint8_t frame[NET_ETHERNET_FRAME_MAX];
     for (uint64_t packet = 0; packet < ETHERNET_POLL_BUDGET; ++packet) {
         uint64_t size;
@@ -88,13 +68,6 @@ void net_poll(void) {
             break;
         }
         if (size < ETHERNET_HEADER_SIZE) {
-            ++frames_dropped;
-            ++malformed_frames;
-            continue;
-        }
-        struct net_interface_info interface;
-        if (!net_interface_info(&interface) || !interface.available
-            || !ethernet_destination_is_accepted(frame, interface.mac_address)) {
             ++frames_dropped;
             continue;
         }
@@ -109,11 +82,7 @@ void net_poll(void) {
         else if (ether_type == ETHER_TYPE_IPV4) {
             net_ipv4_receive(source, payload, payload_size);
         }
-        else {
-            ++unknown_protocols;
-        }
     }
-    net_arp_poll();
     net_tcp_poll();
     httpd_poll();
 }

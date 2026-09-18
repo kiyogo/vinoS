@@ -35,6 +35,8 @@ struct process {
     uint64_t pml4_physical;
     kos_spinlock_t lock;
     struct list_head process_node;
+    struct list_head children;
+    struct list_head sibling_node;
     struct handle_table *handles;
     struct wait_queue exit_wq;
 };
@@ -44,12 +46,14 @@ bool process_subsystem_init(void);
 
 /* Process lifecycle */
 struct process *process_create(const char *name);
+int process_exec(const char *path, int argc, char *const argv[]);
 void process_exit(struct process *proc, int exit_code);
 void process_destroy(struct process *proc);
 struct process *process_get_current(void);
 struct process *process_find_by_pid(uint64_t pid);
 uint64_t process_count(void);
 bool process_wait(struct process *proc, int *exit_code, uint64_t timeout_ms);
+bool process_lifecycle_self_test(void);
 
 /* Fixed bootstrap and idle processes */
 struct process *process_get_kernel(void);

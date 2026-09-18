@@ -83,7 +83,6 @@ KOS_NORETURN void terminal_run(void) {
     for (;;) {
         task_reschedule_if_needed();
         net_poll();
-        net_dhcp_service();
         char character;
         if (keyboard_read_char(&character)) {
             terminal_handle_character(character);

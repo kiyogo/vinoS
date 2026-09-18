@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdbool.h>
 
 #include <kos/command.h>
@@ -20,8 +21,24 @@
 #include <kos/vfs.h>
 #include <kos/heap.h>
 #include <kos/ramfs.h>
+#include <kos/handle.h>
+#include <kos/object.h>
+#include <kos/process.h>
+#include <kos/wait.h>
+#include <kos/atomic.h>
+#include <kos/spinlock.h>
+#include <kos/mutex.h>
+#include <kos/panic.h>
+#include <kos/page_fault.h>
+#include <kos/symbol.h>
+#include <kos/vmm.h>
+
+void *memset(void *destination, int value, size_t size);
+void *memcpy(void *destination, const void *source, size_t size);
 
 typedef void (*command_handler)(const char *arguments);
+
+static void command_usertest(const char *arguments);
 
 struct command_entry {
     const char *name;
@@ -30,7 +47,7 @@ struct command_entry {
 
 static void command_help(const char *arguments) {
     (void)arguments;
-    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo");
+    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
 }
 
 static void command_clear(const char *arguments) {
@@ -1116,7 +1133,7 @@ static void command_synctest(const char *arguments) {
 
         uint64_t final_frames = pmm_allocated_frame_count();
         if (total_errors > 0 || final_frames != initial_frames) {
-            log_errorf("  [FAIL] PMM stress errors=%u, initial=%llu, final=%llu", total_errors, initial_frames, final_frames);
+            log_errorf("  [FAIL] PMM stress errors=%u, initial=%lu, final=%lu", total_errors, initial_frames, final_frames);
             all_passed = false;
         } else {
             log_infof("  4 threads completed %d iterations each with 0 leaks.", ITERS);
@@ -1174,7 +1191,7 @@ static void command_synctest(const char *arguments) {
 
         uint64_t final_allocs = heap_active_allocation_count();
         if (total_errors > 0 || final_allocs != initial_allocs) {
-            log_errorf("  [FAIL] Heap stress errors=%u, initial=%llu, final=%llu", total_errors, initial_allocs, final_allocs);
+            log_errorf("  [FAIL] Heap stress errors=%u, initial=%lu, final=%lu", total_errors, initial_allocs, final_allocs);
             all_passed = false;
         } else {
             log_infof("  4 threads completed %d iterations with malloc/calloc/realloc/free.", ITERS);
@@ -1228,7 +1245,7 @@ static void command_synctest(const char *arguments) {
         uint64_t final_files = vfs_file_count_on_volume('D');
         uint32_t errs = w_a.errors + w_b.errors + w_r.errors;
         if (!w_a.finished || !w_b.finished || !w_r.finished || errs > 0 || final_files != initial_files) {
-            log_errorf("  [FAIL] VFS concurrent stress errors=%u, files initial=%llu, final=%llu", errs, initial_files, final_files);
+            log_errorf("  [FAIL] VFS concurrent stress errors=%u, files initial=%lu, final=%lu", errs, initial_files, final_files);
             all_passed = false;
         } else {
             log_info("  Concurrent writers and readers completed with clean unlinks.");
@@ -1274,11 +1291,11 @@ static void command_synctest(const char *arguments) {
                     uint64_t elapsed_ms = timer_ticks_to_ms(timer_get_ticks() - t0);
 
                     if (!ok || recv_size != 13) {
-                        log_errorf("  [FAIL] Timed UDP receive failed! ok=%d, size=%llu", (int)ok, recv_size);
+                        log_errorf("  [FAIL] Timed UDP receive failed! ok=%d, size=%lu", (int)ok, recv_size);
                         all_passed = false;
                     } else {
                         buffer[recv_size] = '\0';
-                        log_infof("  Received message '%s' in %llu ms via socket wait queue.", (const char *)buffer, elapsed_ms);
+                        log_infof("  Received message '%s' in %lu ms via socket wait queue.", (const char *)buffer, elapsed_ms);
 
                         /* Test empty socket timeout (30ms timeout) */
                         uint64_t t_to0 = timer_get_ticks();
@@ -1289,7 +1306,7 @@ static void command_synctest(const char *arguments) {
                             log_error("  [FAIL] Expected timeout on empty socket but received data!");
                             all_passed = false;
                         } else {
-                            log_infof("  Empty socket cleanly timed out in %llu ms (expected ~30ms).", to_elapsed);
+                            log_infof("  Empty socket cleanly timed out in %lu ms (expected ~30ms).", to_elapsed);
                             log_info("  [PASS] Socket wait queue non-busy synchronization verified!");
                         }
                     }
@@ -1306,6 +1323,8 @@ static void command_synctest(const char *arguments) {
         log_error(">>> [FAIL] ONE OR MORE SUBSYSTEM SYNCHRONIZATION TESTS FAILED! <<<");
     }
     log_info("==================================================");
+    /* Milestone K14: Automatic verification of Ring 3 userspace & process tests */
+    command_usertest("all");
 }
 
 /*
@@ -2076,6 +2095,1562 @@ static void command_waittest(const char *arguments) {
     log_info("==================================================");
 }
 
+/*
+ * ============================================================================
+ * Milestone K14: Process, Ring 3 Userspace & Verification Suite (usertest)
+ * ============================================================================
+ */
+
+static bool usertest_streq(const char *s1, const char *s2) {
+    if (s1 == NULL || s2 == NULL) {
+        return false;
+    }
+    while (*s1 != '\0' && *s2 != '\0') {
+        if (*s1 != *s2) {
+            return false;
+        }
+        s1++;
+        s2++;
+    }
+    return *s1 == *s2;
+}
+
+static bool create_test_elf(uint8_t *buf, uint64_t buf_cap, uint64_t *out_size,
+                            uint64_t vaddr, const uint8_t *code, uint64_t code_len) {
+    if (buf == NULL || out_size == NULL || code == NULL || code_len == 0) {
+        return false;
+    }
+    uint64_t header_bytes = sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
+    uint64_t total_size = header_bytes + code_len;
+    if (buf_cap < total_size) {
+        return false;
+    }
+
+    memset(buf, 0, total_size);
+
+    Elf64_Ehdr *ehdr = (Elf64_Ehdr *)buf;
+    ehdr->e_ident[EI_MAG0] = ELFMAG0;
+    ehdr->e_ident[EI_MAG1] = ELFMAG1;
+    ehdr->e_ident[EI_MAG2] = ELFMAG2;
+    ehdr->e_ident[EI_MAG3] = ELFMAG3;
+    ehdr->e_ident[EI_CLASS] = ELFCLASS64;
+    ehdr->e_ident[EI_DATA] = ELFDATA2LSB;
+    ehdr->e_ident[EI_VERSION] = EV_CURRENT;
+    ehdr->e_ident[EI_OSABI] = 0;
+    ehdr->e_type = ET_EXEC;
+    ehdr->e_machine = EM_X86_64;
+    ehdr->e_version = EV_CURRENT;
+    ehdr->e_entry = vaddr + header_bytes;
+    ehdr->e_phoff = sizeof(Elf64_Ehdr);
+    ehdr->e_ehsize = sizeof(Elf64_Ehdr);
+    ehdr->e_phentsize = sizeof(Elf64_Phdr);
+    ehdr->e_phnum = 1;
+
+    Elf64_Phdr *phdr = (Elf64_Phdr *)(buf + sizeof(Elf64_Ehdr));
+    phdr->p_type = PT_LOAD;
+    phdr->p_flags = PF_R | PF_X | PF_W;
+    phdr->p_offset = 0;
+    phdr->p_vaddr = vaddr;
+    phdr->p_paddr = vaddr;
+    phdr->p_filesz = total_size;
+    phdr->p_memsz = total_size > 4096 ? total_size : 4096;
+    phdr->p_align = 0x1000;
+
+    memcpy(buf + header_bytes, code, code_len);
+    *out_size = total_size;
+    return true;
+}
+
+static void usertest_child_launcher(void *arg) {
+    const char *path = (const char *)arg;
+    int res = process_exec(path, 0, NULL);
+    struct process *cur = process_get_current();
+    if (cur != NULL && cur->pid > 1) {
+        process_exit(cur, res);
+    }
+    thread_exit(res);
+}
+
+/*
+ * Test 1: Valid ELF64 binary execution in Ring 3
+ */
+static bool test_valid_elf_execution(void) {
+    log_info("[usertest] 1. Valid ELF64 binary execution...");
+    uint64_t initial_frames = pmm_free_frame_count();
+    uint64_t initial_heap = heap_active_allocation_count();
+
+    /* Ring 3 user code:
+     * mov rax, 4   ; KOS_SYSCALL_EXIT
+     * mov rdi, 42  ; exit code 42
+     * int 0x80     ; syscall dispatch -> process_exit
+     * jmp $
+     */
+    static const uint8_t valid_code[] = {
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00, /* mov rax, 4 */
+        0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00, /* mov rdi, 42 */
+        0xCD, 0x80,                               /* int 0x80 */
+        0xEB, 0xFE                                /* jmp $ */
+    };
+
+    uint8_t elf_buf[512];
+    uint64_t elf_size = 0;
+    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, valid_code, sizeof(valid_code))) {
+        log_error("  [FAIL] Failed to construct valid test ELF image");
+        return false;
+    }
+
+    if (!vfs_write_file("D:/valid.elf", elf_buf, elf_size)) {
+        log_error("  [FAIL] Failed to write D:/valid.elf to ramfs");
+        return false;
+    }
+
+    struct process *child = process_create("valid_proc");
+    if (child == NULL) {
+        log_error("  [FAIL] Failed to create valid_proc child process");
+        vfs_unlink_file("D:/valid.elf");
+        return false;
+    }
+
+    struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/valid.elf", "valid_t");
+    if (t == NULL) {
+        log_error("  [FAIL] Failed to create valid_t thread");
+        process_destroy(child);
+        vfs_unlink_file("D:/valid.elf");
+        return false;
+    }
+
+    int exit_code = 0;
+    bool wait_ok = process_wait(child, &exit_code, 3000);
+    vfs_unlink_file("D:/valid.elf");
+    task_yield();
+
+    if (!wait_ok) {
+        log_error("  [FAIL] process_wait timed out for valid_proc");
+        return false;
+    }
+
+    if (exit_code != 42) {
+        log_errorf("  [FAIL] Expected exit code 42, got %d", exit_code);
+        return false;
+    }
+
+    if (child->state != PROCESS_STATE_DEAD) {
+        log_error("  [FAIL] Child process was not cleanly reaped to DEAD");
+        return false;
+    }
+
+    uint64_t final_frames = pmm_free_frame_count();
+    uint64_t final_heap = heap_active_allocation_count();
+
+    if (final_frames != initial_frames) {
+        log_errorf("  [FAIL] Valid ELF execution leaked frames: before=%llu, after=%llu",
+                   (unsigned long long)initial_frames, (unsigned long long)final_frames);
+        return false;
+    }
+
+    if (final_heap != initial_heap) {
+        log_errorf("  [FAIL] Valid ELF execution leaked heap: before=%llu, after=%llu",
+                   (unsigned long long)initial_heap, (unsigned long long)final_heap);
+        return false;
+    }
+
+    log_info("  [PASS] Test 1: Valid ELF64 binary execution (exit_code=42, 0 leaks)");
+    return true;
+}
+
+/*
+ * Test 2: Corrupted / invalid ELF binary rejection
+ */
+static bool test_corrupted_elf_rejection(void) {
+    log_info("[usertest] 2. Corrupted / invalid ELF rejection...");
+    bool all_ok = true;
+    uint64_t initial_frames = pmm_free_frame_count();
+    uint64_t initial_heap = heap_active_allocation_count();
+
+    static const uint8_t valid_stub_code[] = {
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,
+        0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00,
+        0xCD, 0x80,
+        0xEB, 0xFE
+    };
+
+    uint8_t base_elf[512];
+    uint64_t base_size = 0;
+    if (!create_test_elf(base_elf, sizeof(base_elf), &base_size, 0x00400000ull, valid_stub_code, sizeof(valid_stub_code))) {
+        log_error("  [FAIL] Failed to create base ELF template for corruption tests");
+        return false;
+    }
+
+    /* Subtest 2a: Invalid magic bytes */
+    {
+        uint8_t bad_magic[512];
+        memcpy(bad_magic, base_elf, base_size);
+        bad_magic[1] = 'X'; bad_magic[2] = 'Y'; bad_magic[3] = 'Z';
+        vfs_write_file("D:/bad_mag.elf", bad_magic, base_size);
+
+        uint64_t test_pml4 = vmm_create_address_space();
+        struct elf_binary_image img;
+        bool res = elf_load_binary("D:/bad_mag.elf", test_pml4, &img);
+        vmm_destroy_address_space(test_pml4);
+        vfs_unlink_file("D:/bad_mag.elf");
+
+        if (res) {
+            log_error("  [FAIL] elf_load_binary accepted bad magic bytes!");
+            all_ok = false;
+        } else {
+            log_info("  [PASS] 2a: Rejected invalid ELF magic bytes.");
+        }
+    }
+
+    /* Subtest 2b: Non-x86_64 machine (e_machine = EM_386) */
+    {
+        uint8_t bad_mach[512];
+        memcpy(bad_mach, base_elf, base_size);
+        Elf64_Ehdr *eh = (Elf64_Ehdr *)bad_mach;
+        eh->e_machine = EM_386;
+        vfs_write_file("D:/bad_mach.elf", bad_mach, base_size);
+
+        uint64_t test_pml4 = vmm_create_address_space();
+        struct elf_binary_image img;
+        bool res = elf_load_binary("D:/bad_mach.elf", test_pml4, &img);
+        vmm_destroy_address_space(test_pml4);
+        vfs_unlink_file("D:/bad_mach.elf");
+
+        if (res) {
+            log_error("  [FAIL] elf_load_binary accepted non-x86_64 machine!");
+            all_ok = false;
+        } else {
+            log_info("  [PASS] 2b: Rejected non-x86_64 target machine.");
+        }
+    }
+
+    /* Subtest 2c: Entry point outside loadable segments */
+    {
+        uint8_t bad_entry[512];
+        memcpy(bad_entry, base_elf, base_size);
+        Elf64_Ehdr *eh = (Elf64_Ehdr *)bad_entry;
+        eh->e_entry = 0x00100000ull; /* < 2 MiB, outside segment */
+        vfs_write_file("D:/bad_entry.elf", bad_entry, base_size);
+
+        uint64_t test_pml4 = vmm_create_address_space();
+        struct elf_binary_image img;
+        bool res = elf_load_binary("D:/bad_entry.elf", test_pml4, &img);
+        vmm_destroy_address_space(test_pml4);
+        vfs_unlink_file("D:/bad_entry.elf");
+
+        if (res) {
+            log_error("  [FAIL] elf_load_binary accepted entry point outside segment!");
+            all_ok = false;
+        } else {
+            log_info("  [PASS] 2c: Rejected entry point outside loadable segment.");
+        }
+    }
+
+    /* Subtest 2d: PT_LOAD memsz < filesz */
+    {
+        uint8_t bad_seg[512];
+        memcpy(bad_seg, base_elf, base_size);
+        Elf64_Phdr *ph = (Elf64_Phdr *)(bad_seg + sizeof(Elf64_Ehdr));
+        ph->p_memsz = ph->p_filesz - 1; /* memsz < filesz violation */
+        vfs_write_file("D:/bad_seg.elf", bad_seg, base_size);
+
+        uint64_t test_pml4 = vmm_create_address_space();
+        struct elf_binary_image img;
+        bool res = elf_load_binary("D:/bad_seg.elf", test_pml4, &img);
+        vmm_destroy_address_space(test_pml4);
+        vfs_unlink_file("D:/bad_seg.elf");
+
+        if (res) {
+            log_error("  [FAIL] elf_load_binary accepted memsz < filesz!");
+            all_ok = false;
+        } else {
+            log_info("  [PASS] 2d: Rejected invalid PT_LOAD segment bounds.");
+        }
+    }
+
+    /* Subtest 2e: Truncated ELF file (< sizeof(Elf64_Ehdr)) */
+    {
+        uint8_t trunc_elf[32];
+        memcpy(trunc_elf, base_elf, sizeof(trunc_elf));
+        vfs_write_file("D:/trunc.elf", trunc_elf, sizeof(trunc_elf));
+
+        uint64_t test_pml4 = vmm_create_address_space();
+        struct elf_binary_image img;
+        bool res = elf_load_binary("D:/trunc.elf", test_pml4, &img);
+        vmm_destroy_address_space(test_pml4);
+        vfs_unlink_file("D:/trunc.elf");
+
+        if (res) {
+            log_error("  [FAIL] elf_load_binary accepted truncated ELF header!");
+            all_ok = false;
+        } else {
+            log_info("  [PASS] 2e: Rejected truncated ELF file.");
+        }
+    }
+
+    /* Subtest 2f: Full process_exec error rollback with corrupted binary */
+    {
+        uint8_t bad_exec[512];
+        memcpy(bad_exec, base_elf, base_size);
+        bad_exec[1] = 0xFF; /* corrupt magic */
+        vfs_write_file("D:/bad_exec.elf", bad_exec, base_size);
+
+        struct process *child = process_create("bad_exec_proc");
+        if (child != NULL) {
+            struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/bad_exec.elf", "bad_t");
+            if (t != NULL) {
+                int exit_code = 0;
+                bool wait_ok = process_wait(child, &exit_code, 1000);
+                if (!wait_ok || exit_code != -1) {
+                    log_errorf("  [FAIL] 2f: Expected process_exec failure -1, got wait_ok=%d exit=%d",
+                               (int)wait_ok, exit_code);
+                    all_ok = false;
+                } else {
+                    log_info("  [PASS] 2f: process_exec error cleanly returned -1 and unwound.");
+                }
+            } else {
+                process_destroy(child);
+                all_ok = false;
+            }
+        } else {
+            all_ok = false;
+        }
+        vfs_unlink_file("D:/bad_exec.elf");
+        task_yield();
+    }
+
+    uint64_t final_frames = pmm_free_frame_count();
+    uint64_t final_heap = heap_active_allocation_count();
+
+    if (final_frames != initial_frames) {
+        log_errorf("  [FAIL] Corrupted ELF tests leaked frames: before=%llu, after=%llu",
+                   (unsigned long long)initial_frames, (unsigned long long)final_frames);
+        all_ok = false;
+    }
+    if (final_heap != initial_heap) {
+        log_errorf("  [FAIL] Corrupted ELF tests leaked heap: before=%llu, after=%llu",
+                   (unsigned long long)initial_heap, (unsigned long long)final_heap);
+        all_ok = false;
+    }
+
+    if (all_ok) {
+        log_info("  [PASS] Test 2: Corrupted/invalid ELF binary rejection (6 subcases, 0 leaks)");
+    }
+    return all_ok;
+}
+
+/*
+ * Test 3: Kernel memory isolation enforcement
+ */
+static bool test_kernel_mem_isolation(void) {
+    log_info("[usertest] 3. Kernel memory isolation enforcement...");
+    uint64_t initial_frames = pmm_free_frame_count();
+    uint64_t initial_heap = heap_active_allocation_count();
+
+    /* Ring 3 user payload attempting to access higher-half kernel memory:
+     * movabs rax, 0xFFFFFFFF80000000
+     * mov rbx, [rax] (Hardware page fault!)
+     * mov rax, 4
+     * mov rdi, 99
+     * int 0x80
+     * jmp $
+     */
+    static const uint8_t kmem_code[] = {
+        0x48, 0xB8, 0x00, 0x00, 0x00, 0x80, 0xFF, 0xFF, 0xFF, 0xFF, /* movabs rax, 0xFFFFFFFF80000000 */
+        0x48, 0x8B, 0x18,                                            /* mov rbx, [rax] (Page fault!) */
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
+        0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
+        0xCD, 0x80,                                                 /* int 0x80 */
+        0xEB, 0xFE                                                  /* jmp $ */
+    };
+
+    uint8_t elf_buf[512];
+    uint64_t elf_size = 0;
+    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, kmem_code, sizeof(kmem_code))) {
+        log_error("  [FAIL] Failed to construct kernel_mem test ELF image");
+        return false;
+    }
+
+    if (!vfs_write_file("D:/kmem.elf", elf_buf, elf_size)) {
+        log_error("  [FAIL] Failed to write D:/kmem.elf to ramfs");
+        return false;
+    }
+
+    struct process *child = process_create("kmem_proc");
+    if (child == NULL) {
+        log_error("  [FAIL] Failed to create kmem_proc child process");
+        vfs_unlink_file("D:/kmem.elf");
+        return false;
+    }
+
+    struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/kmem.elf", "kmem_t");
+    if (t == NULL) {
+        log_error("  [FAIL] Failed to create kmem_t thread");
+        process_destroy(child);
+        vfs_unlink_file("D:/kmem.elf");
+        return false;
+    }
+
+    int exit_code = 0;
+    bool wait_ok = process_wait(child, &exit_code, 3000);
+    vfs_unlink_file("D:/kmem.elf");
+    task_yield();
+
+    if (!wait_ok) {
+        log_error("  [FAIL] process_wait timed out for kmem_proc");
+        return false;
+    }
+
+    if (exit_code != -11) {
+        log_errorf("  [FAIL] Expected SIGSEGV (-11), got exit_code=%d", exit_code);
+        return false;
+    }
+
+    if (child->state != PROCESS_STATE_DEAD) {
+        log_error("  [FAIL] kmem_proc was not cleanly reaped to DEAD");
+        return false;
+    }
+
+    uint64_t final_frames = pmm_free_frame_count();
+    uint64_t final_heap = heap_active_allocation_count();
+    if (final_frames != initial_frames) {
+        log_errorf("  [FAIL] kmem_proc leaked frames: before=%llu, after=%llu",
+                   (unsigned long long)initial_frames, (unsigned long long)final_frames);
+        return false;
+    }
+    if (final_heap != initial_heap) {
+        log_errorf("  [FAIL] kmem_proc leaked heap: before=%llu, after=%llu",
+                   (unsigned long long)initial_heap, (unsigned long long)final_heap);
+        return false;
+    }
+
+    log_info("  [PASS] Test 3: Kernel memory isolation enforcement (SIGSEGV -11 trapped, 0 leaks)");
+    return true;
+}
+
+/*
+ * Test 4: User stack guard page containment
+ */
+static bool test_stack_guard_containment(void) {
+    log_info("[usertest] 4. User stack guard page containment...");
+    uint64_t initial_frames = pmm_free_frame_count();
+    uint64_t initial_heap = heap_active_allocation_count();
+
+    /* Ring 3 user payload attempting to write to the stack guard page:
+     * USER_STACK_GUARD_PAGE is 0x00007FFFFFFED000ull
+     * Address 0x00007FFFFFFEDFF8 is inside the unmapped guard page.
+     * movabs rax, 0x00007FFFFFFEDFF8
+     * mov qword ptr [rax], 0x1234 (Hardware page fault!)
+     * mov rax, 4
+     * mov rdi, 99
+     * int 0x80
+     * jmp $
+     */
+    static const uint8_t guard_code[] = {
+        0x48, 0xB8, 0xF8, 0xDF, 0xFE, 0xFF, 0xFF, 0x7F, 0x00, 0x00, /* movabs rax, 0x00007FFFFFFEDFF8 */
+        0x48, 0xC7, 0x00, 0x34, 0x12, 0x00, 0x00,                   /* mov qword [rax], 0x1234 (Page fault!) */
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00,                   /* mov rax, 4 */
+        0x48, 0xC7, 0xC7, 0x63, 0x00, 0x00, 0x00,                   /* mov rdi, 99 */
+        0xCD, 0x80,                                                 /* int 0x80 */
+        0xEB, 0xFE                                                  /* jmp $ */
+    };
+
+    uint8_t elf_buf[512];
+    uint64_t elf_size = 0;
+    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, guard_code, sizeof(guard_code))) {
+        log_error("  [FAIL] Failed to construct guard_test test ELF image");
+        return false;
+    }
+
+    if (!vfs_write_file("D:/guard.elf", elf_buf, elf_size)) {
+        log_error("  [FAIL] Failed to write D:/guard.elf to ramfs");
+        return false;
+    }
+
+    struct process *child = process_create("guard_proc");
+    if (child == NULL) {
+        log_error("  [FAIL] Failed to create guard_proc child process");
+        vfs_unlink_file("D:/guard.elf");
+        return false;
+    }
+
+    struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/guard.elf", "guard_t");
+    if (t == NULL) {
+        log_error("  [FAIL] Failed to create guard_t thread");
+        process_destroy(child);
+        vfs_unlink_file("D:/guard.elf");
+        return false;
+    }
+
+    int exit_code = 0;
+    bool wait_ok = process_wait(child, &exit_code, 3000);
+    vfs_unlink_file("D:/guard.elf");
+    task_yield();
+
+    if (!wait_ok) {
+        log_error("  [FAIL] process_wait timed out for guard_proc");
+        return false;
+    }
+
+    if (exit_code != -11) {
+        log_errorf("  [FAIL] Expected SIGSEGV (-11), got exit_code=%d", exit_code);
+        return false;
+    }
+
+    if (child->state != PROCESS_STATE_DEAD) {
+        log_error("  [FAIL] guard_proc was not cleanly reaped to DEAD");
+        return false;
+    }
+
+    uint64_t final_frames = pmm_free_frame_count();
+    uint64_t final_heap = heap_active_allocation_count();
+    if (final_frames != initial_frames) {
+        log_errorf("  [FAIL] guard_proc leaked frames: before=%llu, after=%llu",
+                   (unsigned long long)initial_frames, (unsigned long long)final_frames);
+        return false;
+    }
+    if (final_heap != initial_heap) {
+        log_errorf("  [FAIL] guard_proc leaked heap: before=%llu, after=%llu",
+                   (unsigned long long)initial_heap, (unsigned long long)final_heap);
+        return false;
+    }
+
+    log_info("  [PASS] Test 4: User stack guard page containment (SIGSEGV -11 trapped, 0 leaks)");
+    return true;
+}
+
+/*
+ * Test 5: TSS/RSP0 Ring 3 hardware preemption
+ */
+static bool test_preemption_hardware(void) {
+    log_info("[usertest] 5. TSS/RSP0 Ring 3 hardware preemption...");
+    uint64_t initial_frames = pmm_free_frame_count();
+    uint64_t initial_heap = heap_active_allocation_count();
+
+    /* Ring 3 compute loop:
+     * mov rcx, 30000000
+     * loop_dec:
+     * dec rcx
+     * jnz loop_dec
+     * mov rax, 4
+     * mov rdi, 55
+     * int 0x80
+     * jmp $
+     */
+    static const uint8_t preempt_code[] = {
+        0x48, 0xC7, 0xC1, 0x80, 0x5D, 0xC9, 0x01, /* mov rcx, 30000000 (0x01C95D80) */
+        0x48, 0xFF, 0xC9,                         /* dec rcx */
+        0x75, 0xFB,                               /* jnz -5 */
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00, /* mov rax, 4 */
+        0x48, 0xC7, 0xC7, 0x37, 0x00, 0x00, 0x00, /* mov rdi, 55 */
+        0xCD, 0x80,                               /* int 0x80 */
+        0xEB, 0xFE                                /* jmp $ */
+    };
+
+    uint8_t elf_buf[512];
+    uint64_t elf_size = 0;
+    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, preempt_code, sizeof(preempt_code))) {
+        log_error("  [FAIL] Failed to construct preempt_test test ELF image");
+        return false;
+    }
+
+    if (!vfs_write_file("D:/preempt.elf", elf_buf, elf_size)) {
+        log_error("  [FAIL] Failed to write D:/preempt.elf to ramfs");
+        return false;
+    }
+
+    uint64_t ticks_before = timer_get_ticks();
+
+    struct process *child = process_create("preempt_proc");
+    if (child == NULL) {
+        log_error("  [FAIL] Failed to create preempt_proc child process");
+        vfs_unlink_file("D:/preempt.elf");
+        return false;
+    }
+
+    struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/preempt.elf", "preempt_t");
+    if (t == NULL) {
+        log_error("  [FAIL] Failed to create preempt_t thread");
+        process_destroy(child);
+        vfs_unlink_file("D:/preempt.elf");
+        return false;
+    }
+
+    int exit_code = 0;
+    bool wait_ok = process_wait(child, &exit_code, 5000);
+    uint64_t ticks_after = timer_get_ticks();
+    vfs_unlink_file("D:/preempt.elf");
+    task_yield();
+
+    if (!wait_ok) {
+        log_error("  [FAIL] process_wait timed out for preempt_proc");
+        return false;
+    }
+
+    if (exit_code != 55) {
+        log_errorf("  [FAIL] Expected exit_code=55 from preempt_proc, got %d", exit_code);
+        return false;
+    }
+
+    if (child->state != PROCESS_STATE_DEAD) {
+        log_error("  [FAIL] preempt_proc was not cleanly reaped to DEAD");
+        return false;
+    }
+
+    uint64_t elapsed_ticks = (ticks_after >= ticks_before) ? (ticks_after - ticks_before) : 0;
+    log_infof("  Preemption test elapsed timer ticks: %llu", (unsigned long long)elapsed_ticks);
+
+    uint64_t final_frames = pmm_free_frame_count();
+    uint64_t final_heap = heap_active_allocation_count();
+    if (final_frames != initial_frames) {
+        log_errorf("  [FAIL] preempt_proc leaked frames: before=%llu, after=%llu",
+                   (unsigned long long)initial_frames, (unsigned long long)final_frames);
+        return false;
+    }
+    if (final_heap != initial_heap) {
+        log_errorf("  [FAIL] preempt_proc leaked heap: before=%llu, after=%llu",
+                   (unsigned long long)initial_heap, (unsigned long long)final_heap);
+        return false;
+    }
+
+    log_infof("  [PASS] Test 5: TSS/RSP0 Ring 3 hardware preemption (exit_code=55, elapsed_ticks=%llu, 0 leaks)",
+              (unsigned long long)elapsed_ticks);
+    return true;
+}
+
+/*
+ * Test 6: 50-iteration zero memory leak test
+ */
+static bool test_leak_50_iterations(void) {
+    log_info("[usertest] 6. 50-iteration zero memory leak test...");
+    uint64_t baseline_frames = pmm_free_frame_count();
+    uint64_t baseline_heap = heap_active_allocation_count();
+
+    static const uint8_t iter_code[] = {
+        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00, /* mov rax, 4 */
+        0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00, /* mov rdi, 42 */
+        0xCD, 0x80,                               /* int 0x80 */
+        0xEB, 0xFE                                /* jmp $ */
+    };
+
+    uint8_t elf_buf[512];
+    uint64_t elf_size = 0;
+    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, iter_code, sizeof(iter_code))) {
+        log_error("  [FAIL] Failed to construct leak test ELF image");
+        return false;
+    }
+
+    if (!vfs_write_file("D:/leak_iter.elf", elf_buf, elf_size)) {
+        log_error("  [FAIL] Failed to write D:/leak_iter.elf to ramfs");
+        return false;
+    }
+
+    bool all_ok = true;
+    for (int i = 0; i < 50; ++i) {
+        struct process *child = process_create("leak_child");
+        if (child == NULL) {
+            log_errorf("  [FAIL] Iteration %d: process_create failed", i);
+            all_ok = false;
+            break;
+        }
+
+        struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/leak_iter.elf", "leak_t");
+        if (t == NULL) {
+            log_errorf("  [FAIL] Iteration %d: thread_create failed", i);
+            process_destroy(child);
+            all_ok = false;
+            break;
+        }
+
+        int exit_code = 0;
+        bool wait_ok = process_wait(child, &exit_code, 1000);
+        if (!wait_ok || exit_code != 42 || child->state != PROCESS_STATE_DEAD) {
+            log_errorf("  [FAIL] Iteration %d: wait_ok=%d, exit_code=%d, state=%d",
+                       i, (int)wait_ok, exit_code, (int)child->state);
+            all_ok = false;
+            break;
+        }
+    }
+
+    vfs_unlink_file("D:/leak_iter.elf");
+    task_yield();
+
+    if (!all_ok) {
+        return false;
+    }
+
+    uint64_t final_frames = pmm_free_frame_count();
+    uint64_t final_heap = heap_active_allocation_count();
+
+    if (final_frames != baseline_frames) {
+        log_errorf("  [FAIL] 50 iterations leaked page frames: before=%llu, after=%llu",
+                   (unsigned long long)baseline_frames, (unsigned long long)final_frames);
+        return false;
+    }
+
+    if (final_heap != baseline_heap) {
+        log_errorf("  [FAIL] 50 iterations leaked heap allocations: before=%llu, after=%llu",
+                   (unsigned long long)baseline_heap, (unsigned long long)final_heap);
+        return false;
+    }
+
+    log_infof("  [PASS] Test 6: 50-iteration zero memory leak test (frames=%llu, heap_allocs=%llu, 0 leaks)",
+              (unsigned long long)final_frames, (unsigned long long)final_heap);
+    return true;
+}
+
+static void command_usertest(const char *arguments) {
+    while (arguments != NULL && *arguments == ' ') {
+        arguments++;
+    }
+
+    bool run_all = (arguments == NULL || *arguments == '\0' || usertest_streq(arguments, "all"));
+    bool run_valid = run_all || usertest_streq(arguments, "valid");
+    bool run_corrupted = run_all || usertest_streq(arguments, "corrupted");
+    bool run_kernel_mem = run_all || usertest_streq(arguments, "kernel_mem");
+    bool run_stack_overflow = run_all || usertest_streq(arguments, "stack_overflow");
+    bool run_preemption = run_all || usertest_streq(arguments, "preemption");
+    bool run_leak = run_all || usertest_streq(arguments, "leak");
+
+    if (!run_valid && !run_corrupted && !run_kernel_mem && !run_stack_overflow && !run_preemption && !run_leak) {
+        log_error("Usage: usertest [all|valid|corrupted|kernel_mem|stack_overflow|preemption|leak]");
+        return;
+    }
+
+    log_info("==================================================");
+    log_info("=== Milestone K14 Ring 3 & Process Test Suite ===");
+    log_info("==================================================");
+
+    bool all_passed = true;
+
+    if (run_valid) {
+        if (!test_valid_elf_execution()) {
+            all_passed = false;
+        }
+    }
+
+    if (run_corrupted) {
+        if (!test_corrupted_elf_rejection()) {
+            all_passed = false;
+        }
+    }
+
+    if (run_kernel_mem) {
+        if (!test_kernel_mem_isolation()) {
+            all_passed = false;
+        }
+    }
+
+    if (run_stack_overflow) {
+        if (!test_stack_guard_containment()) {
+            all_passed = false;
+        }
+    }
+
+    if (run_preemption) {
+        if (!test_preemption_hardware()) {
+            all_passed = false;
+        }
+    }
+
+    if (run_leak) {
+        if (!test_leak_50_iterations()) {
+            all_passed = false;
+        }
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_passed) {
+        log_info(">>> [PASS] ALL K14 USERSPACE & PROCESS TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] SOME K14 USERSPACE & PROCESS TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: atomictest (K12.5)                                     */
+/* ========================================================================= */
+static void command_atomictest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("        KOS Atomic Primitives Diagnostics         ");
+    log_info("==================================================");
+    bool passed = true;
+
+    /* Test 1: atomic_t (32-bit) */
+    atomic_t a32 = ATOMIC_INIT(100);
+    if (atomic_read(&a32) != 100) passed = false;
+    atomic_set(&a32, 200);
+    if (atomic_read(&a32) != 200) passed = false;
+    atomic_add(50, &a32);
+    if (atomic_read(&a32) != 250) passed = false;
+    atomic_sub(30, &a32);
+    if (atomic_read(&a32) != 220) passed = false;
+    atomic_inc(&a32);
+    if (atomic_read(&a32) != 221) passed = false;
+    atomic_dec(&a32);
+    if (atomic_read(&a32) != 220) passed = false;
+    if (atomic_add_return(10, &a32) != 230) passed = false;
+    if (atomic_sub_return(20, &a32) != 210) passed = false;
+    if (atomic_inc_return(&a32) != 211) passed = false;
+    if (atomic_dec_return(&a32) != 210) passed = false;
+    if (atomic_fetch_add(5, &a32) != 210 || atomic_read(&a32) != 215) passed = false;
+    if (atomic_fetch_sub(15, &a32) != 215 || atomic_read(&a32) != 200) passed = false;
+    if (atomic_xchg(&a32, 500) != 200 || atomic_read(&a32) != 500) passed = false;
+    if (atomic_cmpxchg(&a32, 500, 999) != 500 || atomic_read(&a32) != 999) passed = false;
+    if (atomic_cmpxchg(&a32, 500, 111) != 999 || atomic_read(&a32) != 999) passed = false;
+
+    /* Test 2: atomic64_t (64-bit) */
+    atomic64_t a64 = ATOMIC64_INIT(0x1000000000ULL);
+    if (atomic64_read(&a64) != (int64_t)0x1000000000ULL) passed = false;
+    atomic64_set(&a64, 0x2000000000ULL);
+    if (atomic64_read(&a64) != (int64_t)0x2000000000ULL) passed = false;
+    atomic64_add(0x1000, &a64);
+    if (atomic64_read(&a64) != (int64_t)0x2000001000ULL) passed = false;
+    atomic64_sub(0x500, &a64);
+    if (atomic64_read(&a64) != (int64_t)0x2000000B00ULL) passed = false;
+    atomic64_inc(&a64);
+    if (atomic64_read(&a64) != (int64_t)0x2000000B01ULL) passed = false;
+    atomic64_dec(&a64);
+    if (atomic64_read(&a64) != (int64_t)0x2000000B00ULL) passed = false;
+    if (atomic64_add_return(0x100, &a64) != (int64_t)0x2000000C00ULL) passed = false;
+    if (atomic64_sub_return(0x200, &a64) != (int64_t)0x2000000A00ULL) passed = false;
+    if (atomic64_inc_return(&a64) != (int64_t)0x2000000A01ULL) passed = false;
+    if (atomic64_dec_return(&a64) != (int64_t)0x2000000A00ULL) passed = false;
+    if (atomic64_xchg(&a64, 0x7777777777ULL) != (int64_t)0x2000000A00ULL || atomic64_read(&a64) != (int64_t)0x7777777777ULL) passed = false;
+    if (atomic64_cmpxchg(&a64, 0x7777777777ULL, 0x8888888888ULL) != (int64_t)0x7777777777ULL || atomic64_read(&a64) != (int64_t)0x8888888888ULL) passed = false;
+
+    /* Test 3: Barriers */
+    smp_mb();
+    smp_rmb();
+    smp_wmb();
+    cpu_relax();
+
+    if (passed) {
+        log_info("  [PASS] 32-bit and 64-bit atomic operations & memory barriers verified!");
+        log_info(">>> [PASS] ALL ATOMIC TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] ATOMIC TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: locktest (K12.6)                                      */
+/* ========================================================================= */
+struct locktest_worker_arg {
+    kos_spinlock_t *lock;
+    volatile uint64_t *counter;
+    uint32_t iterations;
+    volatile bool finished;
+};
+
+static void locktest_worker(void *arg) {
+    struct locktest_worker_arg *w = (struct locktest_worker_arg *)arg;
+    for (uint32_t i = 0; i < w->iterations; ++i) {
+        uint64_t flags = spinlock_lock_irqsave(w->lock);
+        (*w->counter)++;
+        spinlock_unlock_irqrestore(w->lock, flags);
+        if ((i % 100) == 0) {
+            task_yield();
+        }
+    }
+    w->finished = true;
+}
+
+static void command_locktest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("        KOS Spinlock & IRQ-Save Diagnostics       ");
+    log_info("==================================================");
+    bool passed = true;
+
+    /* Unit test basic spinlock */
+    kos_spinlock_t test_lock = SPINLOCK_INIT;
+    if (spinlock_is_locked(&test_lock)) passed = false;
+    spinlock_lock(&test_lock);
+    if (!spinlock_is_locked(&test_lock)) passed = false;
+    if (spinlock_try_lock(&test_lock)) passed = false;
+    spinlock_unlock(&test_lock);
+    if (spinlock_is_locked(&test_lock)) passed = false;
+    if (!spinlock_try_lock(&test_lock)) passed = false;
+    spinlock_unlock(&test_lock);
+
+    /* IRQ-save test */
+    uint64_t rflags = spinlock_lock_irqsave(&test_lock);
+    if (!spinlock_is_locked(&test_lock)) passed = false;
+    spinlock_unlock_irqrestore(&test_lock, rflags);
+    if (spinlock_is_locked(&test_lock)) passed = false;
+
+    /* Multi-thread contention test */
+    struct process *cur_proc = process_get_current();
+    if (cur_proc == NULL) cur_proc = process_get_kernel();
+
+    volatile uint64_t shared_counter = 0;
+    kos_spinlock_t shared_lock = SPINLOCK_INIT;
+    enum { LOCK_WORKERS = 4, LOCK_ITERS = 500 };
+    struct locktest_worker_arg args[LOCK_WORKERS];
+
+    for (int i = 0; i < LOCK_WORKERS; ++i) {
+        args[i].lock = &shared_lock;
+        args[i].counter = &shared_counter;
+        args[i].iterations = LOCK_ITERS;
+        args[i].finished = false;
+        struct thread *t = thread_create(cur_proc, locktest_worker, &args[i], "lock_worker");
+        if (t == NULL) passed = false;
+    }
+
+    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(3000);
+    bool all_finished = false;
+    while (timer_get_ticks() < timeout_tick) {
+        all_finished = true;
+        for (int i = 0; i < LOCK_WORKERS; ++i) {
+            if (!args[i].finished) {
+                all_finished = false;
+                break;
+            }
+        }
+        if (all_finished) break;
+        task_yield();
+    }
+
+    if (!all_finished || shared_counter != (LOCK_WORKERS * LOCK_ITERS)) {
+        log_errorf("  [FAIL] Spinlock contention failed: counter=%llu (expect %d)",
+                   (unsigned long long)shared_counter, LOCK_WORKERS * LOCK_ITERS);
+        passed = false;
+    } else {
+        log_infof("  [PASS] %d threads * %d iterations -> counter = %llu with zero races!",
+                  LOCK_WORKERS, LOCK_ITERS, (unsigned long long)shared_counter);
+    }
+
+    if (passed) {
+        log_info(">>> [PASS] ALL SPINLOCK TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] SPINLOCK TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: mutextest (K12.7)                                     */
+/* ========================================================================= */
+struct mutextest_worker_arg {
+    kos_mutex_t *mutex;
+    volatile uint32_t *active_inside;
+    volatile uint32_t *violations;
+    volatile uint64_t *counter;
+    uint32_t iterations;
+    volatile bool finished;
+};
+
+static void mutextest_worker(void *arg) {
+    struct mutextest_worker_arg *w = (struct mutextest_worker_arg *)arg;
+    for (uint32_t i = 0; i < w->iterations; ++i) {
+        mutex_lock(w->mutex);
+        uint32_t act = __atomic_add_fetch(w->active_inside, 1, __ATOMIC_SEQ_CST);
+        if (act != 1) {
+            __atomic_add_fetch(w->violations, 1, __ATOMIC_SEQ_CST);
+        }
+        task_yield();
+        act = __atomic_sub_fetch(w->active_inside, 1, __ATOMIC_SEQ_CST);
+        if (act != 0) {
+            __atomic_add_fetch(w->violations, 1, __ATOMIC_SEQ_CST);
+        }
+        (*w->counter)++;
+        mutex_unlock(w->mutex);
+        task_yield();
+    }
+    w->finished = true;
+}
+
+static void command_mutextest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("           KOS Sleeping Mutex Diagnostics         ");
+    log_info("==================================================");
+    bool passed = true;
+
+    /* Unit test basic mutex */
+    kos_mutex_t test_mutex;
+    mutex_init(&test_mutex);
+    if (mutex_is_locked(&test_mutex)) passed = false;
+    mutex_lock(&test_mutex);
+    if (!mutex_is_locked(&test_mutex)) passed = false;
+    if (mutex_try_lock(&test_mutex)) passed = false;
+    mutex_unlock(&test_mutex);
+    if (mutex_is_locked(&test_mutex)) passed = false;
+
+    /* Multi-thread sleeping mutex test */
+    struct process *cur_proc = process_get_current();
+    if (cur_proc == NULL) cur_proc = process_get_kernel();
+
+    kos_mutex_t shared_mutex;
+    mutex_init(&shared_mutex);
+    volatile uint32_t active_inside = 0;
+    volatile uint32_t violations = 0;
+    volatile uint64_t counter = 0;
+    enum { MUTEX_WORKERS = 4, MUTEX_ITERS = 100 };
+    struct mutextest_worker_arg args[MUTEX_WORKERS];
+
+    for (int i = 0; i < MUTEX_WORKERS; ++i) {
+        args[i].mutex = &shared_mutex;
+        args[i].active_inside = &active_inside;
+        args[i].violations = &violations;
+        args[i].counter = &counter;
+        args[i].iterations = MUTEX_ITERS;
+        args[i].finished = false;
+        struct thread *t = thread_create(cur_proc, mutextest_worker, &args[i], "mutex_worker");
+        if (t == NULL) passed = false;
+    }
+
+    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(3000);
+    bool all_finished = false;
+    while (timer_get_ticks() < timeout_tick) {
+        all_finished = true;
+        for (int i = 0; i < MUTEX_WORKERS; ++i) {
+            if (!args[i].finished) {
+                all_finished = false;
+                break;
+            }
+        }
+        if (all_finished) break;
+        task_yield();
+    }
+
+    if (!all_finished || violations != 0 || counter != (MUTEX_WORKERS * MUTEX_ITERS)) {
+        log_errorf("  [FAIL] Mutex contention failed: counter=%llu (expect %d), violations=%u",
+                   (unsigned long long)counter, MUTEX_WORKERS * MUTEX_ITERS, violations);
+        passed = false;
+    } else {
+        log_infof("  [PASS] %d threads * %d iters -> counter=%llu with 0 mutual exclusion violations!",
+                  MUTEX_WORKERS, MUTEX_ITERS, (unsigned long long)counter);
+    }
+
+    if (passed) {
+        log_info(">>> [PASS] ALL MUTEX TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] MUTEX TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: timertest (K12.8)                                     */
+/* ========================================================================= */
+static void command_timertest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("         KOS Monotonic Timer Diagnostics          ");
+    log_info("==================================================");
+    bool passed = true;
+
+    uint64_t hz = timer_frequency_hz();
+    uint64_t ticks1 = timer_get_ticks();
+    uint64_t up1 = timer_uptime_seconds();
+    uint64_t ms100_in_ticks = timer_ms_to_ticks(100);
+    uint64_t back_to_ms = timer_ticks_to_ms(ms100_in_ticks);
+
+    log_infof("  Timer frequency: %llu Hz", (unsigned long long)hz);
+    log_infof("  Initial monotonic ticks: %llu, uptime: %llu s",
+              (unsigned long long)ticks1, (unsigned long long)up1);
+    log_infof("  100 ms converted to ticks: %llu, converted back: %llu ms",
+              (unsigned long long)ms100_in_ticks, (unsigned long long)back_to_ms);
+
+    if (hz == 0 || back_to_ms != 100) {
+        passed = false;
+    }
+
+    /* Wait 50 ms */
+    task_sleep(50);
+    uint64_t ticks2 = timer_get_ticks();
+    uint64_t elapsed_ms = timer_ticks_to_ms(ticks2 - ticks1);
+    log_infof("  Elapsed time after 50ms task_sleep: %llu ms (%llu ticks)",
+              (unsigned long long)elapsed_ms, (unsigned long long)(ticks2 - ticks1));
+
+    if (elapsed_ms < 40 || elapsed_ms > 100) {
+        log_error("  [FAIL] Sleep duration out of expected tolerance!");
+        passed = false;
+    }
+
+    if (passed) {
+        log_info(">>> [PASS] ALL TIMER TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] TIMER TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: sleeptest (K12.8)                                     */
+/* ========================================================================= */
+struct sleeptest_worker_arg {
+    uint32_t sleep_ms;
+    uint64_t finish_tick;
+    volatile bool finished;
+};
+
+static void sleeptest_worker(void *arg) {
+    struct sleeptest_worker_arg *w = (struct sleeptest_worker_arg *)arg;
+    task_sleep(w->sleep_ms);
+    w->finish_tick = timer_get_ticks();
+    w->finished = true;
+}
+
+static void command_sleeptest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("       KOS Delta Sleep Queue Diagnostics          ");
+    log_info("==================================================");
+    bool passed = true;
+
+    struct process *cur_proc = process_get_current();
+    if (cur_proc == NULL) cur_proc = process_get_kernel();
+
+    struct sleeptest_worker_arg s1 = { .sleep_ms = 30, .finish_tick = 0, .finished = false };
+    struct sleeptest_worker_arg s2 = { .sleep_ms = 60, .finish_tick = 0, .finished = false };
+    struct sleeptest_worker_arg s3 = { .sleep_ms = 90, .finish_tick = 0, .finished = false };
+
+    uint64_t start_tick = timer_get_ticks();
+    thread_create(cur_proc, sleeptest_worker, &s1, "sleep_30ms");
+    thread_create(cur_proc, sleeptest_worker, &s2, "sleep_60ms");
+    thread_create(cur_proc, sleeptest_worker, &s3, "sleep_90ms");
+
+    uint64_t timeout_tick = start_tick + timer_ms_to_ticks(2000);
+    while (timer_get_ticks() < timeout_tick) {
+        if (s1.finished && s2.finished && s3.finished) break;
+        task_yield();
+    }
+
+    if (!s1.finished || !s2.finished || !s3.finished) {
+        log_error("  [FAIL] One or more sleep workers timed out!");
+        passed = false;
+    } else {
+        uint64_t el1 = timer_ticks_to_ms(s1.finish_tick - start_tick);
+        uint64_t el2 = timer_ticks_to_ms(s2.finish_tick - start_tick);
+        uint64_t el3 = timer_ticks_to_ms(s3.finish_tick - start_tick);
+
+        log_infof("  Worker 1 (30ms): completed in %llu ms", (unsigned long long)el1);
+        log_infof("  Worker 2 (60ms): completed in %llu ms", (unsigned long long)el2);
+        log_infof("  Worker 3 (90ms): completed in %llu ms", (unsigned long long)el3);
+
+        if (!(s1.finish_tick <= s2.finish_tick && s2.finish_tick <= s3.finish_tick)) {
+            log_error("  [FAIL] Sleep queue wakeup order violated!");
+            passed = false;
+        } else {
+            log_info("  [PASS] Sleep delta-queue woke threads in exact sorted order!");
+        }
+    }
+
+    if (passed) {
+        log_info(">>> [PASS] ALL SLEEP TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] SLEEP TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: preempttest (K12.9)                                   */
+/* ========================================================================= */
+struct preempt_worker_arg {
+    uint32_t id;
+    volatile uint64_t progress;
+    volatile bool finished;
+};
+
+static void preempt_compute_worker(void *arg) {
+    struct preempt_worker_arg *w = (struct preempt_worker_arg *)arg;
+    /* Pure CPU-bound computation without calling task_yield() */
+    volatile uint64_t hash = 0x12345678ULL * (w->id + 1);
+    for (uint64_t i = 0; i < 500000ULL; ++i) {
+        hash = (hash ^ (i * 0x9e3779b97f4a7c15ULL)) + 1;
+        if ((i % 10000ULL) == 0) {
+            w->progress = i;
+        }
+    }
+    w->progress = 500000ULL;
+    w->finished = true;
+}
+
+static void command_preempttest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("      KOS Preemptive Scheduling Diagnostics       ");
+    log_info("==================================================");
+    bool passed = true;
+
+    struct process *cur_proc = process_get_current();
+    if (cur_proc == NULL) cur_proc = process_get_kernel();
+
+    struct preempt_worker_arg p1 = { .id = 1, .progress = 0, .finished = false };
+    struct preempt_worker_arg p2 = { .id = 2, .progress = 0, .finished = false };
+
+    log_info("  Spawning 2 CPU-bound worker threads (NO task_yield calls)...");
+    thread_create(cur_proc, preempt_compute_worker, &p1, "preempt_w1");
+    thread_create(cur_proc, preempt_compute_worker, &p2, "preempt_w2");
+
+    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(3000);
+    while (timer_get_ticks() < timeout_tick) {
+        if (p1.finished && p2.finished) break;
+        task_yield();
+    }
+
+    if (!p1.finished || !p2.finished) {
+        log_errorf("  [FAIL] Preemptive workers did not complete! p1=%d (%llu), p2=%d (%llu)",
+                   (int)p1.finished, (unsigned long long)p1.progress,
+                   (int)p2.finished, (unsigned long long)p2.progress);
+        passed = false;
+    } else {
+        log_info("  Both CPU-bound workers completed via timer interrupt preemption quantum slices!");
+        log_info("  [PASS] Preemptive scheduler verified!");
+    }
+
+    if (passed) {
+        log_info(">>> [PASS] ALL PREEMPTION TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] PREEMPTION TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: processtest (K12.10 - K12.12)                         */
+/* ========================================================================= */
+static void processtest_child_entry(void *arg) {
+    int exit_val = (int)(intptr_t)arg;
+    task_sleep(20);
+    thread_exit(exit_val);
+}
+
+static void command_processtest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("      KOS Process & Thread Model Diagnostics      ");
+    log_info("==================================================");
+    bool passed = true;
+
+    struct process *p = process_create("proc_diag");
+    if (p == NULL) {
+        log_error("  [FAIL] process_create failed!");
+        passed = false;
+    } else {
+        log_infof("  Created process '%s' with PID %llu", p->name, (unsigned long long)p->pid);
+        struct thread *t = thread_create(p, processtest_child_entry, (void *)(intptr_t)88, "diag_thread");
+        if (t == NULL) {
+            log_error("  [FAIL] thread_create failed!");
+            passed = false;
+        } else {
+            int exit_code = 0;
+            bool ok = process_wait(p, &exit_code, 1000);
+            if (!ok || exit_code != 88) {
+                log_errorf("  [FAIL] process_wait failed or exit_code mismatch! ok=%d, code=%d",
+                           (int)ok, exit_code);
+                passed = false;
+            } else {
+                log_infof("  Child process cleanly exited with code %d (state=%s)",
+                          exit_code, process_state_name(p->state));
+                log_info("  [PASS] Process lifecycle & parent synchronization verified!");
+            }
+        }
+        if (p->state != PROCESS_STATE_DEAD) {
+            process_destroy(p);
+        }
+    }
+
+    if (passed) {
+        log_info(">>> [PASS] ALL PROCESS MODEL TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] PROCESS MODEL TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: stacktest (K12.4)                                     */
+/* ========================================================================= */
+static void KOS_NOINLINE stacktest_leaf(void) {
+    log_info("  Executing stack_trace_dump_current(16) from nested function...");
+    stack_trace_dump_current(16);
+}
+
+static void KOS_NOINLINE stacktest_middle(void) {
+    stacktest_leaf();
+}
+
+static void KOS_NOINLINE stacktest_outer(void) {
+    stacktest_middle();
+}
+
+static void command_stacktest(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("     KOS Stack Frame & Symbol Backtrace Test      ");
+    log_info("==================================================");
+    log_info("Triggering nested call chain: outer -> middle -> leaf");
+    stacktest_outer();
+    log_info(">>> [PASS] STACK BACKTRACE COMPLETED <<<");
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: pftest (K12.2)                                        */
+/* ========================================================================= */
+static void command_pftest(const char *arguments) {
+    log_info("==================================================");
+    log_info("         KOS Page Fault Decoder Diagnostics       ");
+    log_info("==================================================");
+    bool passed = true;
+
+    /* Synthetic test 1: Read non-present page in kernel mode */
+    struct page_fault_record rec1;
+    page_fault_decode(0, &rec1);
+    if (rec1.present || rec1.write || rec1.user || rec1.instruction_fetch) passed = false;
+
+    /* Synthetic test 2: Write protection violation in kernel mode */
+    struct page_fault_record rec2;
+    page_fault_decode(PF_ERROR_PRESENT | PF_ERROR_WRITE, &rec2);
+    if (!rec2.present || !rec2.write || rec2.user) passed = false;
+
+    /* Synthetic test 3: Instruction fetch on non-executable page */
+    struct page_fault_record rec3;
+    page_fault_decode(PF_ERROR_PRESENT | PF_ERROR_INSTRUCTION, &rec3);
+    if (!rec3.present || !rec3.instruction_fetch) passed = false;
+
+    /* Synthetic test 4: User mode write to non-present page */
+    struct page_fault_record rec4;
+    page_fault_decode(PF_ERROR_WRITE | PF_ERROR_USER, &rec4);
+    if (rec4.present || !rec4.write || !rec4.user) passed = false;
+
+    if (passed) {
+        log_info("  [PASS] Page fault decoder bitwise flag extraction verified!");
+    } else {
+        log_error("  [FAIL] Page fault decoder flag extraction mismatch!");
+    }
+
+    if (arguments != NULL && strings_equal(arguments, "crash")) {
+        log_info("  Intentional CR2 page fault requested! Triggering write to 0xDEADBEEF000...");
+        volatile uint64_t *ptr = (volatile uint64_t *)0xDEADBEEF000ULL;
+        *ptr = 0x1234;
+    } else {
+        log_info("  (To trigger an actual kernel page fault panic, run 'pftest crash')");
+    }
+
+    if (passed) {
+        log_info(">>> [PASS] ALL PAGE FAULT TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] PAGE FAULT TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: panictest (K12.3)                                     */
+/* ========================================================================= */
+static void command_panictest(const char *arguments) {
+    log_info("==================================================");
+    log_info("           KOS Kernel Panic Diagnostics           ");
+    log_info("==================================================");
+    log_info("Panic Subsystem Properties:");
+    log_info("  - 100% Zero-allocation, lockless emergency serial polling");
+    log_info("  - Full register dump (RAX..R15, RIP, RSP, CR2, CR3, etc.)");
+    log_info("  - RBP stack frame unwinding with O(log N) symbol lookup");
+    log_info("  - Atomic recursion guard preventing recursive panic loops");
+
+    if (arguments != NULL && strings_equal(arguments, "crash")) {
+        log_info("Triggering intentional panic...");
+        panic("Intentional kernel panic triggered via 'panictest crash' command");
+    } else if (arguments != NULL && strings_equal(arguments, "recursion")) {
+        log_info("Triggering intentional panic recursion guard test...");
+        panic_test_recursion();
+    } else {
+        log_info("  (To trigger a real panic, run 'panictest crash' or 'panictest recursion')");
+    }
+    log_info(">>> [PASS] PANIC DIAGNOSTICS DISPLAYED <<<");
+    log_info("==================================================");
+}
+
+/* ========================================================================= */
+/* Diagnostic Command: kstress / taskstress (K12.22 - K12.26)                */
+/* ========================================================================= */
+struct kstress_worker_arg {
+    uint32_t worker_id;
+    uint32_t iterations;
+    volatile uint32_t errors;
+    volatile bool finished;
+};
+
+static void kstress_pmm_worker(void *arg) {
+    struct kstress_worker_arg *w = (struct kstress_worker_arg *)arg;
+    for (uint32_t i = 0; i < w->iterations; ++i) {
+        uint64_t frame1 = pmm_allocate_frame();
+        uint64_t frame2 = pmm_allocate_frame();
+        if (frame1 == 0 || frame2 == 0 || frame1 == frame2) {
+            w->errors++;
+        }
+        if (frame1 != 0 && !pmm_free_frame(frame1)) {
+            w->errors++;
+        }
+        if (frame2 != 0 && !pmm_free_frame(frame2)) {
+            w->errors++;
+        }
+        if ((i % 10) == 0) {
+            task_yield();
+        }
+    }
+    w->finished = true;
+}
+
+static void kstress_heap_worker(void *arg) {
+    struct kstress_worker_arg *w = (struct kstress_worker_arg *)arg;
+    for (uint32_t i = 0; i < w->iterations; ++i) {
+        uint8_t *p32 = (uint8_t *)kmalloc(32);
+        uint8_t *p64 = (uint8_t *)kmalloc(64);
+        if (p32 == NULL || p64 == NULL) {
+            w->errors++;
+        } else {
+            for (int k = 0; k < 32; ++k) p32[k] = (uint8_t)(i ^ k);
+            for (int k = 0; k < 64; ++k) p64[k] = (uint8_t)(i + k);
+            for (int k = 0; k < 32; ++k) {
+                if (p32[k] != (uint8_t)(i ^ k)) { w->errors++; break; }
+            }
+            for (int k = 0; k < 64; ++k) {
+                if (p64[k] != (uint8_t)(i + k)) { w->errors++; break; }
+            }
+        }
+        if (p32 != NULL) kfree(p32);
+        if (p64 != NULL) kfree(p64);
+        if ((i % 10) == 0) {
+            task_yield();
+        }
+    }
+    w->finished = true;
+}
+
+static void kstress_ramfs_worker(void *arg) {
+    struct kstress_worker_arg *w = (struct kstress_worker_arg *)arg;
+    static const uint8_t test_payload[] = "KOS Stress Test Payload 2026";
+    for (uint32_t i = 0; i < w->iterations; ++i) {
+        char filename[32];
+        filename[0] = 'D'; filename[1] = ':'; filename[2] = '\\';
+        filename[3] = 's'; filename[4] = 't'; filename[5] = 'r';
+        filename[6] = 'e'; filename[7] = 's'; filename[8] = 's';
+        filename[9] = '_'; filename[10] = (char)('0' + (w->worker_id % 10));
+        filename[11] = '.'; filename[12] = 't'; filename[13] = 'x';
+        filename[14] = 't'; filename[15] = '\0';
+
+        if (!ramfs_write_file(filename, test_payload, sizeof(test_payload))) {
+            w->errors++;
+        } else {
+            const uint8_t *read_ptr = NULL;
+            uint64_t read_sz = 0;
+            if (!vfs_read_file(filename, &read_ptr, &read_sz) || read_sz != sizeof(test_payload)) {
+                w->errors++;
+            }
+            if (!ramfs_unlink_file(filename)) {
+                w->errors++;
+            }
+        }
+        if ((i % 5) == 0) {
+            task_yield();
+        }
+    }
+    w->finished = true;
+}
+
+static void kstress_sync_worker(void *arg) {
+    struct kstress_worker_arg *w = (struct kstress_worker_arg *)arg;
+    for (uint32_t i = 0; i < w->iterations; ++i) {
+        task_sleep(2);
+        task_yield();
+    }
+    w->finished = true;
+}
+
+static void command_kstress(const char *arguments) {
+    (void)arguments;
+    log_info("==================================================");
+    log_info("     KOS Milestone K12 Comprehensive Stress Test  ");
+    log_info("==================================================");
+    bool all_passed = true;
+
+    uint64_t frames_before = pmm_free_frame_count();
+    uint64_t heap_allocs_before = heap_active_allocation_count();
+
+    log_infof("  Baseline free PMM frames: %llu", (unsigned long long)frames_before);
+    log_infof("  Baseline active heap allocs: %llu", (unsigned long long)heap_allocs_before);
+
+    struct process *cur_proc = process_get_current();
+    if (cur_proc == NULL) cur_proc = process_get_kernel();
+
+    enum { STRESS_WORKERS = 4, STRESS_ITERS = 50 };
+    struct kstress_worker_arg workers[STRESS_WORKERS];
+    for (int i = 0; i < STRESS_WORKERS; ++i) {
+        workers[i].worker_id = (uint32_t)i;
+        workers[i].iterations = STRESS_ITERS;
+        workers[i].errors = 0;
+        workers[i].finished = false;
+    }
+
+    log_info("  Launching 4 concurrent stress workers (PMM, Heap, RAMFS, Sched)...");
+    thread_create(cur_proc, kstress_pmm_worker, &workers[0], "stress_pmm");
+    thread_create(cur_proc, kstress_heap_worker, &workers[1], "stress_heap");
+    thread_create(cur_proc, kstress_ramfs_worker, &workers[2], "stress_ramfs");
+    thread_create(cur_proc, kstress_sync_worker, &workers[3], "stress_sync");
+
+    uint64_t timeout_tick = timer_get_ticks() + timer_ms_to_ticks(5000);
+    bool finished = false;
+    while (timer_get_ticks() < timeout_tick) {
+        finished = true;
+        for (int i = 0; i < STRESS_WORKERS; ++i) {
+            if (!workers[i].finished) {
+                finished = false;
+                break;
+            }
+        }
+        if (finished) break;
+        task_yield();
+    }
+
+    if (!finished) {
+        log_error("  [FAIL] Stress test timed out waiting for workers!");
+        all_passed = false;
+    }
+
+    for (int i = 0; i < STRESS_WORKERS; ++i) {
+        if (workers[i].errors != 0) {
+            log_errorf("  [FAIL] Worker %d recorded %u errors!", i, workers[i].errors);
+            all_passed = false;
+        }
+    }
+
+    /* Verify memory reclamation */
+    uint64_t frames_after = pmm_free_frame_count();
+    uint64_t heap_allocs_after = heap_active_allocation_count();
+
+    log_infof("  Post-stress free PMM frames: %llu (delta=%lld)",
+              (unsigned long long)frames_after, (long long)(frames_after - frames_before));
+    log_infof("  Post-stress active heap allocs: %llu (delta=%lld)",
+              (unsigned long long)heap_allocs_after, (long long)(heap_allocs_after - heap_allocs_before));
+
+    if (frames_after != frames_before) {
+        log_error("  [FAIL] PMM frame leak detected during stress testing!");
+        all_passed = false;
+    }
+    if (heap_allocs_after != heap_allocs_before) {
+        log_error("  [FAIL] Heap memory leak detected during stress testing!");
+        all_passed = false;
+    }
+
+    log_info("--------------------------------------------------");
+    if (all_passed) {
+        log_info(">>> [PASS] ALL K12 STRESS & INTEGRITY TESTS PASSED! <<<");
+    } else {
+        log_error(">>> [FAIL] K12 STRESS & INTEGRITY TESTS FAILED! <<<");
+    }
+    log_info("==================================================");
+}
+
 static const struct command_entry command_registry[] = {
     { "help", command_help },
     { "clear", command_clear },
@@ -2107,6 +3682,22 @@ static const struct command_entry command_registry[] = {
     { "ls", command_ls },
     { "cat", command_cat },
     { "elfinfo", command_elfinfo },
+    { "handletest", command_handletest },
+    { "waittest", command_waittest },
+    { "synctest", command_synctest },
+    { "atomictest", command_atomictest },
+    { "locktest", command_locktest },
+    { "mutextest", command_mutextest },
+    { "timertest", command_timertest },
+    { "sleeptest", command_sleeptest },
+    { "preempttest", command_preempttest },
+    { "processtest", command_processtest },
+    { "stacktest", command_stacktest },
+    { "pftest", command_pftest },
+    { "panictest", command_panictest },
+    { "kstress", command_kstress },
+    { "taskstress", command_kstress },
+    { "usertest", command_usertest },
 };
 
 bool kernel_command_execute(const char *command) {

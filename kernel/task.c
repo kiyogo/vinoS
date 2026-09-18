@@ -4,6 +4,7 @@
 #include <kos/atomic.h>
 #include <kos/compiler.h>
 #include <kos/cpu.h>
+#include <kos/descriptors.h>
 #include <kos/heap.h>
 #include <kos/list.h>
 #include <kos/log.h>
@@ -296,6 +297,19 @@ void schedule(void) {
     next->state = THREAD_STATE_RUNNING;
     next->quantum_remaining = TASK_DEFAULT_QUANTUM;
     current_task = next;
+
+    if (next->process != NULL && next->process->pml4_physical != 0) {
+        if (previous == NULL || previous->process != next->process) {
+            cpu_write_cr3(next->process->pml4_physical);
+        }
+    }
+
+    if (next->stack != NULL) {
+        tss_set_rsp0(((uint64_t)next->stack + next->stack_size) & ~0xFull);
+    } else {
+        extern uint8_t kos_boot_stack_top[];
+        tss_set_rsp0((uint64_t)kos_boot_stack_top);
+    }
 
     task_switch(&previous->context, &next->context);
 

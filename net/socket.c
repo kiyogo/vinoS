@@ -184,6 +184,7 @@ bool net_udp_open(uint16_t *socket_id) {
     for (uint16_t index = 0; index < NET_SOCKET_MAX; ++index) {
         if (!sockets[index].open) {
             sockets[index] = (struct udp_socket){ .open = true };
+            wait_queue_init(&sockets[index].wait_queue);
             *socket_id = index;
             spinlock_unlock_irqrestore(&network_lock, flags);
             return true;

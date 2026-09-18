@@ -14,6 +14,10 @@
 #include <kos/wait.h>
 #include <kos/spinlock.h>
 #include <kos/task.h>
+#include <kos/descriptors.h>
+#include <kos/elf.h>
+#include <kos/pmm.h>
+#include <kos/vmm.h>
 
 extern struct task idle_task;
 
@@ -139,6 +143,8 @@ struct process *process_create(const char *name) {
     proc->pml4_physical = cpu_read_cr3() & ~0xFFFull;
     spinlock_init(&proc->lock);
     list_init(&proc->process_node);
+    list_init(&proc->children);
+    list_init(&proc->sibling_node);
     proc->handles = handle_table_create();
     wait_queue_init(&proc->exit_wq);
 
@@ -152,6 +158,16 @@ struct process *process_create(const char *name) {
     list_add_tail(&proc->process_node, &process_list);
     __atomic_fetch_add(&active_process_count, 1, __ATOMIC_RELAXED);
 
+    if (cur != NULL) {
+        uint64_t pflags = spinlock_lock_irqsave(&cur->lock);
+        list_add_tail(&proc->sibling_node, &cur->children);
+        spinlock_unlock_irqrestore(&cur->lock, pflags);
+    } else {
+        uint64_t kflags = spinlock_lock_irqsave(&kernel_process.lock);
+        list_add_tail(&proc->sibling_node, &kernel_process.children);
+        spinlock_unlock_irqrestore(&kernel_process.lock, kflags);
+    }
+
     spinlock_unlock_irqrestore(&process_lock, flags);
     return proc;
 }
@@ -160,6 +176,51 @@ void process_destroy(struct process *proc) {
     if (proc == NULL || proc->pid <= 1) {
         return;
     }
+
+    /* 1. Reparent children to kernel_process */
+    uint64_t pflags = spinlock_lock_irqsave(&proc->lock);
+    struct list_head *cpos = proc->children.next;
+    while (cpos != &proc->children) {
+        struct process *child = list_entry(cpos, struct process, sibling_node);
+        cpos = cpos->next;
+        list_del_init(&child->sibling_node);
+        child->ppid = 1;
+        uint64_t kflags = spinlock_lock_irqsave(&kernel_process.lock);
+        list_add_tail(&child->sibling_node, &kernel_process.children);
+        spinlock_unlock_irqrestore(&kernel_process.lock, kflags);
+    }
+
+    /* 2. Unlink from parent's children list */
+    list_del_init(&proc->sibling_node);
+
+    /* 3. Dequeue and free all remaining threads */
+    struct list_head *tpos = proc->threads.next;
+    while (tpos != &proc->threads) {
+        struct thread *t = list_entry(tpos, struct thread, process_node);
+        tpos = tpos->next;
+        list_del_init(&t->process_node);
+
+        task_sleep_dequeue(t);
+
+        uint64_t rflags = spinlock_lock_irqsave(&reaper_lock);
+        if (t->reaper_node.next != NULL && t->reaper_node.next != &t->reaper_node) {
+            list_del_init(&t->reaper_node);
+        }
+        spinlock_unlock_irqrestore(&reaper_lock, rflags);
+
+        if (t != thread_current()) {
+            if (t != &idle_task && t->stack != NULL && t->stack_size > 0) {
+                kfree(t->stack);
+                t->stack = NULL;
+                t->stack_size = 0;
+            }
+            task_free_slot(t);
+        }
+    }
+    proc->thread_count = 0;
+    spinlock_unlock_irqrestore(&proc->lock, pflags);
+
+    /* 4. Mark dead, unlink from active process list, extract handle table */
     struct handle_table *ht = NULL;
     uint64_t flags = spinlock_lock_irqsave(&process_lock);
     if (proc->state != PROCESS_STATE_DEAD) {
@@ -173,10 +234,19 @@ void process_destroy(struct process *proc) {
     proc->handles = NULL;
     spinlock_unlock_irqrestore(&process_lock, flags);
 
+    /* 5. Destroy handle table */
     if (ht != NULL) {
         handle_table_destroy(ht);
     }
 
+    /* 6. Destroy private user address space if non-zero and not kernel PML4 */
+    uint64_t user_pml4 = proc->pml4_physical;
+    proc->pml4_physical = 0;
+    if (user_pml4 != 0 && user_pml4 != kernel_process.pml4_physical) {
+        vmm_destroy_address_space(user_pml4);
+    }
+
+    /* 7. Wake any remaining waiters */
     wait_queue_wake_all(&proc->exit_wq);
 }
 
@@ -216,6 +286,7 @@ void process_exit(struct process *proc, int exit_code) {
     }
 
     bool has_no_threads = (proc->thread_count == 0);
+    uint64_t ppid = proc->ppid;
     spinlock_unlock_irqrestore(&proc->lock, flags);
 
     if (ht != NULL) {
@@ -225,8 +296,12 @@ void process_exit(struct process *proc, int exit_code) {
     /* 3. Broadcast wakeup to all threads/processes waiting on exit_wq */
     wait_queue_wake_all(&proc->exit_wq);
 
+    /* 4. IMPORTANT: Do NOT automatically destroy if parent is active! */
     if (has_no_threads) {
-        process_destroy(proc);
+        struct process *parent = process_find_by_pid(ppid);
+        if (parent == NULL || parent->state == PROCESS_STATE_DEAD) {
+            process_destroy(proc);
+        }
     }
 
     if (cur != NULL && cur->process == proc) {
@@ -261,10 +336,94 @@ bool process_wait(struct process *proc, int *exit_code, uint64_t timeout_ms) {
         if (exit_code != NULL) {
             *exit_code = proc->exit_code;
         }
+
+        /* Remove proc from parent's children list */
+        struct process *parent = process_find_by_pid(proc->ppid);
+        if (parent != NULL) {
+            uint64_t parent_flags = spinlock_lock_irqsave(&parent->lock);
+            list_del_init(&proc->sibling_node);
+            spinlock_unlock_irqrestore(&parent->lock, parent_flags);
+        } else {
+            list_del_init(&proc->sibling_node);
+        }
+
+        /* Reap child: transition to DEAD, reclaim resources, free table slot */
+        process_destroy(proc);
         return true;
     }
 
     return false;
+}
+
+int process_exec(const char *path, int argc, char *const argv[]) {
+    if (path == NULL) {
+        return -1;
+    }
+
+    struct process *proc = process_get_current();
+    if (proc == NULL) {
+        return -1;
+    }
+
+    /* 1. Create a private user address space */
+    uint64_t pml4_phys = vmm_create_address_space();
+    if (pml4_phys == 0) {
+        return -1;
+    }
+
+    /* 2. Load the ELF binary image into the private address space */
+    struct elf_binary_image img;
+    bool ok = elf_load_binary(path, pml4_phys, &img);
+    if (!ok) {
+        vmm_destroy_address_space(pml4_phys);
+        return -1;
+    }
+
+    /* 3. Allocate and set up user stack with argc/argv formatted per System V ABI */
+    uint64_t user_rsp = 0;
+    ok = process_setup_user_stack(pml4_phys, argc, argv, &user_rsp);
+    if (!ok) {
+        vmm_destroy_address_space(pml4_phys);
+        return -1;
+    }
+
+    /* 4. Clean up old user address space if proc had a private user PML4 */
+    uint64_t old_pml4 = proc->pml4_physical;
+    if (old_pml4 != 0 && old_pml4 != kernel_process.pml4_physical) {
+        vmm_destroy_address_space(old_pml4);
+    }
+
+    /* 5. Assign new address space */
+    proc->pml4_physical = pml4_phys;
+
+    /* 6. Update process name to match binary filename */
+    const char *basename = path;
+    for (const char *p = path; *p != '\0'; ++p) {
+        if (*p == '/' || *p == '\\') {
+            basename = p + 1;
+        }
+    }
+    size_t nlen = 0;
+    while (basename[nlen] != '\0' && nlen < sizeof(proc->name) - 1) {
+        proc->name[nlen] = basename[nlen];
+        nlen++;
+    }
+    proc->name[nlen] = '\0';
+
+    /* 7. Ensure TSS RSP0 is configured with kernel stack for current thread */
+    struct thread *cur_thread = thread_current();
+    if (cur_thread != NULL && cur_thread->stack != NULL) {
+        tss_set_rsp0(((uint64_t)cur_thread->stack + cur_thread->stack_size) & ~0xFull);
+    }
+
+    /* 8. Switch to the new address space */
+    cpu_write_cr3(pml4_phys);
+
+    /* 9. Jump to Ring 3 userspace (noreturn) */
+    enter_userspace(img.entry_point, user_rsp);
+
+    /* Unreachable */
+    return 0;
 }
 
 struct thread *thread_create(struct process *proc, void (*entry)(void *), void *arg, const char *name) {
@@ -364,11 +523,16 @@ static void reaper_thread_entry(void *arg) {
                 if (proc->thread_count > 0) {
                     proc->thread_count--;
                 }
-                bool should_destroy = (proc->state == PROCESS_STATE_ZOMBIE && proc->thread_count == 0);
+                bool is_zombie_empty = (proc->state == PROCESS_STATE_ZOMBIE && proc->thread_count == 0);
+                uint64_t ppid = proc->ppid;
                 spinlock_unlock_irqrestore(&proc->lock, pflags);
 
-                if (should_destroy) {
-                    process_destroy(proc);
+                if (is_zombie_empty) {
+                    /* Only destroy if parent does not exist or is dead */
+                    struct process *parent = process_find_by_pid(ppid);
+                    if (parent == NULL || parent->state == PROCESS_STATE_DEAD) {
+                        process_destroy(proc);
+                    }
                 }
             }
 
@@ -425,6 +589,8 @@ bool process_subsystem_init(void) {
         processes[i].thread_count = 0;
         list_init(&processes[i].threads);
         list_init(&processes[i].process_node);
+        list_init(&processes[i].children);
+        list_init(&processes[i].sibling_node);
         spinlock_init(&processes[i].lock);
         processes[i].handles = NULL;
         wait_queue_init(&processes[i].exit_wq);
@@ -436,6 +602,8 @@ bool process_subsystem_init(void) {
     idle_process.state = PROCESS_STATE_ACTIVE;
     idle_process.exit_code = 0;
     list_init(&idle_process.threads);
+    list_init(&idle_process.children);
+    list_init(&idle_process.sibling_node);
     idle_process.thread_count = 1;
     idle_process.pml4_physical = cpu_read_cr3() & ~0xFFFull;
     spinlock_init(&idle_process.lock);
@@ -462,6 +630,8 @@ bool process_subsystem_init(void) {
     kernel_process.state = PROCESS_STATE_ACTIVE;
     kernel_process.exit_code = 0;
     list_init(&kernel_process.threads);
+    list_init(&kernel_process.children);
+    list_init(&kernel_process.sibling_node);
     kernel_process.thread_count = 1;
     kernel_process.pml4_physical = cpu_read_cr3() & ~0xFFFull;
     spinlock_init(&kernel_process.lock);
@@ -493,5 +663,152 @@ bool process_subsystem_init(void) {
     }
 
     process_initialized = true;
+
+    /* 4. Execute Process & Thread Lifecycle Self-Test */
+    if (!process_lifecycle_self_test()) {
+        log_error("Process lifecycle self-test failed.");
+        return false;
+    }
+
+    return true;
+}
+
+bool process_lifecycle_self_test(void) {
+    log_info("[process] Running Process & Thread Lifecycle Self-Test...");
+
+    /* 1. Test parent/child hierarchy linkage */
+    struct process *parent = process_get_current();
+    if (parent == NULL) {
+        log_error("  [FAIL] Current process is NULL");
+        return false;
+    }
+
+    struct process *child = process_create("test_child");
+    if (child == NULL) {
+        log_error("  [FAIL] Failed to create child process");
+        return false;
+    }
+
+    if (child->ppid != parent->pid) {
+        log_error("  [FAIL] Child PPID does not match parent PID");
+        return false;
+    }
+
+    bool found_child = false;
+    uint64_t pflags = spinlock_lock_irqsave(&parent->lock);
+    struct list_head *pos = parent->children.next;
+    while (pos != &parent->children) {
+        struct process *p = list_entry(pos, struct process, sibling_node);
+        if (p == child) {
+            found_child = true;
+            break;
+        }
+        pos = pos->next;
+    }
+    spinlock_unlock_irqrestore(&parent->lock, pflags);
+
+    if (!found_child) {
+        log_error("  [FAIL] Child not found in parent's children list");
+        return false;
+    }
+    log_info("  [PASS] Process hierarchy (children & sibling_node) verified.");
+
+    /* 2. Test Zombie state retention & process_wait reaping */
+    process_exit(child, 42);
+
+    if (child->state != PROCESS_STATE_ZOMBIE) {
+        log_error("  [FAIL] Child was prematurely destroyed instead of remaining ZOMBIE");
+        return false;
+    }
+    log_info("  [PASS] Zombie process retention with active parent verified.");
+
+    int exit_code = 0;
+    bool wait_ok = process_wait(child, &exit_code, 100);
+    if (!wait_ok || exit_code != 42) {
+        log_error("  [FAIL] process_wait failed or returned wrong exit code");
+        return false;
+    }
+
+    if (child->state != PROCESS_STATE_DEAD) {
+        log_error("  [FAIL] Child state after wait is not DEAD");
+        return false;
+    }
+
+    found_child = false;
+    pflags = spinlock_lock_irqsave(&parent->lock);
+    pos = parent->children.next;
+    while (pos != &parent->children) {
+        struct process *p = list_entry(pos, struct process, sibling_node);
+        if (p == child) {
+            found_child = true;
+            break;
+        }
+        pos = pos->next;
+    }
+    spinlock_unlock_irqrestore(&parent->lock, pflags);
+
+    if (found_child) {
+        log_error("  [FAIL] Reaped child still found in parent's children list");
+        return false;
+    }
+    log_info("  [PASS] process_wait zombie reaping and hierarchy unlinking verified.");
+
+    /* 3. Test private user address space creation and recursive reclamation (zero leaks) */
+    uint64_t frames_before = pmm_free_frame_count();
+    struct process *leak_proc = process_create("leak_test_proc");
+    if (leak_proc == NULL) {
+        log_error("  [FAIL] Failed to create leak test process");
+        return false;
+    }
+
+    uint64_t user_pml4 = vmm_create_address_space();
+    if (user_pml4 == 0) {
+        log_error("  [FAIL] Failed to create user address space");
+        return false;
+    }
+
+    uint64_t f1 = pmm_allocate_frame();
+    uint64_t f2 = pmm_allocate_frame();
+    if (f1 == 0 || f2 == 0) {
+        log_error("  [FAIL] Failed to allocate frames for mapping test");
+        return false;
+    }
+    vmm_map_page_in(user_pml4, 0x400000ull, f1, VMM_PAGE_USER | VMM_PAGE_WRITABLE);
+    vmm_map_page_in(user_pml4, 0x500000ull, f2, VMM_PAGE_USER | VMM_PAGE_WRITABLE);
+
+    leak_proc->pml4_physical = user_pml4;
+    process_destroy(leak_proc);
+
+    uint64_t frames_after = pmm_free_frame_count();
+    if (frames_after != frames_before) {
+        log_errorf("  [FAIL] Address space reclamation leaked frames: before=%llu, after=%llu",
+                   (unsigned long long)frames_before, (unsigned long long)frames_after);
+        return false;
+    }
+    log_info("  [PASS] Address space reclamation verified with zero frame leaks.");
+
+    /* 4. Test process_exec error handling and unwinding */
+    uint64_t frames_exec_before = pmm_free_frame_count();
+    int exec_null = process_exec(NULL, 0, NULL);
+    if (exec_null != -1) {
+        log_error("  [FAIL] process_exec(NULL) did not return -1");
+        return false;
+    }
+
+    int exec_nonexistent = process_exec("nonexistent.elf", 0, NULL);
+    if (exec_nonexistent != -1) {
+        log_error("  [FAIL] process_exec(nonexistent) did not return -1");
+        return false;
+    }
+
+    uint64_t frames_exec_after = pmm_free_frame_count();
+    if (frames_exec_after != frames_exec_before) {
+        log_errorf("  [FAIL] process_exec error rollback leaked frames: before=%llu, after=%llu",
+                   (unsigned long long)frames_exec_before, (unsigned long long)frames_exec_after);
+        return false;
+    }
+    log_info("  [PASS] process_exec error rollback and unwinding verified with zero frame leaks.");
+
+    log_info(">>> [PASS] ALL PROCESS LIFECYCLE & RECLAMATION SELF-TESTS PASSED! <<<");
     return true;
 }

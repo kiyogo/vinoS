@@ -38,6 +38,11 @@ _Static_assert(__builtin_offsetof(struct task_state_segment, ist1) == 36,
 _Static_assert(__builtin_offsetof(struct task_state_segment, io_map_base) == 102,
     "TSS io_map_base must be at offset 102 (0x66)");
 
+#define GDT_KERNEL_CS 0x08
+#define GDT_KERNEL_DS 0x10
+#define GDT_USER_CS   0x2b
+#define GDT_USER_DS   0x33
+
 /* GDT & TSS Lifecycle */
 void gdt_initialize(void);
 void tss_set_rsp0(uint64_t rsp0);

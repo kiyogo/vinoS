@@ -4,12 +4,11 @@
 #include <kos/cpu.h>
 #include <kos/log.h>
 #include <kos/net.h>
-#include <kos/tls.h>
 #include <kos/timer.h>
 
 enum {
+    HTTP_MAX_REDIRECTS = 3,
     HTTP_DEFAULT_PORT = 80,
-    HTTPS_DEFAULT_PORT = 443,
     HTTP_MAX_HOST = 64,
     HTTP_MAX_PATH = 256,
 };
@@ -18,11 +17,7 @@ struct parsed_url {
     char host[HTTP_MAX_HOST];
     uint16_t port;
     char path[HTTP_MAX_PATH];
-    bool secure;
 };
-
-static enum net_http_error last_error;
-static enum net_tls_error last_tls_error;
 
 static uint64_t str_length(const char *s) {
     if (s == 0) {
@@ -93,10 +88,6 @@ static bool parse_http_url(const char *url, struct parsed_url *parsed) {
     if (str_starts_with_case_insensitive(p, "http://")) {
         p += 7;
     }
-    else if (str_starts_with_case_insensitive(p, "https://")) {
-        parsed->secure = true;
-        p += 8;
-    }
 
     uint64_t h_idx = 0;
     while (*p != '\0' && *p != ':' && *p != '/' && h_idx + 1 < sizeof(parsed->host)) {
@@ -107,7 +98,7 @@ static bool parse_http_url(const char *url, struct parsed_url *parsed) {
         return false;
     }
 
-    parsed->port = parsed->secure ? HTTPS_DEFAULT_PORT : HTTP_DEFAULT_PORT;
+    parsed->port = HTTP_DEFAULT_PORT;
     if (*p == ':') {
         ++p;
         uint32_t port_val = 0;
@@ -158,87 +149,79 @@ static const char *find_substring_case_insensitive(const char *haystack, const c
     return 0;
 }
 
-static bool decode_chunk_size(const char *text, uint64_t available, uint64_t *size,
-        uint64_t *consumed) {
-    if (text == 0 || size == 0 || consumed == 0 || available == 0) return false;
-    uint64_t value = 0;
-    uint64_t index = 0;
-    bool has_digit = false;
-    while (index < available && text[index] != '\r' && text[index] != '\n'
-        && text[index] != ';') {
-        char character = text[index];
-        uint8_t digit;
-        if (character >= '0' && character <= '9') digit = (uint8_t)(character - '0');
-        else if (character >= 'a' && character <= 'f') digit = (uint8_t)(character - 'a' + 10);
-        else if (character >= 'A' && character <= 'F') digit = (uint8_t)(character - 'A' + 10);
-        else return false;
-        if (value > (UINT64_MAX - digit) / 16u) return false;
-        value = value * 16u + digit;
-        has_digit = true;
-        ++index;
+static uint64_t decode_hex_size(const char *str, uint64_t *consumed) {
+    uint64_t val = 0;
+    uint64_t idx = 0;
+    while (str[idx] == ' ' || str[idx] == '\t') {
+        ++idx;
     }
-    if (!has_digit) return false;
-    /* A chunk extension is permitted, but must end in a complete CRLF line. */
-    while (index < available && text[index] != '\n') ++index;
-    if (index == available || index == 0 || text[index - 1] != '\r') return false;
-    *size = value;
-    *consumed = index + 1;
-    return true;
+    while (str[idx] != '\0') {
+        char c = str[idx];
+        if (c >= '0' && c <= '9') {
+            val = (val << 4) | (uint64_t)(c - '0');
+        }
+        else if (c >= 'a' && c <= 'f') {
+            val = (val << 4) | (uint64_t)(c - 'a' + 10);
+        }
+        else if (c >= 'A' && c <= 'F') {
+            val = (val << 4) | (uint64_t)(c - 'A' + 10);
+        }
+        else {
+            break;
+        }
+        ++idx;
+    }
+    while (str[idx] != '\0' && str[idx] != '\r' && str[idx] != '\n') {
+        ++idx;
+    }
+    if (str[idx] == '\r') {
+        ++idx;
+    }
+    if (str[idx] == '\n') {
+        ++idx;
+    }
+    *consumed = idx;
+    return val;
 }
 
-static bool unchunk_http_body(char *body_start, uint64_t body_len, uint64_t *out_body_size,
-        bool allow_truncated, bool *out_complete) {
-    if (body_start == 0 || out_body_size == 0 || out_complete == 0) return false;
+static void unchunk_http_body(char *body_start, uint64_t body_len) {
+    if (body_start == 0 || body_len == 0) {
+        return;
+    }
     char *read_ptr = body_start;
     char *write_ptr = body_start;
     uint64_t remaining = body_len;
-    *out_body_size = 0;
-    *out_complete = false;
 
     while (remaining > 0) {
         uint64_t header_consumed = 0;
-        uint64_t chunk_size = 0;
-        if (!decode_chunk_size(read_ptr, remaining, &chunk_size, &header_consumed)
-            || header_consumed > remaining) {
-            if (allow_truncated) {
-                *write_ptr = '\0';
-                *out_body_size = (uint64_t)(write_ptr - body_start);
-            }
-            return allow_truncated;
+        uint64_t chunk_size = decode_hex_size(read_ptr, &header_consumed);
+        if (header_consumed == 0 || header_consumed > remaining) {
+            break;
         }
         read_ptr += header_consumed;
         remaining -= header_consumed;
 
         if (chunk_size == 0) {
-            *write_ptr = '\0';
-            *out_body_size = (uint64_t)(write_ptr - body_start);
-            *out_complete = true;
-            return true;
+            break;
         }
-        if (chunk_size > remaining) {
-            if (!allow_truncated) return false;
-            for (uint64_t i = 0; i < remaining; ++i) *write_ptr++ = *read_ptr++;
-            *write_ptr = '\0';
-            *out_body_size = (uint64_t)(write_ptr - body_start);
-            return true;
-        }
-        for (uint64_t i = 0; i < chunk_size; ++i) {
+
+        uint64_t copy_bytes = chunk_size < remaining ? chunk_size : remaining;
+        for (uint64_t i = 0; i < copy_bytes; ++i) {
             *write_ptr++ = *read_ptr++;
         }
-        remaining -= chunk_size;
-        if (remaining < 2) {
-            if (!allow_truncated) return false;
-            *write_ptr = '\0';
-            *out_body_size = (uint64_t)(write_ptr - body_start);
-            return true;
+        remaining -= copy_bytes;
+
+        /* Skip trailing \r\n after chunk data */
+        if (remaining > 0 && *read_ptr == '\r') {
+            ++read_ptr;
+            --remaining;
         }
-        if (read_ptr[0] != '\r' || read_ptr[1] != '\n') return false;
-        read_ptr += 2;
-        remaining -= 2;
+        if (remaining > 0 && *read_ptr == '\n') {
+            ++read_ptr;
+            --remaining;
+        }
     }
     *write_ptr = '\0';
-    *out_body_size = (uint64_t)(write_ptr - body_start);
-    return allow_truncated;
 }
 
 static bool execute_http_request(const struct parsed_url *parsed, char *response_buffer,
@@ -247,26 +230,13 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
     uint32_t ip_address = 0;
     if (!parse_ipv4_literal(parsed->host, &ip_address)) {
         if (!net_dns_resolve(parsed->host, &ip_address, timer_frequency_hz() * 5)) {
-            last_error = NET_HTTP_ERROR_DNS;
             return false;
         }
     }
 
     int sock = tcp_connect(ip_address, parsed->port);
     if (sock < 0) {
-        last_error = NET_HTTP_ERROR_TCP;
         return false;
-    }
-
-    if (parsed->secure) {
-        struct net_tls_session tls_session;
-        net_tls_session_initialize(&tls_session, parsed->host, false);
-        last_tls_error = net_tls_client_handshake(&tls_session, sock, timer_frequency_hz() * 10);
-        if (last_tls_error != NET_TLS_ERROR_NONE) {
-            tcp_close(sock);
-            last_error = NET_HTTP_ERROR_TLS_UNSUPPORTED;
-            return false;
-        }
     }
 
     /* Build HTTP/1.1 request */
@@ -278,8 +248,7 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
     const char *part2 = " HTTP/1.1\r\nHost: ";
     for (uint64_t i = 0; part2[i] != '\0'; ++i) req[r_pos++] = part2[i];
     for (uint64_t i = 0; parsed->host[i] != '\0'; ++i) req[r_pos++] = parsed->host[i];
-    uint16_t default_port = parsed->secure ? HTTPS_DEFAULT_PORT : HTTP_DEFAULT_PORT;
-    if (parsed->port != default_port) {
+    if (parsed->port != HTTP_DEFAULT_PORT) {
         req[r_pos++] = ':';
         uint32_t p_val = parsed->port;
         uint32_t p_digits = 0;
@@ -299,7 +268,6 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
     int sent = tcp_send(sock, (const uint8_t *)req, r_pos);
     if (sent <= 0) {
         tcp_close(sock);
-        last_error = NET_HTTP_ERROR_TCP;
         return false;
     }
 
@@ -346,7 +314,6 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
     tcp_close(sock);
 
     if (total_read == 0) {
-        last_error = NET_HTTP_ERROR_TCP;
         return false;
     }
     *out_size = total_read;
@@ -366,10 +333,6 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
         }
     }
     *out_status_code = status_code;
-    if (status_code == 0) {
-        last_error = NET_HTTP_ERROR_RESPONSE_MALFORMED;
-        return false;
-    }
 
     /* Check Location header on redirect status */
     if (status_code == 301 || status_code == 302 || status_code == 303
@@ -394,12 +357,7 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
         }
     }
 
-    bool response_limited = total_read + 1 == capacity;
-
-    /* If chunked transfer encoding, decode body. A response that fills the
-       bounded buffer may end halfway through a chunk; preserve all complete
-       bytes and report a controlled truncation instead of misdiagnosing it as
-       a malformed HTTP response. */
+    /* If chunked transfer encoding, decode body */
     const char *te = find_substring_case_insensitive(response_buffer, "Transfer-Encoding:");
     if (te != 0) {
         const char *chk = find_substring_case_insensitive(te, "chunked");
@@ -407,118 +365,63 @@ static bool execute_http_request(const struct parsed_url *parsed, char *response
         if (chk != 0 && hdr_end != 0 && chk < hdr_end) {
             char *body_start = (char *)(hdr_end + 4);
             uint64_t body_len = (uint64_t)(&response_buffer[total_read] - body_start);
-            uint64_t decoded_body_size;
-            bool chunk_complete = false;
-            if (!unchunk_http_body(body_start, body_len, &decoded_body_size,
-                    response_limited, &chunk_complete)) {
-                last_error = NET_HTTP_ERROR_RESPONSE_MALFORMED;
-                return false;
-            }
-            *out_size = (uint64_t)(body_start - response_buffer) + decoded_body_size;
-            if (!chunk_complete) response_limited = true;
+            unchunk_http_body(body_start, body_len);
+            *out_size = (uint64_t)(str_length(response_buffer));
         }
     }
 
-    last_error = response_limited ? NET_HTTP_ERROR_RESPONSE_TOO_LARGE : NET_HTTP_ERROR_NONE;
     return true;
-}
-
-static bool url_has_scheme(const char *url) {
-    return str_starts_with_case_insensitive(url, "http://")
-        || str_starts_with_case_insensitive(url, "https://");
-}
-
-static bool copy_url_with_scheme(char destination[512], const char *scheme, const char *url) {
-    uint64_t position = 0;
-    for (uint64_t index = 0; scheme[index] != '\0'; ++index) {
-        if (position + 1 >= 512) return false;
-        destination[position++] = scheme[index];
-    }
-    for (uint64_t index = 0; url[index] != '\0'; ++index) {
-        if (position + 1 >= 512) return false;
-        destination[position++] = url[index];
-    }
-    destination[position] = '\0';
-    return true;
-}
-
-static bool perform_http_get(const char *url, bool follow_redirects, char *response_buffer,
-        uint64_t capacity, uint64_t *out_size, struct net_http_response_info *info) {
-    char current_url[512];
-    uint64_t u_len = str_length(url);
-    if (u_len >= sizeof(current_url)) {
-        last_error = NET_HTTP_ERROR_URL_INVALID;
-        return false;
-    }
-    for (uint64_t i = 0; i <= u_len; ++i) current_url[i] = url[i];
-
-    for (uint32_t redirect = 0; redirect < NET_HTTP_MAX_REDIRECTS; ++redirect) {
-        struct parsed_url parsed = {0};
-        if (!parse_http_url(current_url, &parsed)) {
-            last_error = NET_HTTP_ERROR_URL_INVALID;
-            return false;
-        }
-        char redirect_location[512] = { 0 };
-        uint16_t status_code = 0;
-        if (!execute_http_request(&parsed, response_buffer, capacity, out_size,
-                redirect_location, sizeof(redirect_location), &status_code)) return false;
-        if (info != 0) {
-            *info = (struct net_http_response_info){ .status_code = status_code,
-                .chunked = find_substring_case_insensitive(response_buffer,
-                    "Transfer-Encoding: chunked") != 0,
-                .body_truncated = last_error == NET_HTTP_ERROR_RESPONSE_TOO_LARGE };
-        }
-        bool is_redirect = status_code == 301 || status_code == 302 || status_code == 303
-            || status_code == 307 || status_code == 308;
-        if (!is_redirect || !follow_redirects || redirect_location[0] == '\0') return true;
-        if (redirect_location[0] == '/') {
-            uint64_t position = 0;
-            const char *scheme = parsed.secure ? "https://" : "http://";
-            for (uint64_t index = 0; scheme[index] != '\0'; ++index) current_url[position++] = scheme[index];
-            for (uint64_t index = 0; parsed.host[index] != '\0'; ++index) current_url[position++] = parsed.host[index];
-            uint16_t default_port = parsed.secure ? HTTPS_DEFAULT_PORT : HTTP_DEFAULT_PORT;
-            if (parsed.port != default_port) return false;
-            for (uint64_t index = 0; redirect_location[index] != '\0'; ++index) {
-                if (position + 1 >= sizeof(current_url)) { last_error = NET_HTTP_ERROR_URL_INVALID; return false; }
-                current_url[position++] = redirect_location[index];
-            }
-            current_url[position] = '\0';
-        }
-        else {
-            uint64_t length = str_length(redirect_location);
-            if (length >= sizeof(current_url)) { last_error = NET_HTTP_ERROR_URL_INVALID; return false; }
-            for (uint64_t index = 0; index <= length; ++index) current_url[index] = redirect_location[index];
-        }
-    }
-    last_error = NET_HTTP_ERROR_REDIRECT_LIMIT;
-    return false;
-}
-
-bool net_http_get_ex(const char *url, bool follow_redirects, char *response_buffer,
-        uint64_t capacity, uint64_t *out_size, struct net_http_response_info *info) {
-    if (url == 0 || response_buffer == 0 || capacity == 0 || out_size == 0) {
-        last_error = NET_HTTP_ERROR_URL_INVALID;
-        return false;
-    }
-    last_error = NET_HTTP_ERROR_NONE;
-    last_tls_error = NET_TLS_ERROR_NONE;
-    if (url_has_scheme(url)) return perform_http_get(url, follow_redirects, response_buffer,
-        capacity, out_size, info);
-    /* Bare host names intentionally use plain HTTP for predictable behavior.
-     * This avoids silently downgrading a user-requested HTTPS URL while still
-     * making `curl example.com` useful before the TLS client is complete. Use
-     * an explicit https:// URL (or the shell's --https flag) to require TLS. */
-    char http_url[512];
-    if (!copy_url_with_scheme(http_url, "http://", url)) {
-        last_error = NET_HTTP_ERROR_URL_INVALID;
-        return false;
-    }
-    return perform_http_get(http_url, follow_redirects, response_buffer, capacity, out_size, info);
 }
 
 bool net_http_get(const char *url, char *response_buffer, uint64_t capacity, uint64_t *out_size) {
-    return net_http_get_ex(url, true, response_buffer, capacity, out_size, 0);
-}
+    if (url == 0 || response_buffer == 0 || capacity == 0 || out_size == 0) {
+        return false;
+    }
 
-enum net_http_error net_http_last_error(void) { return last_error; }
-enum net_tls_error net_http_last_tls_error(void) { return last_tls_error; }
+    char current_url[512];
+    uint64_t u_len = str_length(url);
+    if (u_len >= sizeof(current_url)) {
+        return false;
+    }
+    for (uint64_t i = 0; i <= u_len; ++i) {
+        current_url[i] = url[i];
+    }
+
+    for (uint32_t redirect = 0; redirect < HTTP_MAX_REDIRECTS; ++redirect) {
+        struct parsed_url parsed;
+        if (!parse_http_url(current_url, &parsed)) {
+            return false;
+        }
+
+        char redirect_location[512] = { 0 };
+        uint16_t status_code = 0;
+        if (!execute_http_request(&parsed, response_buffer, capacity, out_size,
+                redirect_location, sizeof(redirect_location), &status_code)) {
+            return false;
+        }
+
+        if ((status_code == 301 || status_code == 302 || status_code == 303
+             || status_code == 307 || status_code == 308) && redirect_location[0] != '\0') {
+            /* If redirect target is relative path, prepend host */
+            if (redirect_location[0] == '/') {
+                uint64_t p_len = 0;
+                const char *prefix = "http://";
+                for (uint64_t i = 0; prefix[i] != '\0'; ++i) current_url[p_len++] = prefix[i];
+                for (uint64_t i = 0; parsed.host[i] != '\0'; ++i) current_url[p_len++] = parsed.host[i];
+                for (uint64_t i = 0; redirect_location[i] != '\0'; ++i) current_url[p_len++] = redirect_location[i];
+                current_url[p_len] = '\0';
+            }
+            else {
+                uint64_t l_len = str_length(redirect_location);
+                for (uint64_t i = 0; i <= l_len; ++i) {
+                    current_url[i] = redirect_location[i];
+                }
+            }
+            continue;
+        }
+
+        return true;
+    }
+
+    return true;
+}

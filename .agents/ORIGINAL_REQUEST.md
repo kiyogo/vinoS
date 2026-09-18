@@ -59,3 +59,47 @@ Triển khai tuần tự các phase còn lại của K12 theo quy trình nghiêm
 Mỗi phase phải được kiểm tra biên dịch bằng `.\tools\kos-tool.exe build` và smoke test QEMU trước khi bàn giao.
 Working directory: `d:\DATA\source\OS\KOS\OS2`
 Integrity mode: development
+
+## Follow-up — 2026-09-18T00:22:16Z
+
+Implement Milestone K14 (Process and Ring 3 Userspace) in the KOS x86_64 operating system kernel, delivering an ELF64 loader, Ring 3 privilege switching with TSS/RSP0, user stack management, and a complete process/thread lifecycle subsystem.
+
+Working directory: d:/DATA/source/OS/KOS/OS2
+Integrity mode: development
+
+## Requirements
+
+### R1. ELF64 Binary Loader & Address Space Mapping
+- Parse and strictly validate ELF64 headers and Program Headers: check magic bytes, 64-bit architecture, endianness, entry point, alignment, and segment boundary limits prior to mapping.
+- Map all `PT_LOAD` segments into the process-specific virtual address space with accurate page permissions (Read / Write / Execute / User-accessible).
+- Allocate a dedicated user stack for each new user process/thread, protected by a non-present guard page at the stack bottom to catch stack overflow conditions.
+- Format the initial user stack with standard System V AMD64 ABI layout containing `argc`, `argv` pointers, `envp` pointers, and string data prior to entering userspace.
+
+### R2. Ring 3 Privilege Transition & Hardware Context Management
+- Implement safe Ring 0 to Ring 3 transition using `iretq` (or architecture-standard context switch mechanism) loading appropriate User Code/Data segments (`GDT_USER_CS`, `GDT_USER_DS`).
+- Configure the Task State Segment (TSS) and update `RSP0` on every thread/process context switch so that interrupts, exceptions, and syscalls originating in Ring 3 switch safely to a valid kernel-mode stack.
+
+### R3. Process & Thread Lifecycle Subsystem
+- Implement full `process_t` and `thread_t` data structures with parent-child tracking, process state (Ready, Running, Blocked, Zombie), and exit status.
+- Implement process management primitives: `process_create`, `process_exec`, `process_exit`, and `process_wait`.
+- Implement thread management primitives: `thread_create`, `thread_exit`, `thread_sleep`, and `yield`.
+- Support parent process waiting on child termination, retrieving exit status codes, and reaping zombie processes.
+- Ensure complete reclamation of all process resources (page tables, user memory mappings, allocated stacks, handles/descriptors) upon process termination without leaking memory.
+- Implement foundational signal/event notification primitives adequate for inter-process synchronization in subsequent milestones.
+- Strict modularity: do not directly couple filesystems, sockets, or TLS into the process core subsystem; interact strictly through abstract kernel interfaces.
+
+## Acceptance Criteria
+
+### Automated Build & Static Verification
+- [ ] Build succeeds without compiler errors or warnings: `tools\kos-tool.exe build`.
+- [ ] All code strictly follows KOS coding conventions and maintains existing architectural boundaries.
+
+### Functionality & Execution in QEMU
+- [ ] Valid ELF64 binaries load and execute in Ring 3 userspace successfully.
+- [ ] Invalid/corrupted ELF binaries (wrong magic, bad program headers, out-of-bounds addresses) fail gracefully with error codes and do not panic the kernel.
+- [ ] Memory protections are strictly enforced: Ring 3 cannot access kernel-only pages without triggering a page fault handled by the kernel.
+- [ ] Hitting the user stack guard page cleanly faults and terminates the faulting process without crashing the kernel.
+- [ ] TSS/RSP0 switching handles hardware interrupts (e.g., timer/PIT) and exceptions occurring in Ring 3 seamlessly, returning to userspace cleanly.
+- [ ] Parent processes can fork/create children, retrieve child exit status via `process_wait`, and zombie processes are properly reaped upon cleanup.
+- [ ] Repeated process creation and destruction loops demonstrate zero kernel heap or page frame leakage.
+

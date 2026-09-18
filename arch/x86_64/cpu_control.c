@@ -72,6 +72,10 @@ uint64_t cpu_read_cr3(void) {
     return value;
 }
 
+void cpu_write_cr3(uint64_t cr3) {
+    __asm__ volatile ("mov %0, %%cr3" : : "r"(cr3) : "memory");
+}
+
 void cpu_invalidate_page(uint64_t virtual_address) {
     __asm__ volatile ("invlpg (%0)" : : "r"(virtual_address) : "memory");
 }

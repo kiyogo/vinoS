@@ -13,6 +13,7 @@ enum {
 
 static struct net_interface_info interface;
 static uint16_t next_identification;
+static struct kos_spinlock ipv4_lock = KOS_SPINLOCK_INITIALIZER;
 
 void net_icmp_receive(uint32_t source, const uint8_t *packet, uint64_t size);
 void net_udp_receive(uint32_t source, uint32_t destination, const uint8_t *packet,
@@ -61,7 +62,10 @@ bool net_interface_info(struct net_interface_info *info) {
 }
 
 bool net_has_external_interface(void) {
-    return interface.available;
+    uint64_t flags = spinlock_lock_irqsave(&ipv4_lock);
+    bool avail = interface.available;
+    spinlock_unlock_irqrestore(&ipv4_lock, flags);
+    return avail;
 }
 
 bool net_ipv4_initialize_interface(const uint8_t mac_address[NET_ETHERNET_ADDRESS_SIZE]) {
@@ -86,7 +90,9 @@ bool net_ipv4_initialize_interface(const uint8_t mac_address[NET_ETHERNET_ADDRES
 
 bool net_ipv4_configure_dhcp(uint32_t address, uint32_t subnet_mask, uint32_t gateway,
         uint32_t dns_server, uint64_t lease_seconds) {
+    uint64_t flags = spinlock_lock_irqsave(&ipv4_lock);
     if (!interface.available || address == 0 || subnet_mask == 0) {
+        spinlock_unlock_irqrestore(&ipv4_lock, flags);
         return false;
     }
     interface.ipv4_address = address;
@@ -96,11 +102,14 @@ bool net_ipv4_configure_dhcp(uint32_t address, uint32_t subnet_mask, uint32_t ga
     interface.configuration_source = NET_CONFIGURATION_DHCP;
     interface.dhcp_state = NET_DHCP_BOUND;
     interface.dhcp_lease_seconds = lease_seconds;
+    spinlock_unlock_irqrestore(&ipv4_lock, flags);
     return true;
 }
 
 void net_ipv4_set_dhcp_state(enum net_dhcp_state state) {
+    uint64_t flags = spinlock_lock_irqsave(&ipv4_lock);
     interface.dhcp_state = state;
+    spinlock_unlock_irqrestore(&ipv4_lock, flags);
 }
 
 void net_ipv4_receive(const uint8_t source[NET_ETHERNET_ADDRESS_SIZE], const uint8_t *packet,

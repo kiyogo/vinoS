@@ -10,6 +10,7 @@
 #include <kos/page_fault.h>
 #include <kos/panic.h>
 #include <kos/pic.h>
+#include <kos/process.h>
 #include <kos/serial.h>
 #include <kos/syscall.h>
 #include <kos/task.h>
@@ -252,20 +253,34 @@ void page_fault_handler(struct interrupt_context *context) {
     s_last_page_fault_record = record;
 
     /* 4. Fault discrimination: Kernel mode vs User mode */
-    if (!(context->error_code & PF_ERROR_USER)) {
+    bool is_user = ((context->cs & 3) == 3) || ((context->error_code & 4) != 0);
+    if (!is_user) {
         /* Kernel mode page fault is unrecoverable -> Panic & Halt */
         log_page_fault_panic(context, &record);
     } else {
         /* User mode page fault (Ring 3) */
-        log_enter_emergency_mode();
-        log_emergency_puts("\r\n==================== USER PROCESS PAGE FAULT ====================\r\n");
-        log_error("PAGE FAULT: Access violation in User Mode (Ring 3)");
-        log_info_hex("Faulting Address (CR2): ", cr2);
-        log_info_hex("Faulting RIP:           ", context->rip);
-        log_info_hex("Stack Pointer (RSP):    ", context->rsp);
-        log_info_hex("Error Code:             ", context->error_code);
-        log_error("User space process termination not yet available in K12 -> System halted.");
-        cpu_halt();
+        __atomic_sub_fetch(&s_pf_recursion, 1, __ATOMIC_SEQ_CST);
+
+        log_warnf("User process page fault: CR2=0x%016lX, RIP=0x%016lX, RSP=0x%016lX, error=0x%lX [P=%u W=%u U=%u R=%u I=%u] (%s)",
+                  (unsigned long)cr2,
+                  (unsigned long)context->rip,
+                  (unsigned long)context->rsp,
+                  (unsigned long)context->error_code,
+                  (unsigned int)(record.present ? 1 : 0),
+                  (unsigned int)(record.write ? 1 : 0),
+                  (unsigned int)(record.user ? 1 : 0),
+                  (unsigned int)(record.reserved_bit ? 1 : 0),
+                  (unsigned int)(record.instruction_fetch ? 1 : 0),
+                  record.violation_cause ? record.violation_cause : "access violation");
+
+        struct process *cur = process_get_current();
+        if (cur != NULL) {
+            log_warnf("Terminating user process PID %lu (%s) due to page fault (SIGSEGV -11)",
+                      (unsigned long)cur->pid, cur->name);
+            process_exit(cur, -11);
+            schedule();
+        }
+        schedule();
     }
 }
 
@@ -338,7 +353,69 @@ KOS_NOINLINE uint64_t exception_dispatch_count(uint8_t vector) {
     return vector < KOS_EXCEPTION_VECTOR_COUNT ? exception_counts[vector] : 0;
 }
 
+static void handle_user_exception(const struct interrupt_context *context) {
+    log_warnf("Unhandled user exception: vector=0x%02lX (%s), error_code=0x%lX, RIP=0x%016lX",
+              (unsigned long)context->vector,
+              exception_name(context->vector),
+              (unsigned long)context->error_code,
+              (unsigned long)context->rip);
+    struct process *cur = process_get_current();
+    log_warnf("User process exception details: PID %lu (%s)",
+              (unsigned long)(cur ? cur->pid : 0),
+              cur ? cur->name : "unknown");
+    log_warnf("  RIP: 0x%016lX  RSP: 0x%016lX  RFLAGS: 0x%016lX",
+              (unsigned long)context->rip,
+              (unsigned long)context->rsp,
+              (unsigned long)context->rflags);
+    log_warnf("  RAX: 0x%016lX  RBX: 0x%016lX  RCX: 0x%016lX  RDX: 0x%016lX",
+              (unsigned long)context->rax,
+              (unsigned long)context->rbx,
+              (unsigned long)context->rcx,
+              (unsigned long)context->rdx);
+    log_warnf("  RSI: 0x%016lX  RDI: 0x%016lX  RBP: 0x%016lX",
+              (unsigned long)context->rsi,
+              (unsigned long)context->rdi,
+              (unsigned long)context->rbp);
+    log_warnf("  R8 : 0x%016lX  R9 : 0x%016lX  R10: 0x%016lX  R11: 0x%016lX",
+              (unsigned long)context->r8,
+              (unsigned long)context->r9,
+              (unsigned long)context->r10,
+              (unsigned long)context->r11);
+    log_warnf("  R12: 0x%016lX  R13: 0x%016lX  R14: 0x%016lX  R15: 0x%016lX",
+              (unsigned long)context->r12,
+              (unsigned long)context->r13,
+              (unsigned long)context->r14,
+              (unsigned long)context->r15);
+    log_warnf("  CS : 0x%04lX  SS : 0x%04lX",
+              (unsigned long)context->cs,
+              (unsigned long)context->ss);
+    if (cur != NULL) {
+        log_warnf("Terminating user process PID %lu (%s) due to unhandled exception",
+                  (unsigned long)cur->pid, cur->name);
+        process_exit(cur, -1);
+        schedule();
+    }
+    schedule();
+}
+
 static void default_exception_panic(const struct interrupt_context *context) {
+    if ((context->cs & 3) == 3) {
+        log_warnf("Unhandled user exception: vector=0x%02lX (%s), error_code=0x%lX, RIP=0x%016lX",
+                  (unsigned long)context->vector,
+                  exception_name(context->vector),
+                  (unsigned long)context->error_code,
+                  (unsigned long)context->rip);
+        struct process *cur = process_get_current();
+        if (cur != NULL) {
+            log_warnf("Terminating user process PID %lu (%s) due to unhandled exception",
+                      (unsigned long)cur->pid, cur->name);
+            process_exit(cur, -1);
+            schedule();
+        }
+        schedule();
+        return;
+    }
+
     if (context->vector == 14) {
         report_page_fault(context->error_code);
     }
@@ -385,6 +462,10 @@ void interrupt_dispatch(const struct interrupt_context *context) {
         exception_handler_t handler = exception_handlers[context->vector];
         if (handler != 0) {
             handler((struct interrupt_context *)context);
+            return;
+        }
+        if ((context->cs & 3) == 3) {
+            handle_user_exception(context);
             return;
         }
     }
