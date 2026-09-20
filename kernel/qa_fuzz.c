@@ -67,8 +67,56 @@ bool qa_fuzz_elf_parser(uint32_t iterations) {
 
 bool qa_fuzz_syscall_args(uint32_t iterations) {
     log_info("[fuzz] 2. Fuzzing Syscall ABI & Argument Dispatcher...");
+    /*
+     * Only dispatch random arguments to syscalls which are side-effect free and
+     * cannot wait.  In particular, SYS_read is a blocking console operation:
+     * fuzzing it with a valid-looking pointer used to park the boot task in its
+     * keyboard wait loop forever.  Socket creation and close are also excluded
+     * here because a fuzzer must not consume or destroy process resources.
+     */
+    static const uint64_t bounded_fuzz_syscalls[] = {
+        SYS_stat, SYS_fstat, SYS_lseek, SYS_mmap, SYS_munmap, SYS_mprotect,
+        SYS_getpid, SYS_getppid, SYS_bind, SYS_listen, SYS_gettime, SYS_sysinfo,
+        99, 150, 500, 1000 /* Out-of-range numbers exercise ENOSYS handling. */
+    };
+    enum {
+        NUM_BOUNDED_SYSCALLS =
+            sizeof(bounded_fuzz_syscalls) / sizeof(bounded_fuzz_syscalls[0])
+    };
+
+    /*
+     * Exercise pointer and handle validation on implemented syscalls using
+     * deliberately invalid inputs.  Every probe must return before it can
+     * block, allocate a socket, print random memory, or touch application data.
+     */
+    struct syscall_rejection_probe {
+        uint64_t number;
+        uint64_t args[6];
+        uint64_t expected;
+    };
+    static const struct syscall_rejection_probe rejection_probes[] = {
+        { SYS_read,     { UINT64_MAX, 0, 1, 0, 0, 0 }, (uint64_t)-EFAULT },
+        { SYS_write,    { UINT64_MAX, 0, 1, 0, 0, 0 }, (uint64_t)-EFAULT },
+        { SYS_open,     { 0, 0, 0, 0, 0, 0 },          (uint64_t)-EFAULT },
+        { SYS_close,    { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)0 },
+        { SYS_socket,   { UINT64_MAX, UINT64_MAX, UINT64_MAX, 0, 0, 0 },
+                                                        (uint64_t)-EINVAL },
+        { SYS_connect,  { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)-EINVAL },
+        { SYS_sendto,   { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)-EBADF },
+        { SYS_recvfrom, { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)-EBADF },
+    };
+    enum {
+        NUM_REJECTION_PROBES =
+            sizeof(rejection_probes) / sizeof(rejection_probes[0])
+    };
+
+    /* Keep boot-time QA bounded even if a caller supplies an unreasonable value. */
+    if (iterations > 10000U) {
+        iterations = 10000U;
+    }
+
     for (uint32_t iter = 0; iter < iterations; iter++) {
-        uint64_t nr = (fuzz_rand() % 100);
+        uint64_t nr = bounded_fuzz_syscalls[fuzz_rand() % NUM_BOUNDED_SYSCALLS];
         uint64_t a0 = ((uint64_t)fuzz_rand() << 32) | fuzz_rand();
         uint64_t a1 = ((uint64_t)fuzz_rand() << 32) | fuzz_rand();
         uint64_t a2 = (fuzz_rand() % 4096);
@@ -81,7 +129,22 @@ bool qa_fuzz_syscall_args(uint32_t iterations) {
         (void)ret;
     }
 
-    log_infof("  [PASS] Syscall dispatcher survived %u randomized invocations.", iterations);
+    for (uint32_t i = 0; i < NUM_REJECTION_PROBES; ++i) {
+        const struct syscall_rejection_probe *probe = &rejection_probes[i];
+        uint64_t ret = kos_syscall_dispatch(probe->number,
+                                            probe->args[0], probe->args[1],
+                                            probe->args[2], probe->args[3],
+                                            probe->args[4], probe->args[5]);
+        if (ret != probe->expected) {
+            log_errorf("  [FAIL] Syscall %s rejected malformed arguments with %lld, expected %lld.",
+                       kos_syscall_name(probe->number), (long long)(int64_t)ret,
+                       (long long)(int64_t)probe->expected);
+            return false;
+        }
+    }
+
+    log_infof("  [PASS] Syscall dispatcher survived %u bounded randomized inputs and %u rejection probes.",
+              iterations, (uint32_t)NUM_REJECTION_PROBES);
     return true;
 }
 
@@ -182,6 +245,9 @@ bool qa_run_fuzz_suite(void) {
     log_info("        KOS Milestone K27 Fuzz Testing Suite      ");
     log_info("==================================================");
     bool all_ok = true;
+
+    /* A repeated QA run must exercise the exact same corpus. */
+    fuzz_rand_state = 0x12345678U;
 
     struct qa_resource_snapshot snap;
     qa_resource_snapshot_take(&snap);

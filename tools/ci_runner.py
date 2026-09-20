@@ -64,7 +64,7 @@ checklist = [
     ('Network Fuzzing', 'Network stack processed' in full_log),
     ('ASN.1/X.509 Fuzzing', 'ASN.1 / X.509 parsers survived' in full_log),
     ('TLS Fuzzing', 'TLS record layer survived' in full_log),
-    ('Fault Injection', 'Fault injection self-test passed' in full_log),
+    ('Fault Injection', 'ALL FAULT INJECTION TESTS PASSED' in full_log),
     ('Multi-Core Process Stress', 'concurrent threads completed' in full_log),
     ('Filesystem Stress', 'Filesystem completed' in full_log),
     ('Socket Concurrency Stress', 'Socket subsystem completed' in full_log),

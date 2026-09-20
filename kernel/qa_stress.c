@@ -65,6 +65,7 @@ bool qa_stress_process_lifecycle(uint32_t iterations) {
         return false;
     }
 
+    task_reap_terminated();
     log_infof("  [PASS] %d concurrent threads completed %u iterations each.", WORKERS, iterations);
     return true;
 }
