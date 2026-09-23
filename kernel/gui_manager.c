@@ -19,7 +19,10 @@ static const struct gui_manifest gui_registry[] = {
         .recovery_gui = false,
         .package_path = "C:/GUI/DEFAULT.KPKG",
         .package_app_id = "com.vino.gui.default",
+        .install_root = "D:/Apps/com.vino.gui.default",
         .entry_point = "bin/gui-default.elf",
+        .architecture = "x86_64",
+        .min_os_version = "0.1",
     },
     {
         .id = "mvp",
@@ -31,7 +34,10 @@ static const struct gui_manifest gui_registry[] = {
         .recovery_gui = true,
         .package_path = "C:/GUI/MVP.KPKG",
         .package_app_id = "com.vino.gui.mvp",
+        .install_root = "D:/Apps/com.vino.gui.mvp",
         .entry_point = "bin/gui-mvp.elf",
+        .architecture = "x86_64",
+        .min_os_version = "0.1",
     },
 };
 
@@ -107,6 +113,12 @@ static int install_manifest(const struct gui_manifest *manifest, bool update) {
 }
 
 bool gui_manager_init(void) {
+    for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
+        if (!gui_manifest_is_valid(&gui_registry[index])) {
+            log_errorf("GUI Manager: invalid manifest for registry entry %u", index);
+            return false;
+        }
+    }
     manager_initialized = true;
     default_gui_id[0] = '\0';
     log_info("GUI Manager: manifest registry initialized (Vino OS edition=default).");

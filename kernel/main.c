@@ -45,6 +45,7 @@
 #include <kos/xhci.h>
 #include <kos/nvme.h>
 #include <kos/installer.h>
+#include <kos/installer_contracts.h>
 #include <kos/gui_manager.h>
 #ifdef KOS_INSTALLER
 #include <kos/installer_ui.h>
@@ -451,6 +452,11 @@ KOS_NORETURN void kernel_main(void) {
         log_error("GUI Manager initialization failed.");
         kernel_halt();
     }
+    if (!installer_contract_self_test()) {
+        log_error("Installer contract self-test failed.");
+        kernel_halt();
+    }
+    log_info("Installer contracts self-test passed.");
 
     if (!vfs_volume_self_test()) {
         log_error("VFS multi-volume self-test failed.");

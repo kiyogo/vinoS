@@ -71,6 +71,14 @@ bootloader installation. This keeps the selection/validation UI independent of
 the destructive storage backend. The default UI provides no write callbacks,
 so confirmation fails with `NOT_IMPLEMENTED` and cannot modify a disk.
 
+The shared contract layer is in `include/kos/installer_contracts.h` and
+`kernel/installer_contracts.c`. It defines the canonical `installer_state`,
+`partition_plan`, `install_transaction`, `gui_session`, and
+`pending_gui_install` records. It also validates the invariant that every
+installer profile targets `os_edition=default`, checks LBA ranges before a plan
+can be applied, and records whether CLI fallback remains available after a
+partial install. A contract self-test runs during boot.
+
 Disk and partition selection uses the existing block-device registry. Child
 partitions must belong to the selected parent disk. A machine with no real
 installable disk shows that fact and never creates a fake target.

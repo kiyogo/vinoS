@@ -4,15 +4,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#define GUI_MAX_ID_LENGTH 32
-#define GUI_MAX_NAME_LENGTH 64
-#define GUI_MAX_VERSION_LENGTH 32
-#define GUI_MAX_PATH_LENGTH 128
-
-enum gui_package_source {
-    GUI_PACKAGE_SOURCE_LOCAL_ISO = 0,
-    GUI_PACKAGE_SOURCE_REMOTE = 1,
-};
+#include <kos/installer_contracts.h>
 
 enum gui_manager_status {
     GUI_MANAGER_OK = 0,
@@ -23,20 +15,6 @@ enum gui_manager_status {
     GUI_MANAGER_ERR_PACKAGE_MISSING = -5,
     GUI_MANAGER_ERR_IO = -6,
     GUI_MANAGER_ERR_NOT_IMPLEMENTED = -7,
-};
-
-/* A descriptor is the single source of truth for installer-visible GUIs. */
-struct gui_manifest {
-    char id[GUI_MAX_ID_LENGTH];
-    char name[GUI_MAX_NAME_LENGTH];
-    char version[GUI_MAX_VERSION_LENGTH];
-    enum gui_package_source source;
-    bool requires_network;
-    bool installer_visible;
-    bool recovery_gui;
-    char package_path[GUI_MAX_PATH_LENGTH];
-    char package_app_id[GUI_MAX_ID_LENGTH];
-    char entry_point[GUI_MAX_PATH_LENGTH];
 };
 
 bool gui_manager_init(void);

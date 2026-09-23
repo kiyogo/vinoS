@@ -44,8 +44,8 @@ static void draw_shell(const struct installer_flow *flow) {
     text(panel.x + 32, panel.y + 62, "System: Vino OS   Edition: default", color_muted);
     text(panel.x + 32, panel.y + panel.height - 48,
          "Tab/J/K: select   Enter: continue   Esc: quit", color_muted);
-    if (flow != NULL && flow->state == INSTALLER_FLOW_ERROR) {
-        text(panel.x + 32, panel.y + panel.height - 82, flow->error, color_error);
+    if (flow != NULL && flow->state.phase == INSTALLER_FLOW_ERROR) {
+        text(panel.x + 32, panel.y + panel.height - 82, flow->state.error, color_error);
     }
 }
 
@@ -182,7 +182,7 @@ static int unavailable_bootloader(struct installer_flow *flow, void *context) {
 }
 
 static void draw_state(const struct installer_flow *flow, uint32_t selected) {
-    switch (flow->state) {
+    switch (flow->state.phase) {
         case INSTALLER_FLOW_PROFILE_SELECTION: draw_profile_page(flow, selected); break;
         case INSTALLER_FLOW_GUI_SELECTION: draw_gui_page(flow); break;
         case INSTALLER_FLOW_DISK_SELECTION: draw_disk_page(flow, selected); break;
@@ -218,29 +218,29 @@ bool installer_ui_run(void) {
         }
         else if (key == '\n' || key == ' ') {
             int result = INSTALLER_FLOW_OK;
-            if (flow.state == INSTALLER_FLOW_PROFILE_SELECTION) {
+            if (flow.state.phase == INSTALLER_FLOW_PROFILE_SELECTION) {
                 const struct installer_profile *profile = installer_profile_at(selected % installer_profile_count());
                 result = installer_flow_select_profile(&flow, profile->id);
                 selected = 0;
             }
-            else if (flow.state == INSTALLER_FLOW_GUI_SELECTION) {
+            else if (flow.state.phase == INSTALLER_FLOW_GUI_SELECTION) {
                 result = installer_flow_select_gui(&flow, "default");
                 selected = 0;
             }
-            else if (flow.state == INSTALLER_FLOW_DISK_SELECTION) {
+            else if (flow.state.phase == INSTALLER_FLOW_DISK_SELECTION) {
                 struct block_device *disk = disk_at(selected % (disk_count() == 0 ? 1 : disk_count()));
                 result = disk == NULL ? INSTALLER_FLOW_ERR_DISK_NOT_FOUND
                                        : installer_flow_select_disk(&flow, disk->name);
                 selected = 0;
             }
-            else if (flow.state == INSTALLER_FLOW_PARTITION_SETUP) {
+            else if (flow.state.phase == INSTALLER_FLOW_PARTITION_SETUP) {
                 uint32_t count = partition_count(flow.selected_disk);
                 struct block_device *partition = partition_at(flow.selected_disk, selected % (count == 0 ? 1 : count));
                 result = partition == NULL ? INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND
                                             : installer_flow_select_partition(&flow, partition->name);
                 selected = 0;
             }
-            else if (flow.state == INSTALLER_FLOW_CONFIRMATION) {
+            else if (flow.state.phase == INSTALLER_FLOW_CONFIRMATION) {
                 struct installer_engine engine = {
                     .install_base_os = unavailable_base_os,
                     .install_gui = unavailable_gui,
@@ -248,8 +248,8 @@ bool installer_ui_run(void) {
                 };
                 result = installer_flow_execute(&flow, &engine);
             }
-            if (result != INSTALLER_FLOW_OK && flow.state != INSTALLER_FLOW_ERROR) {
-                flow.state = INSTALLER_FLOW_ERROR;
+            if (result != INSTALLER_FLOW_OK && flow.state.phase != INSTALLER_FLOW_ERROR) {
+                flow.state.phase = INSTALLER_FLOW_ERROR;
             }
         }
         else if (key == 'q') {

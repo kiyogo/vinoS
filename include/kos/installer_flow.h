@@ -4,51 +4,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <kos/block.h>
+#include <kos/installer_contracts.h>
 #include <kos/gui_manager.h>
 
-#define INSTALLER_FLOW_ERROR_LENGTH 128
-
-enum installer_flow_state {
-    INSTALLER_FLOW_WELCOME = 0,
-    INSTALLER_FLOW_PROFILE_SELECTION,
-    INSTALLER_FLOW_GUI_SELECTION,
-    INSTALLER_FLOW_DISK_SELECTION,
-    INSTALLER_FLOW_PARTITION_SETUP,
-    INSTALLER_FLOW_CONFIRMATION,
-    INSTALLER_FLOW_INSTALLING_OS,
-    INSTALLER_FLOW_INSTALLING_GUI,
-    INSTALLER_FLOW_INSTALLING_BOOTLOADER,
-    INSTALLER_FLOW_FINISHED,
-    INSTALLER_FLOW_ERROR,
-};
-
-enum installer_flow_status {
-    INSTALLER_FLOW_OK = 0,
-    INSTALLER_FLOW_ERR_INVALID_ARGUMENT = -1,
-    INSTALLER_FLOW_ERR_INVALID_PROFILE = -2,
-    INSTALLER_FLOW_ERR_GUI_REQUIRED = -3,
-    INSTALLER_FLOW_ERR_GUI_NOT_ALLOWED = -4,
-    INSTALLER_FLOW_ERR_DISK_NOT_FOUND = -5,
-    INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND = -6,
-    INSTALLER_FLOW_ERR_INVALID_STATE = -7,
-    INSTALLER_FLOW_ERR_NOT_IMPLEMENTED = -8,
-};
-
-struct installer_profile {
-    const char *id;
-    const char *display_name;
-    bool install_gui;
-    const char *os_edition;
-};
-
 struct installer_flow {
-    enum installer_flow_state state;
+    struct installer_state state;
     const struct installer_profile *profile;
     const struct gui_manifest *selected_gui;
     struct block_device *selected_disk;
     struct block_device *selected_partition;
-    char error[INSTALLER_FLOW_ERROR_LENGTH];
 };
 
 struct installer_engine {

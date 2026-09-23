@@ -28,9 +28,9 @@ static void set_error(struct installer_flow *flow, const char *message) {
     if (flow == NULL) {
         return;
     }
-    kstrncpy(flow->error, message, sizeof(flow->error) - 1);
-    flow->error[sizeof(flow->error) - 1] = '\0';
-    flow->state = INSTALLER_FLOW_ERROR;
+    kstrncpy(flow->state.error, message, sizeof(flow->state.error) - 1);
+    flow->state.error[sizeof(flow->state.error) - 1] = '\0';
+    flow->state.phase = INSTALLER_FLOW_ERROR;
 }
 
 uint32_t installer_profile_count(void) {
@@ -54,10 +54,9 @@ bool installer_flow_init(struct installer_flow *flow) {
     if (flow == NULL) {
         return false;
     }
-    *flow = (struct installer_flow){
-        .state = INSTALLER_FLOW_PROFILE_SELECTION,
-        .profile = &profiles[0],
-    };
+    *flow = (struct installer_flow){0};
+    installer_state_init(&flow->state);
+    flow->profile = &profiles[0];
     return true;
 }
 
@@ -70,13 +69,24 @@ int installer_flow_select_profile(struct installer_flow *flow, const char *id) {
         set_error(flow, "Unknown installer profile");
         return INSTALLER_FLOW_ERR_INVALID_PROFILE;
     }
+    if (!installer_profile_is_valid(profile)) {
+        set_error(flow, "Installer profile violates the Vino OS contract");
+        return INSTALLER_FLOW_ERR_INVALID_PROFILE;
+    }
     flow->profile = profile;
     flow->selected_gui = NULL;
     flow->selected_disk = NULL;
     flow->selected_partition = NULL;
-    flow->error[0] = '\0';
-    flow->state = profile->install_gui ? INSTALLER_FLOW_GUI_SELECTION
-                                       : INSTALLER_FLOW_DISK_SELECTION;
+    kstrncpy(flow->state.selected_profile_id, profile->id,
+             sizeof(flow->state.selected_profile_id) - 1);
+    flow->state.selected_profile_id[sizeof(flow->state.selected_profile_id) - 1] = '\0';
+    flow->state.selected_gui_id[0] = '\0';
+    flow->state.error[0] = '\0';
+    partition_plan_init(&flow->state.partition_plan);
+    install_transaction_init(&flow->state.transaction);
+    pending_gui_install_init(&flow->state.pending_gui);
+    flow->state.phase = profile->install_gui ? INSTALLER_FLOW_GUI_SELECTION
+                                             : INSTALLER_FLOW_DISK_SELECTION;
     log_infof("Installer: selected profile=%s, os_edition=%s, install_gui=%s",
               profile->id, profile->os_edition, profile->install_gui ? "true" : "false");
     return INSTALLER_FLOW_OK;
@@ -95,8 +105,15 @@ int installer_flow_select_gui(struct installer_flow *flow, const char *id) {
         set_error(flow, "Selected GUI is not available in the installer");
         return INSTALLER_FLOW_ERR_GUI_REQUIRED;
     }
+    if (!gui_manifest_is_valid(manifest)) {
+        set_error(flow, "Selected GUI manifest is invalid");
+        return INSTALLER_FLOW_ERR_GUI_REQUIRED;
+    }
     flow->selected_gui = manifest;
-    flow->state = INSTALLER_FLOW_DISK_SELECTION;
+    kstrncpy(flow->state.selected_gui_id, manifest->id,
+             sizeof(flow->state.selected_gui_id) - 1);
+    flow->state.selected_gui_id[sizeof(flow->state.selected_gui_id) - 1] = '\0';
+    flow->state.phase = INSTALLER_FLOW_DISK_SELECTION;
     log_infof("Installer: selected gui=%s, source=%s",
               manifest->id,
               manifest->source == GUI_PACKAGE_SOURCE_LOCAL_ISO ? "iso" : "network");
@@ -114,7 +131,13 @@ int installer_flow_select_disk(struct installer_flow *flow, const char *name) {
     }
     flow->selected_disk = device;
     flow->selected_partition = NULL;
-    flow->state = INSTALLER_FLOW_PARTITION_SETUP;
+    partition_plan_init(&flow->state.partition_plan);
+    kstrncpy(flow->state.partition_plan.disk_name, device->name,
+             sizeof(flow->state.partition_plan.disk_name) - 1);
+    flow->state.partition_plan.disk_name[sizeof(flow->state.partition_plan.disk_name) - 1] = '\0';
+    flow->state.partition_plan.disk_block_size = device->block_size;
+    flow->state.partition_plan.disk_total_blocks = device->total_blocks;
+    flow->state.phase = INSTALLER_FLOW_PARTITION_SETUP;
     log_infof("Installer: selected disk=%s capacity=%lu bytes",
               device->name, device->capacity_bytes);
     return INSTALLER_FLOW_OK;
@@ -130,7 +153,21 @@ int installer_flow_select_partition(struct installer_flow *flow, const char *nam
         return INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND;
     }
     flow->selected_partition = partition;
-    flow->state = INSTALLER_FLOW_CONFIRMATION;
+    kstrncpy(flow->state.partition_plan.selected_partition_name, partition->name,
+             sizeof(flow->state.partition_plan.selected_partition_name) - 1);
+    flow->state.partition_plan.selected_partition_name[
+        sizeof(flow->state.partition_plan.selected_partition_name) - 1] = '\0';
+    flow->state.partition_plan.selected_start_lba = partition->start_lba;
+    flow->state.partition_plan.selected_block_count = partition->total_blocks;
+    flow->state.partition_plan.operation_count = 1;
+    flow->state.partition_plan.operations[0] = (struct partition_plan_operation){
+        .type = PARTITION_PLAN_SELECT_EXISTING,
+        .partition_index = partition->partition_index,
+        .start_lba = partition->start_lba,
+        .block_count = partition->total_blocks,
+        .filesystem = PARTITION_PLAN_FILESYSTEM_NONE,
+    };
+    flow->state.phase = INSTALLER_FLOW_CONFIRMATION;
     log_infof("Installer: selected partition=%s start_lba=%lu blocks=%lu",
               partition->name, partition->start_lba, partition->total_blocks);
     return INSTALLER_FLOW_OK;
@@ -141,23 +178,37 @@ bool installer_flow_is_valid(const struct installer_flow *flow) {
         || flow->selected_partition == NULL) {
         return false;
     }
+    if (!installer_state_is_valid(&flow->state)
+        || !installer_profile_is_valid(flow->profile)
+        || kstrcmp(flow->state.selected_profile_id, flow->profile->id) != 0) {
+        return false;
+    }
     if (flow->profile->install_gui && flow->selected_gui == NULL) {
         return false;
     }
+    if (flow->profile->install_gui
+        && (flow->state.selected_gui_id[0] == '\0'
+            || kstrcmp(flow->state.selected_gui_id, flow->selected_gui->id) != 0
+            || !gui_manifest_is_valid(flow->selected_gui))) {
+        return false;
+    }
     return flow->selected_partition->parent == flow->selected_disk
-        && flow->selected_partition->total_blocks != 0;
+        && flow->selected_partition->total_blocks != 0
+        && kstrcmp(flow->state.partition_plan.disk_name, flow->selected_disk->name) == 0
+        && kstrcmp(flow->state.partition_plan.selected_partition_name,
+                   flow->selected_partition->name) == 0;
 }
 
 int installer_flow_next(struct installer_flow *flow) {
     if (flow == NULL) {
         return INSTALLER_FLOW_ERR_INVALID_ARGUMENT;
     }
-    switch (flow->state) {
+    switch (flow->state.phase) {
         case INSTALLER_FLOW_WELCOME:
-            flow->state = INSTALLER_FLOW_PROFILE_SELECTION;
+            flow->state.phase = INSTALLER_FLOW_PROFILE_SELECTION;
             return INSTALLER_FLOW_OK;
         case INSTALLER_FLOW_PROFILE_SELECTION:
-            flow->state = flow->profile != NULL && flow->profile->install_gui
+            flow->state.phase = flow->profile != NULL && flow->profile->install_gui
                 ? INSTALLER_FLOW_GUI_SELECTION : INSTALLER_FLOW_DISK_SELECTION;
             return INSTALLER_FLOW_OK;
         case INSTALLER_FLOW_GUI_SELECTION:
@@ -165,21 +216,21 @@ int installer_flow_next(struct installer_flow *flow) {
                 set_error(flow, "Vino Plus requires a GUI selection");
                 return INSTALLER_FLOW_ERR_GUI_REQUIRED;
             }
-            flow->state = INSTALLER_FLOW_DISK_SELECTION;
+            flow->state.phase = INSTALLER_FLOW_DISK_SELECTION;
             return INSTALLER_FLOW_OK;
         case INSTALLER_FLOW_DISK_SELECTION:
             if (flow->selected_disk == NULL) {
                 set_error(flow, "Select a disk before continuing");
                 return INSTALLER_FLOW_ERR_DISK_NOT_FOUND;
             }
-            flow->state = INSTALLER_FLOW_PARTITION_SETUP;
+            flow->state.phase = INSTALLER_FLOW_PARTITION_SETUP;
             return INSTALLER_FLOW_OK;
         case INSTALLER_FLOW_PARTITION_SETUP:
             if (flow->selected_partition == NULL) {
                 set_error(flow, "Select a partition before continuing");
                 return INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND;
             }
-            flow->state = INSTALLER_FLOW_CONFIRMATION;
+            flow->state.phase = INSTALLER_FLOW_CONFIRMATION;
             return INSTALLER_FLOW_OK;
         case INSTALLER_FLOW_CONFIRMATION:
             return installer_flow_is_valid(flow) ? INSTALLER_FLOW_OK : INSTALLER_FLOW_ERR_INVALID_STATE;
@@ -192,15 +243,15 @@ int installer_flow_back(struct installer_flow *flow) {
     if (flow == NULL) {
         return INSTALLER_FLOW_ERR_INVALID_ARGUMENT;
     }
-    switch (flow->state) {
-        case INSTALLER_FLOW_PROFILE_SELECTION: flow->state = INSTALLER_FLOW_WELCOME; break;
-        case INSTALLER_FLOW_GUI_SELECTION: flow->state = INSTALLER_FLOW_PROFILE_SELECTION; break;
+    switch (flow->state.phase) {
+        case INSTALLER_FLOW_PROFILE_SELECTION: flow->state.phase = INSTALLER_FLOW_WELCOME; break;
+        case INSTALLER_FLOW_GUI_SELECTION: flow->state.phase = INSTALLER_FLOW_PROFILE_SELECTION; break;
         case INSTALLER_FLOW_DISK_SELECTION:
-            flow->state = flow->profile != NULL && flow->profile->install_gui
+            flow->state.phase = flow->profile != NULL && flow->profile->install_gui
                 ? INSTALLER_FLOW_GUI_SELECTION : INSTALLER_FLOW_PROFILE_SELECTION;
             break;
-        case INSTALLER_FLOW_PARTITION_SETUP: flow->state = INSTALLER_FLOW_DISK_SELECTION; break;
-        case INSTALLER_FLOW_CONFIRMATION: flow->state = INSTALLER_FLOW_PARTITION_SETUP; break;
+        case INSTALLER_FLOW_PARTITION_SETUP: flow->state.phase = INSTALLER_FLOW_DISK_SELECTION; break;
+        case INSTALLER_FLOW_CONFIRMATION: flow->state.phase = INSTALLER_FLOW_PARTITION_SETUP; break;
         default: return INSTALLER_FLOW_ERR_INVALID_STATE;
     }
     return INSTALLER_FLOW_OK;
@@ -212,43 +263,69 @@ int installer_flow_execute(struct installer_flow *flow, const struct installer_e
         return INSTALLER_FLOW_ERR_INVALID_STATE;
     }
 
-    flow->state = INSTALLER_FLOW_INSTALLING_OS;
+    flow->state.transaction.state = INSTALL_TRANSACTION_VALIDATED;
+    kstrncpy(flow->state.transaction.target_disk_name, flow->selected_disk->name,
+             sizeof(flow->state.transaction.target_disk_name) - 1);
+    flow->state.transaction.target_disk_name[
+        sizeof(flow->state.transaction.target_disk_name) - 1] = '\0';
+    kstrncpy(flow->state.transaction.target_partition_name, flow->selected_partition->name,
+             sizeof(flow->state.transaction.target_partition_name) - 1);
+    flow->state.transaction.target_partition_name[
+        sizeof(flow->state.transaction.target_partition_name) - 1] = '\0';
+    flow->state.transaction.state = INSTALL_TRANSACTION_APPLYING;
+    flow->state.phase = INSTALLER_FLOW_INSTALLING_OS;
     int result = engine->install_base_os(flow, engine->context);
     if (result != 0) {
         set_error(flow, "Base Vino OS installation failed; target remains uncommitted");
+        flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
+        flow->state.transaction.last_error = result;
         return result;
     }
+    flow->state.transaction.base_os_applied = true;
+    flow->state.transaction.cli_fallback_ready = true;
 
     if (flow->profile->install_gui) {
         if (flow->selected_gui->source == GUI_PACKAGE_SOURCE_REMOTE) {
-            flow->state = INSTALLER_FLOW_INSTALLING_GUI;
+            flow->state.phase = INSTALLER_FLOW_INSTALLING_GUI;
             if (engine->install_gui == NULL) {
                 set_error(flow, "Remote GUI requires MVP/network handoff");
+                flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
+                flow->state.transaction.last_error = INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
                 return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
             }
         }
         else if (engine->install_gui == NULL) {
             set_error(flow, "Local GUI package installation backend is not configured");
+            flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
+            flow->state.transaction.last_error = INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
             return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
         }
         else {
-            flow->state = INSTALLER_FLOW_INSTALLING_GUI;
+            flow->state.phase = INSTALLER_FLOW_INSTALLING_GUI;
         }
         result = engine->install_gui(flow, flow->selected_gui, engine->context);
         if (result != 0) {
             /* Base OS is deliberately left bootable in CLI mode. */
             set_error(flow, "GUI installation failed; Vino OS can fall back to CLI");
+            flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
+            flow->state.transaction.last_error = result;
             return result;
         }
+        flow->state.transaction.gui_applied = true;
     }
 
-    flow->state = INSTALLER_FLOW_INSTALLING_BOOTLOADER;
+    flow->state.phase = INSTALLER_FLOW_INSTALLING_BOOTLOADER;
     result = engine->install_bootloader(flow, engine->context);
     if (result != 0) {
         set_error(flow, "Bootloader installation failed");
+        flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
+        flow->state.transaction.last_error = result;
         return result;
     }
-    flow->state = INSTALLER_FLOW_FINISHED;
+    flow->state.transaction.bootloader_applied = true;
+    flow->state.transaction.state = INSTALL_TRANSACTION_VERIFYING;
+    flow->state.transaction.state = INSTALL_TRANSACTION_COMMITTED;
+    flow->state.phase = INSTALLER_FLOW_FINISHED;
     return INSTALLER_FLOW_OK;
 }
 
