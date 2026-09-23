@@ -5324,18 +5324,33 @@ static void command_gui(const char *arguments) {
     char operation[24];
     char id[GUI_MAX_ID_LENGTH];
     const char *cursor = command_next_token(arguments, operation, sizeof(operation));
-    if (cursor == NULL || operation[0] == '\0' || kstrcmp(operation, "list") == 0
-        || kstrcmp(operation, "available") == 0) {
-        bool visible_only = cursor != NULL && kstrcmp(operation, "available") == 0;
+    if (cursor == NULL || operation[0] == '\0') {
+        log_info("Usage: vino gui list|installed|available|get-default|install <id>|remove <id>|reinstall <id>|start <id>|stop <id>|restart <id>|set-default <id>|status <id>");
+        return;
+    }
+    if (kstrcmp(operation, "list") == 0) {
         log_info("GUI registry (Vino OS edition=default):");
         for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
             const struct gui_manifest *manifest = gui_manifest_at(index);
-            if (visible_only && !manifest->installer_visible) continue;
-            log_infof("  %s - %s v%s [%s] %s", manifest->id, manifest->name, manifest->version,
+            log_infof("  %s - %s v%s [%s] %s", manifest->id, manifest->name,
+                      manifest->version,
                       manifest->source == GUI_PACKAGE_SOURCE_LOCAL_ISO ? "iso" : "network",
                       gui_is_installed(manifest->id) ? "installed" : "not-installed");
         }
-        log_info("Usage: gui [list|installed|available|install|remove|reinstall|start|stop|restart|set-default|get-default|status] <id>");
+        return;
+    }
+    if (kstrcmp(operation, "available") == 0) {
+        log_info("GUI packages available from configured sources:");
+        uint32_t count = 0;
+        for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
+            const struct gui_manifest *manifest = gui_manifest_at(index);
+            if (!gui_manifest_package_available(manifest)) continue;
+            log_infof("  %s - %s v%s [%s]", manifest->id, manifest->name,
+                      manifest->version,
+                      gui_is_installed(manifest->id) ? "installed" : "installable");
+            ++count;
+        }
+        if (count == 0) log_info("  (no verified local packages available)");
         return;
     }
     if (kstrcmp(operation, "installed") == 0) {
@@ -5344,7 +5359,10 @@ static void command_gui(const char *arguments) {
         for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
             const struct gui_manifest *manifest = gui_manifest_at(index);
             if (gui_is_installed(manifest->id)) {
-                log_infof("  %s - %s", manifest->id, manifest->name);
+                log_infof("  %s - %s%s", manifest->id, manifest->name,
+                    gui_default_id() != NULL
+                        && kstrcmp(gui_default_id(), manifest->id) == 0
+                        ? " [selected for boot]" : "");
                 ++count;
             }
         }
@@ -5353,7 +5371,33 @@ static void command_gui(const char *arguments) {
     }
     if (kstrcmp(operation, "get-default") == 0) {
         const char *default_id = gui_default_id();
-        log_info(default_id == NULL ? "Default GUI: none (CLI fallback)" : default_id);
+        log_info(default_id == NULL ? "Selected GUI: none (CLI fallback)" : default_id);
+        return;
+    }
+    if (kstrcmp(operation, "status") == 0) {
+        cursor = command_next_token(cursor, id, sizeof(id));
+        if (cursor == NULL || id[0] == '\0') {
+            log_info("Usage: vino gui status <id>");
+            return;
+        }
+        int status = gui_status(id);
+        if (status != GUI_MANAGER_OK) {
+            log_errorf("gui status %s: %s", id, gui_manager_status_string(status));
+            return;
+        }
+        bool selected = gui_default_id() != NULL
+            && kstrcmp(gui_default_id(), id) == 0;
+        struct gui_session session;
+        if (gui_session_snapshot(&session)
+            && session.session_id != 0 && kstrcmp(session.gui_id, id) == 0) {
+            log_infof("GUI %s: installed%s; last_session=%u process_id=%u state=%s exit=%d",
+                id, selected ? ", selected for boot" : "", session.session_id,
+                session.process_id, gui_session_state_string(session.state),
+                session.last_error);
+        } else {
+            log_infof("GUI %s: installed%s; session=none", id,
+                selected ? ", selected for boot" : "");
+        }
         return;
     }
     cursor = command_next_token(cursor, id, sizeof(id));
@@ -5369,18 +5413,10 @@ static void command_gui(const char *arguments) {
     else if (kstrcmp(operation, "start") == 0)
         status = gui_start_with_fallback(id);
     else if (kstrcmp(operation, "stop") == 0) status = gui_stop(id);
-    else if (kstrcmp(operation, "restart") == 0) {
-        status = gui_restart(id);
-        if (status != GUI_MANAGER_OK && kstrcmp(id, "default") == 0
-            && gui_is_installed("mvp")) {
-            log_error("Default restart failed; launching MVP recovery.");
-            status = gui_start("mvp");
-        }
-    }
+    else if (kstrcmp(operation, "restart") == 0) status = gui_restart(id);
     else if (kstrcmp(operation, "set-default") == 0) status = gui_set_default(id);
-    else if (kstrcmp(operation, "status") == 0) status = gui_status(id);
     else {
-        log_info("Usage: gui [list|installed|available|install|remove|reinstall|start|stop|restart|set-default|get-default|status] <id>");
+        log_info("Usage: vino gui list|installed|available|get-default|install <id>|remove <id>|reinstall <id>|start <id>|stop <id>|restart <id>|set-default <id>|status <id>");
         return;
     }
     if (status == GUI_MANAGER_OK) log_infof("gui %s %s: OK", operation, id);

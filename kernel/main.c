@@ -585,11 +585,11 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("panictest");
     (void)kernel_command_execute("kstress");
 #endif
-    if (gui_manager_default_should_autostart()) {
-        log_info("Vino Plus: starting the selected Default GUI session.");
-        int gui_result = gui_start_with_fallback("default");
+    if (gui_manager_should_autostart_selected()) {
+        log_infof("Vino Plus: starting selected GUI '%s'.", gui_default_id());
+        int gui_result = gui_manager_start_selected_with_fallback();
         if (gui_result != GUI_MANAGER_OK) {
-            log_errorf("Default and MVP GUI sessions failed (%s); returning to CLI.",
+            log_errorf("Selected GUI/recovery failed (%s); returning to CLI.",
                        gui_manager_status_string(gui_result));
         }
     }

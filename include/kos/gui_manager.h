@@ -22,7 +22,8 @@ enum gui_manager_status {
 
 bool gui_manager_init(void);
 char gui_manager_system_volume_letter(void);
-bool gui_manager_default_should_autostart(void);
+bool gui_manager_should_autostart_selected(void);
+int gui_manager_start_selected_with_fallback(void);
 int gui_manager_request_default_recovery(uint64_t requester_pid);
 uint32_t gui_manifest_count(void);
 const struct gui_manifest *gui_manifest_at(uint32_t index);
@@ -32,6 +33,8 @@ bool gui_manifest_package_available(const struct gui_manifest *manifest);
 uint32_t gui_installed_count(void);
 bool gui_is_installed(const char *id);
 const char *gui_default_id(void);
+bool gui_session_snapshot(struct gui_session *session);
+const char *gui_session_state_string(enum gui_session_state state);
 
 int gui_install(const char *id);
 int gui_remove(const char *id);

@@ -235,9 +235,27 @@ executables. Shutdown currently syncs storage and halts CPUs; ACPI firmware
 power-off is not implemented. Package integrity uses detached SHA-256, not a
 release signature.
 
+### Phase 9 — GUI manager runtime
+
+The kernel command dispatcher supports `vino gui list`, `installed`,
+`available`, `install`, `remove`, `reinstall`, `start`, `stop`, `restart`,
+`set-default`, `get-default`, and `status`. `available` includes only
+packages whose local package and detached checksum verify. `status` reports
+the most recent matching session ID, process ID, state, and exit code.
+
+The selected GUI ID is read from and synced to
+`VINO/SYSTEM/GUI/SELECTED.TXT`. Plus startup launches the selected GUI; a
+failed Default launch gets one MVP attempt, then returns to CLI. Selecting
+MVP does not recurse into another GUI fallback. Removing the selected GUI
+clears the boot selection before unlinking package-owned files. Removing an
+active session stops and reaps its process first. Registry initialization
+rejects overlapping GUI install namespaces/package IDs so one GUI package
+cannot claim or remove another GUI's files. Runtime fallback is one-shot and
+never reboots the machine, so a failing GUI cannot cause a GUI reboot loop.
+
 ## Deliberate follow-up work
 
-Remaining work beyond the Phase 8 MVP:
+Remaining work beyond the Phase 9 GUI manager:
 
 1. Add a release signing key and signature verification policy; current package
    payloads are unsigned and carry SHA-256 integrity metadata only.
