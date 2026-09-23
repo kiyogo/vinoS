@@ -1,0 +1,9 @@
+id=default
+name=Default
+version=1.0.0
+source=iso
+requires_network=false
+installer_visible=true
+recovery_gui=false
+package=C:/GUI/DEFAULT.KPKG
+entry=bin/gui-default.elf

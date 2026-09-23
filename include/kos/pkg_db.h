@@ -55,6 +55,7 @@ struct pkg_database {
 bool pkg_db_init(void);
 struct pkg_record *pkg_db_find(const char *app_id);
 struct pkg_record *pkg_db_find_by_index(uint32_t index);
+const struct pkg_file_record *pkg_db_file_at(uint32_t index);
 uint32_t pkg_db_count(void);
 
 bool pkg_db_register(const struct kpkg_manifest *manifest, const char *install_path,

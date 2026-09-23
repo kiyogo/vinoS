@@ -45,6 +45,10 @@
 #include <kos/xhci.h>
 #include <kos/nvme.h>
 #include <kos/installer.h>
+#include <kos/gui_manager.h>
+#ifdef KOS_INSTALLER
+#include <kos/installer_ui.h>
+#endif
 #include <kos/qa.h>
 #include <kos/fault_injection.h>
 #include <limine.h>
@@ -443,6 +447,10 @@ KOS_NORETURN void kernel_main(void) {
 
     /* Initialize Application Package Database and Installer */
     installer_subsystem_init();
+    if (!gui_manager_init()) {
+        log_error("GUI Manager initialization failed.");
+        kernel_halt();
+    }
 
     if (!vfs_volume_self_test()) {
         log_error("VFS multi-volume self-test failed.");
@@ -498,6 +506,13 @@ KOS_NORETURN void kernel_main(void) {
         kernel_halt();
     }
     log_info("Kernel task scheduler initialized in cooperative mode.");
+#ifdef KOS_INSTALLER
+    if (!installer_ui_run()) {
+        log_error("Installer UI initialization failed.");
+        kernel_halt();
+    }
+    kernel_halt();
+#endif
     log_info("Running bootstrap commands.");
     if (!kernel_command_execute("sysinfo") || !kernel_command_execute("dhcp")
         || !kernel_command_execute("netinfo")) {

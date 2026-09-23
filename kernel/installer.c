@@ -353,24 +353,51 @@ int installer_uninstall(const char *app_id, bool keep_data) {
         return INSTALLER_ERR_NOT_FOUND;
     }
 
-    /* Unlink all installed files owned by this package */
+    /* Unlink every file recorded for this package before unregistering it. */
     for (uint32_t f = 0; f < rec->file_count; f++) {
         uint32_t f_idx = rec->file_indices[f];
         if (f_idx < PKG_DB_MAX_FILES_TOTAL) {
-            // Find file record path
-            // vfs_unlink_file(path);
+            const struct pkg_file_record *file = pkg_db_file_at(f_idx);
+            if (file != NULL && !vfs_unlink_file(file->path)) {
+                log_errorf("Installer: failed to remove owned file %s", file->path);
+                return INSTALLER_ERR_IO;
+            }
         }
     }
 
-    /* Clean application directory files */
+    /* Remove empty package directories from deepest path back to the package root. */
     char install_path[KPKG_MAX_PATH_LEN];
     snprintf(install_path, sizeof(install_path), "%s/%s", INSTALLER_BASE_DIR, app_id);
+    for (uint32_t f = 0; f < rec->file_count; f++) {
+        uint32_t f_idx = rec->file_indices[f];
+        const struct pkg_file_record *file = pkg_db_file_at(f_idx);
+        if (file == NULL) continue;
+        char directory[KPKG_MAX_PATH_LEN];
+        kstrncpy(directory, file->path, sizeof(directory) - 1);
+        directory[sizeof(directory) - 1] = '\0';
+        char *slash = NULL;
+        for (char *cursor = directory; *cursor != '\0'; ++cursor) {
+            if (*cursor == '/') slash = cursor;
+        }
+        while (slash != NULL && kstrcmp(directory, install_path) != 0) {
+            *slash = '\0';
+            (void)vfs_unlink_file(directory);
+            slash = NULL;
+            for (char *cursor = directory; *cursor != '\0'; ++cursor) {
+                if (*cursor == '/') slash = cursor;
+            }
+        }
+    }
+    (void)vfs_unlink_file(install_path);
 
     /* If not keeping data, remove data directory */
     if (!keep_data) {
         char marker_path[KPKG_MAX_PATH_LEN];
+        char data_path[KPKG_MAX_PATH_LEN];
         snprintf(marker_path, sizeof(marker_path), "%s/%s/.keep", INSTALLER_DATA_DIR, app_id);
+        snprintf(data_path, sizeof(data_path), "%s/%s", INSTALLER_DATA_DIR, app_id);
         vfs_unlink_file(marker_path);
+        vfs_unlink_file(data_path);
     }
 
     pkg_db_unregister(app_id);

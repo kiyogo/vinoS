@@ -46,6 +46,14 @@ struct pkg_record *pkg_db_find_by_index(uint32_t index) {
     return NULL;
 }
 
+const struct pkg_file_record *pkg_db_file_at(uint32_t index) {
+    if (index >= PKG_DB_MAX_FILES_TOTAL || !g_pkg_db.initialized
+        || !g_pkg_db.files[index].in_use) {
+        return NULL;
+    }
+    return &g_pkg_db.files[index];
+}
+
 uint32_t pkg_db_count(void) {
     if (!g_pkg_db.initialized) {
         return 0;

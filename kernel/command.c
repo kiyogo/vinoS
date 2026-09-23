@@ -57,6 +57,9 @@
 #include <kos/kpkg.h>
 #include <kos/pkg_db.h>
 #include <kos/installer.h>
+#include <kos/gui_manager.h>
+#include <kos/installer_flow.h>
+#include <kos/installer_ui.h>
 #include <kos/qa.h>
 #include <kos/fault_injection.h>
 #include <uapi/kos/syscall_numbers.h>
@@ -75,7 +78,7 @@ struct command_entry {
 
 static void command_help(const char *arguments) {
     (void)arguments;
-    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv blocktest storagetest mbrtest gpttest cachetest fattest filetest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
+    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv gui installer blocktest storagetest mbrtest gpttest cachetest fattest filetest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
 }
 
 static void command_clear(const char *arguments) {
@@ -5223,6 +5226,111 @@ static void command_pkg(const char *arguments) {
     log_info("Usage: pkg [list | info <app_id> | uninstall <app_id>]");
 }
 
+static const char *command_next_token(const char *input, char *output, size_t output_size) {
+    if (input == NULL || output == NULL || output_size == 0) return NULL;
+    while (*input == ' ' || *input == '\t') ++input;
+    size_t length = 0;
+    while (input[length] != '\0' && input[length] != ' ' && input[length] != '\t') ++length;
+    if (length + 1 > output_size) {
+        output[0] = '\0';
+        return NULL;
+    }
+    for (size_t index = 0; index < length; ++index) output[index] = input[index];
+    output[length] = '\0';
+    return input + length;
+}
+
+static void command_gui(const char *arguments) {
+    char operation[24];
+    char id[GUI_MAX_ID_LENGTH];
+    const char *cursor = command_next_token(arguments, operation, sizeof(operation));
+    if (cursor == NULL || operation[0] == '\0' || kstrcmp(operation, "list") == 0
+        || kstrcmp(operation, "available") == 0) {
+        bool visible_only = cursor != NULL && kstrcmp(operation, "available") == 0;
+        log_info("GUI registry (Vino OS edition=default):");
+        for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
+            const struct gui_manifest *manifest = gui_manifest_at(index);
+            if (visible_only && !manifest->installer_visible) continue;
+            log_infof("  %s - %s v%s [%s] %s", manifest->id, manifest->name, manifest->version,
+                      manifest->source == GUI_PACKAGE_SOURCE_LOCAL_ISO ? "iso" : "network",
+                      gui_is_installed(manifest->id) ? "installed" : "not-installed");
+        }
+        log_info("Usage: gui [list|installed|available|install|remove|reinstall|start|stop|restart|set-default|get-default|status] <id>");
+        return;
+    }
+    if (kstrcmp(operation, "installed") == 0) {
+        log_info("Installed GUI sessions:");
+        uint32_t count = 0;
+        for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
+            const struct gui_manifest *manifest = gui_manifest_at(index);
+            if (gui_is_installed(manifest->id)) {
+                log_infof("  %s - %s", manifest->id, manifest->name);
+                ++count;
+            }
+        }
+        if (count == 0) log_info("  (none; CLI remains the fallback)");
+        return;
+    }
+    if (kstrcmp(operation, "get-default") == 0) {
+        const char *default_id = gui_default_id();
+        log_info(default_id == NULL ? "Default GUI: none (CLI fallback)" : default_id);
+        return;
+    }
+    cursor = command_next_token(cursor, id, sizeof(id));
+    if (cursor == NULL || id[0] == '\0') {
+        log_info("Usage: gui <operation> <id>");
+        return;
+    }
+
+    int status = GUI_MANAGER_ERR_NOT_IMPLEMENTED;
+    if (kstrcmp(operation, "install") == 0) status = gui_install(id);
+    else if (kstrcmp(operation, "remove") == 0) status = gui_remove(id);
+    else if (kstrcmp(operation, "reinstall") == 0) status = gui_reinstall(id);
+    else if (kstrcmp(operation, "start") == 0) status = gui_start(id);
+    else if (kstrcmp(operation, "stop") == 0) status = gui_stop(id);
+    else if (kstrcmp(operation, "restart") == 0) status = gui_restart(id);
+    else if (kstrcmp(operation, "set-default") == 0) status = gui_set_default(id);
+    else if (kstrcmp(operation, "status") == 0) status = gui_status(id);
+    else {
+        log_info("Usage: gui [list|installed|available|install|remove|reinstall|start|stop|restart|set-default|get-default|status] <id>");
+        return;
+    }
+    if (status == GUI_MANAGER_OK) log_infof("gui %s %s: OK", operation, id);
+    else log_errorf("gui %s %s: %s", operation, id, gui_manager_status_string(status));
+}
+
+static void command_installer(const char *arguments) {
+    char operation[24];
+    const char *cursor = command_next_token(arguments, operation, sizeof(operation));
+    if (cursor == NULL || operation[0] == '\0' || kstrcmp(operation, "profiles") == 0) {
+        log_info("Installer profiles:");
+        for (uint32_t index = 0; index < installer_profile_count(); ++index) {
+            const struct installer_profile *profile = installer_profile_at(index);
+            log_infof("  %s - %s (os_edition=%s, install_gui=%s)", profile->id,
+                      profile->display_name, profile->os_edition,
+                      profile->install_gui ? "true" : "false");
+        }
+        log_info("Usage: installer [profiles|disks|ui]");
+        return;
+    }
+    if (kstrcmp(operation, "disks") == 0) {
+        log_info("Installer storage inventory:");
+        for (uint32_t index = 0; index < block_device_count(); ++index) {
+            struct block_device *device = block_device_get_at(index);
+            if (device == NULL) continue;
+            log_infof("  %s type=%u capacity=%lu bytes parent=%s", device->name,
+                      device->type, device->capacity_bytes,
+                      device->parent == NULL ? "none" : device->parent->name);
+        }
+        return;
+    }
+    if (kstrcmp(operation, "ui") == 0) {
+        if (!installer_ui_run()) log_error("installer ui: framebuffer or input is unavailable");
+        return;
+    }
+    log_info("Usage: installer [profiles|disks|ui]");
+}
+
 static void command_pkgtest(const char *arguments) {
     (void)arguments;
     installer_self_test();
@@ -5280,6 +5388,8 @@ static const struct command_entry command_registry[] = {
     { "cryptotest", command_cryptotest },
     { "x509test", command_x509test },
     { "tlstest", command_tlstest },
+    { "gui", command_gui },
+    { "installer", command_installer },
     { "nslookup", command_nslookup },
     { "curl", command_curl },
     { "httpd", command_httpd },

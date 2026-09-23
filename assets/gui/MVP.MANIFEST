@@ -1,0 +1,9 @@
+id=mvp
+name=MVP
+version=1.0.0
+source=iso
+requires_network=false
+installer_visible=false
+recovery_gui=true
+package=C:/GUI/MVP.KPKG
+entry=bin/gui-mvp.elf

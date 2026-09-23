@@ -1,0 +1,77 @@
+#ifndef KOS_INSTALLER_FLOW_H
+#define KOS_INSTALLER_FLOW_H
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include <kos/block.h>
+#include <kos/gui_manager.h>
+
+#define INSTALLER_FLOW_ERROR_LENGTH 128
+
+enum installer_flow_state {
+    INSTALLER_FLOW_WELCOME = 0,
+    INSTALLER_FLOW_PROFILE_SELECTION,
+    INSTALLER_FLOW_GUI_SELECTION,
+    INSTALLER_FLOW_DISK_SELECTION,
+    INSTALLER_FLOW_PARTITION_SETUP,
+    INSTALLER_FLOW_CONFIRMATION,
+    INSTALLER_FLOW_INSTALLING_OS,
+    INSTALLER_FLOW_INSTALLING_GUI,
+    INSTALLER_FLOW_INSTALLING_BOOTLOADER,
+    INSTALLER_FLOW_FINISHED,
+    INSTALLER_FLOW_ERROR,
+};
+
+enum installer_flow_status {
+    INSTALLER_FLOW_OK = 0,
+    INSTALLER_FLOW_ERR_INVALID_ARGUMENT = -1,
+    INSTALLER_FLOW_ERR_INVALID_PROFILE = -2,
+    INSTALLER_FLOW_ERR_GUI_REQUIRED = -3,
+    INSTALLER_FLOW_ERR_GUI_NOT_ALLOWED = -4,
+    INSTALLER_FLOW_ERR_DISK_NOT_FOUND = -5,
+    INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND = -6,
+    INSTALLER_FLOW_ERR_INVALID_STATE = -7,
+    INSTALLER_FLOW_ERR_NOT_IMPLEMENTED = -8,
+};
+
+struct installer_profile {
+    const char *id;
+    const char *display_name;
+    bool install_gui;
+    const char *os_edition;
+};
+
+struct installer_flow {
+    enum installer_flow_state state;
+    const struct installer_profile *profile;
+    const struct gui_manifest *selected_gui;
+    struct block_device *selected_disk;
+    struct block_device *selected_partition;
+    char error[INSTALLER_FLOW_ERROR_LENGTH];
+};
+
+struct installer_engine {
+    int (*install_base_os)(struct installer_flow *flow, void *context);
+    int (*install_gui)(struct installer_flow *flow, const struct gui_manifest *gui, void *context);
+    int (*install_bootloader)(struct installer_flow *flow, void *context);
+    void *context;
+};
+
+uint32_t installer_profile_count(void);
+const struct installer_profile *installer_profile_at(uint32_t index);
+const struct installer_profile *installer_profile_find(const char *id);
+
+bool installer_flow_init(struct installer_flow *flow);
+int installer_flow_select_profile(struct installer_flow *flow, const char *id);
+int installer_flow_select_gui(struct installer_flow *flow, const char *id);
+int installer_flow_select_disk(struct installer_flow *flow, const char *name);
+int installer_flow_select_partition(struct installer_flow *flow, const char *name);
+int installer_flow_next(struct installer_flow *flow);
+int installer_flow_back(struct installer_flow *flow);
+bool installer_flow_is_valid(const struct installer_flow *flow);
+int installer_flow_execute(struct installer_flow *flow, const struct installer_engine *engine);
+const char *installer_flow_state_name(enum installer_flow_state state);
+const char *installer_flow_status_string(int status);
+
+#endif /* KOS_INSTALLER_FLOW_H */
