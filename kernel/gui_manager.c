@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <kos/crypto.h>
 #include <kos/gui_manager.h>
+#include <kos/heap.h>
 #include <kos/installer.h>
 #include <kos/log.h>
 #include <kos/memory.h>
@@ -52,8 +53,64 @@ static struct gui_session active_gui_session;
 static struct process *active_gui_process;
 static char active_gui_entry_path[GUI_MAX_PATH_LENGTH];
 static uint32_t next_gui_session_id = 1;
+static char persistent_volume_letter;
 
 static bool find_installed_vino_volume(char *letter_out);
+
+static bool buffer_has_line(const uint8_t *buffer, uint64_t size,
+                            const char *expected_line) {
+    if (buffer == NULL || expected_line == NULL) return false;
+    uint64_t expected_size = kstrlen(expected_line);
+    uint64_t offset = 0;
+    while (offset < size) {
+        uint64_t line_end = offset;
+        while (line_end < size && buffer[line_end] != '\n') ++line_end;
+        uint64_t content_end = line_end;
+        if (content_end > offset && buffer[content_end - 1] == '\r') --content_end;
+        if (content_end - offset == expected_size) {
+            uint64_t index = 0;
+            while (index < expected_size
+                   && buffer[offset + index] == (uint8_t)expected_line[index]) ++index;
+            if (index == expected_size) return true;
+        }
+        offset = line_end < size ? line_end + 1 : size;
+    }
+    return false;
+}
+
+static bool volume_metadata_has(const char *relative_path, const char *line) {
+    char volume = 0;
+    if (relative_path == NULL || line == NULL
+        || !find_installed_vino_volume(&volume)) return false;
+    char path[GUI_MAX_PATH_LENGTH];
+    int path_size = snprintf(path, sizeof(path), "%c:/VINO/%s", volume, relative_path);
+    const uint8_t *data = NULL;
+    uint64_t size = 0;
+    if (path_size <= 0 || (uint64_t)path_size >= sizeof(path)
+        || !vfs_read_file(path, &data, &size) || data == NULL) return false;
+    bool matches = buffer_has_line(data, size, line);
+    if (size != 0) kfree((void *)data);
+    return matches;
+}
+
+static bool selected_gui_is(const char *id) {
+    if (id == NULL || *id == '\0') return false;
+    char volume = 0;
+    if (!find_installed_vino_volume(&volume)) return false;
+    char path[GUI_MAX_PATH_LENGTH];
+    int path_size = snprintf(path, sizeof(path),
+        "%c:/VINO/SYSTEM/GUI/SELECTED.TXT", volume);
+    const uint8_t *data = NULL;
+    uint64_t size = 0;
+    if (path_size <= 0 || (uint64_t)path_size >= sizeof(path)
+        || !vfs_read_file(path, &data, &size) || data == NULL) return false;
+    char expected[GUI_MAX_ID_LENGTH + 8];
+    int expected_size = snprintf(expected, sizeof(expected), "gui_id=%s", id);
+    bool matches = expected_size > 0 && (uint64_t)expected_size < sizeof(expected)
+        && buffer_has_line(data, size, expected);
+    if (size != 0) kfree((void *)data);
+    return matches;
+}
 
 static void gui_process_entry(void *argument) {
     const char *path = (const char *)argument;
@@ -96,21 +153,6 @@ static bool gui_memory_read(void *context, uint64_t offset, void *buffer, size_t
 static uint64_t gui_memory_size(void *context) {
     struct gui_memory_reader *reader = (struct gui_memory_reader *)context;
     return reader == NULL ? 0 : reader->size;
-}
-
-static bool buffer_contains_text(const uint8_t *buffer, uint64_t buffer_size,
-                                 const char *text) {
-    if (buffer == NULL || text == NULL) return false;
-    uint64_t text_size = kstrlen(text);
-    if (text_size == 0 || text_size > buffer_size) return false;
-    for (uint64_t offset = 0; offset <= buffer_size - text_size; ++offset) {
-        uint64_t index = 0;
-        while (index < text_size && buffer[offset + index] == (uint8_t)text[index]) {
-            ++index;
-        }
-        if (index == text_size) return true;
-    }
-    return false;
 }
 
 static char checksum_hex_digit(uint8_t value) {
@@ -160,11 +202,12 @@ static bool find_installed_vino_volume(char *letter_out) {
                                  "%c:/VINO/SYSTEM/OS.META", volume->letter);
         const uint8_t *metadata_data = NULL;
         uint64_t metadata_size = 0;
-        if (path_size > 0 && (uint64_t)path_size < sizeof(metadata_path)
+        bool metadata_valid = path_size > 0 && (uint64_t)path_size < sizeof(metadata_path)
             && vfs_read_file(metadata_path, &metadata_data, &metadata_size)
-            && buffer_contains_text(metadata_data, metadata_size, "os_edition=default")
-            && buffer_contains_text(metadata_data, metadata_size,
-                                    "install_state=committed")) {
+            && buffer_has_line(metadata_data, metadata_size, "os_edition=default")
+            && buffer_has_line(metadata_data, metadata_size, "install_state=committed");
+        if (metadata_data != NULL && metadata_size != 0) kfree((void *)metadata_data);
+        if (metadata_valid) {
             *letter_out = volume->letter;
             return true;
         }
@@ -271,11 +314,52 @@ bool gui_manager_init(void) {
         }
     }
     manager_initialized = true;
+    persistent_volume_letter = 0;
+    (void)find_installed_vino_volume(&persistent_volume_letter);
     default_gui_id[0] = '\0';
     active_gui_process = 0;
     gui_session_init(&active_gui_session, "");
+    const struct gui_manifest *selected = NULL;
+    for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
+        if (selected_gui_is(gui_registry[index].id)) {
+            selected = &gui_registry[index];
+            break;
+        }
+    }
+    if (selected != NULL) {
+        char entry_path[GUI_MAX_PATH_LENGTH];
+        struct vfs_metadata entry_metadata;
+        if (resolve_gui_entry_path(selected, entry_path, sizeof(entry_path))
+            && vfs_stat(entry_path, &entry_metadata)
+            && entry_metadata.type == VFS_NODE_FILE) {
+            kstrncpy(default_gui_id, selected->id, sizeof(default_gui_id) - 1);
+            default_gui_id[sizeof(default_gui_id) - 1] = '\0';
+        }
+    }
     log_info("GUI Manager: manifest registry initialized (Vino OS edition=default).");
     return true;
+}
+
+char gui_manager_system_volume_letter(void) {
+    if (persistent_volume_letter >= 'E' && persistent_volume_letter <= 'Z') {
+        return persistent_volume_letter;
+    }
+    char letter = 0;
+    if (!find_installed_vino_volume(&letter)) return 0;
+    persistent_volume_letter = letter;
+    return letter;
+}
+
+bool gui_manager_default_should_autostart(void) {
+    const struct gui_manifest *manifest = find_manifest("default");
+    if (manifest == NULL || !volume_metadata_has("SYSTEM/OS.META",
+                                                  "installer_profile=plus")
+        || !selected_gui_is("default")) return false;
+    char entry_path[GUI_MAX_PATH_LENGTH];
+    struct vfs_metadata entry_metadata;
+    return resolve_gui_entry_path(manifest, entry_path, sizeof(entry_path))
+        && vfs_stat(entry_path, &entry_metadata)
+        && entry_metadata.type == VFS_NODE_FILE;
 }
 
 uint32_t gui_manifest_count(void) {
@@ -302,7 +386,13 @@ bool gui_manifest_package_available(const struct gui_manifest *manifest) {
 
 bool gui_is_installed(const char *id) {
     const struct gui_manifest *manifest = find_manifest(id);
-    return manager_initialized && manifest != NULL && pkg_db_find(manifest->package_app_id) != NULL;
+    if (!manager_initialized || manifest == NULL) return false;
+    if (pkg_db_find(manifest->package_app_id) != NULL) return true;
+    char entry_path[GUI_MAX_PATH_LENGTH];
+    struct vfs_metadata entry_metadata;
+    return resolve_gui_entry_path(manifest, entry_path, sizeof(entry_path))
+        && vfs_stat(entry_path, &entry_metadata)
+        && entry_metadata.type == VFS_NODE_FILE;
 }
 
 uint32_t gui_installed_count(void) {
@@ -456,6 +546,23 @@ int gui_restart(const char *id) {
 int gui_set_default(const char *id) {
     if (!gui_is_installed(id)) {
         return GUI_MANAGER_ERR_NOT_INSTALLED;
+    }
+    char volume = 0;
+    if (find_installed_vino_volume(&volume)) {
+        char path[GUI_MAX_PATH_LENGTH];
+        char selection[160];
+        const struct gui_manifest *manifest = find_manifest(id);
+        int path_size = snprintf(path, sizeof(path),
+            "%c:/VINO/SYSTEM/GUI/SELECTED.TXT", volume);
+        int selection_size = manifest == NULL ? -1 : snprintf(selection,
+            sizeof(selection), "gui_id=%s\nversion=%s\n", manifest->id,
+            manifest->version);
+        if (path_size <= 0 || (uint64_t)path_size >= sizeof(path)
+            || selection_size <= 0 || (uint64_t)selection_size >= sizeof(selection)
+            || !vfs_write_file(path, (const uint8_t *)selection,
+                               (uint64_t)selection_size)) {
+            return GUI_MANAGER_ERR_IO;
+        }
     }
     kstrncpy(default_gui_id, id, sizeof(default_gui_id) - 1);
     default_gui_id[sizeof(default_gui_id) - 1] = '\0';

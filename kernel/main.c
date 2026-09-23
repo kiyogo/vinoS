@@ -585,6 +585,14 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("panictest");
     (void)kernel_command_execute("kstress");
 #endif
+    if (gui_manager_default_should_autostart()) {
+        log_info("Vino Plus: starting the selected Default GUI session.");
+        int gui_result = gui_start("default");
+        if (gui_result != GUI_MANAGER_OK) {
+            log_errorf("Default GUI failed to start (%s); returning to CLI.",
+                       gui_manager_status_string(gui_result));
+        }
+    }
     if (!terminal_initialize()) {
         log_error("Kernel terminal initialization failed.");
         kernel_halt();

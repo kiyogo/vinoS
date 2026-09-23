@@ -172,41 +172,64 @@ of kernel code or a package payload.
 
 | Demoweb feature | Vino implementation boundary |
 | --- | --- |
-| dark/frosted panels | `gui_canvas` colors, fills, and borders now; compositor/window surfaces later |
-| start menu/taskbar | future user-space shell/window manager |
-| file manager | VFS and file syscalls |
-| terminal | existing CLI/terminal |
-| settings/control center | future user-space system applications |
-| kernel monitor | existing system/network/task information APIs |
-| drag, focus, minimize, maximize | future display server/window manager |
+| dark/frosted panels | layered navy/blue panels with cyan accents, borders, and shadow treatment in Default |
+| start menu/taskbar | native user-space desktop, start menu, dock, and launcher shortcuts |
+| file manager | read-only directory navigation and text preview through VFS file syscalls |
+| terminal | native user-space shell with VFS, uptime, network, and app-launch commands |
+| settings/control center | in-session accent, motion, and panel-density settings |
+| kernel monitor | live network/device snapshot provided by the system-info syscall |
+| focus, minimize, maximize, move | keyboard-driven window manager and focus/selection states |
 | Font Awesome icons | future bitmap/icon asset package; no remote web dependency |
 
 The wallpaper PNG and browser-oriented HTML/CSS/JavaScript remain reference
 assets only. They are not copied into the kernel and are not presented as a
 native Vino GUI implementation.
 
+### Phase 7 — Native Default desktop
+
+`assets/gui/default_gui_app.c` is the `DEFAULT.KPKG` ELF entry point; the MVP
+package retains its small package-demo entry point. The Default process draws
+the desktop, status bar, dock, start/context menus, and Terminal, Files,
+Settings, and Network windows through the user-space GUI display service. Its
+VFS-backed file browser is read-only and supports directory navigation and
+text preview. The terminal runs a small built-in shell and does not forward
+keystrokes to the kernel console. Network details come from a read-only
+`SYS_system_info` snapshot.
+
+The package builder still emits the manifest, ownership list, per-file hashes,
+ELF entry point, and detached package SHA-256. On boot, the manager reads the
+committed OS profile and `VINO/SYSTEM/GUI/SELECTED.TXT`; only
+`installer_profile=plus` with `gui_id=default` starts Default automatically.
+Vino CLI continues to boot to the CLI. If the executable or display service
+fails, startup logs the failure and returns to the CLI. No browser, WebView,
+HTML, CSS, JavaScript, or remote asset is used by the desktop.
+
+Input is currently keyboard-only: number shortcuts launch apps; `S` opens the
+start menu; `C` opens the context menu; `Tab` cycles focus; `M` minimizes; `Z`
+maximizes; `G` then `H/J/K/L` moves a window; `X` closes; and `Esc` returns
+focus to the desktop. Selection highlight serves as focus/hover feedback until
+the kernel input service grows pointer events. Settings are currently
+session-only, the file browser is read-only, and Network is a status view.
+
 ## Deliberate follow-up work
 
-The following pieces still need real implementation before claiming a complete
-Vino Plus installation:
+Remaining work beyond the Phase 7 native desktop:
 
 1. Add a release signing key and signature verification policy; current package
    payloads are unsigned and carry SHA-256 integrity metadata only.
-2. Add a user-space display server, input/event routing, window manager, and
-   GUI session lifecycle so `start/stop/restart` can launch real processes.
-3. Load the selected GUI package from persistent metadata during normal OS
-   startup and provide GUI session recovery behavior.
-4. Add persistent default-GUI selection and recovery fallback policy.
-5. Add mouse/extended-input support and replace the keyboard-only installer
-   navigation with pointer events once the input stack supports it.
-6. Add remote package transport only after TLS, checksum/signature policy, and
+2. Add pointer events and real pointer hover/click/drag; this build intentionally
+   uses keyboard focus and window-move controls because the input ABI is key-only.
+3. Persist user settings and add safe, writable file-manager operations.
+4. Add GUI crash/restart recovery and rebuild package ownership records from
+   installed metadata after reboot (the current package registry is volatile).
+5. Add remote package transport only after TLS, checksum/signature policy, and
    offline/recovery behavior are defined. The current registry is local-ISO
    only and intentionally does not pretend to download anything.
 
 ## Verification
 
-The installer variant is built with `build --installer`. Storage-manager RAM
-and QEMU MBR/GPT coverage remains in the Phase 2 validation path. The current
-installer media contains the base OS and Limine UEFI payloads, but does not
-contain the selected Default GUI package, so a Vino Plus attempt reports that
-missing package and leaves the installed OS bootable in CLI mode.
+The installer variant is built with `build --installer`; this also builds and
+stages both GUI packages into its initramfs. Storage-manager RAM and QEMU
+MBR/GPT coverage remains in the Phase 2 validation path. The end-to-end
+Vino Plus install/reboot/Default-GUI acceptance still requires a disposable
+QEMU target-disk run; a successful compile alone does not claim that acceptance.

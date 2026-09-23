@@ -4,12 +4,15 @@
 
 #include <kos/console.h>
 #include <kos/file.h>
+#include <kos/gui_manager.h>
 #include <kos/gui_service.h>
 #include <kos/handle.h>
 #include <kos/installer_service.h>
 #include <kos/keyboard.h>
 #include <kos/log.h>
 #include <kos/memory.h>
+#include <kos/net.h>
+#include <kos/net_device.h>
 #include <kos/process.h>
 #include <kos/serial.h>
 #include <kos/socket.h>
@@ -19,6 +22,7 @@
 #include <kos/uaccess.h>
 #include <kos/vfs.h>
 #include <kos/vmm.h>
+#include <uapi/kos/system_info.h>
 
 static long syscall_copy_path(char path[VFS_MAX_PATH], const char *user_path) {
     long result = strncpy_from_user(path, user_path, VFS_MAX_PATH);
@@ -177,6 +181,40 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
 
         case SYS_sysinfo:
             return task_count();
+
+        case SYS_system_info: {
+            uint32_t user_version = 0;
+            if (!access_ok((const void *)arg0, sizeof(struct kos_system_info))
+                || copy_from_user(&user_version, (const void *)arg0,
+                                  sizeof(user_version)) != 0
+                || user_version != KOS_SYSTEM_INFO_ABI_VERSION) {
+                return (uint64_t)-EFAULT;
+            }
+            struct kos_system_info info = {
+                .abi_version = KOS_SYSTEM_INFO_ABI_VERSION,
+                .task_count = (uint32_t)task_count(),
+                .uptime_seconds = timer_uptime_seconds(),
+                .system_volume_letter = gui_manager_system_volume_letter(),
+            };
+            struct net_interface_info network = {0};
+            if (net_interface_info(&network) && network.available) {
+                info.network_available = 1;
+                info.configuration_source = (uint32_t)network.configuration_source;
+                info.dhcp_state = (uint32_t)network.dhcp_state;
+                info.ipv4_address = network.ipv4_address;
+                info.subnet_mask = network.subnet_mask;
+                info.gateway = network.gateway;
+                info.dns_server = network.dns_server;
+                kmemcpy(info.mac_address, network.mac_address, sizeof(info.mac_address));
+                struct net_device *device = net_device_get_default();
+                if (device != NULL) {
+                    kstrncpy(info.device_name, device->name, sizeof(info.device_name) - 1);
+                    info.device_name[sizeof(info.device_name) - 1] = '\0';
+                }
+            }
+            return copy_to_user((void *)arg0, &info, sizeof(info)) == 0
+                ? 0 : (uint64_t)-EFAULT;
+        }
 
         case SYS_write: {
             uint64_t fd = arg0;
@@ -560,6 +598,7 @@ const char *kos_syscall_name(uint64_t number) {
         case SYS_rename:   return "rename";
         case SYS_gettime:  return "gettime";
         case SYS_sysinfo:  return "sysinfo";
+        case SYS_system_info: return "system_info";
         case SYS_gui_display: return "gui_display";
         case SYS_gui_input: return "gui_input";
         case SYS_installer: return "installer";

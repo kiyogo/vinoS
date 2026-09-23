@@ -21,6 +21,8 @@ enum gui_manager_status {
 };
 
 bool gui_manager_init(void);
+char gui_manager_system_volume_letter(void);
+bool gui_manager_default_should_autostart(void);
 uint32_t gui_manifest_count(void);
 const struct gui_manifest *gui_manifest_at(uint32_t index);
 const struct gui_manifest *gui_manifest_find(const char *id);
