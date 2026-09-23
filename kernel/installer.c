@@ -43,9 +43,13 @@ static bool ensure_vfs_file_parent(const char *file_path) {
     return ensure_vfs_directory_tree(parent);
 }
 
-static bool ensure_app_data_directory(const char *app_id) {
+static bool ensure_app_data_directory(const char *data_root, const char *app_id) {
     char marker_path[KPKG_MAX_PATH_LEN];
-    snprintf(marker_path, sizeof(marker_path), "%s/%s/.keep", INSTALLER_DATA_DIR, app_id);
+    if (data_root == NULL || app_id == NULL
+        || snprintf(marker_path, sizeof(marker_path), "%s/%s/.keep", data_root, app_id)
+            >= (int)sizeof(marker_path)) {
+        return false;
+    }
     static const char marker_data[] = "KOS App Data Directory\n";
     return ensure_vfs_file_parent(marker_path)
         && vfs_write_file(marker_path, (const uint8_t *)marker_data, sizeof(marker_data) - 1);
@@ -104,16 +108,29 @@ int installer_install(struct kpkg_reader reader, const struct installer_options 
         return INSTALLER_ERR_INTEGRITY_FAIL;
     }
 
+    const char *install_root = opts != NULL && opts->target_root != NULL
+        && opts->target_root[0] != '\0' ? opts->target_root : INSTALLER_BASE_DIR;
+    const char *data_root = opts != NULL && opts->target_data_root != NULL
+        && opts->target_data_root[0] != '\0' ? opts->target_data_root : INSTALLER_DATA_DIR;
     char install_path[KPKG_MAX_PATH_LEN];
     char data_path[KPKG_MAX_PATH_LEN];
-    snprintf(install_path, sizeof(install_path), "%s/%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
-    snprintf(data_path, sizeof(data_path), "%s/%s", INSTALLER_DATA_DIR, pkg.manifest.app_id);
+    if (snprintf(install_path, sizeof(install_path), "%s/%s", install_root,
+                 pkg.manifest.app_id) >= (int)sizeof(install_path)
+        || snprintf(data_path, sizeof(data_path), "%s/%s", data_root,
+                    pkg.manifest.app_id) >= (int)sizeof(data_path)) {
+        kpkg_close(&pkg);
+        return INSTALLER_ERR_INVALID_MANIFEST;
+    }
 
     /* Phase 1: STAGING */
     char stage_prefix[KPKG_MAX_PATH_LEN];
-    snprintf(stage_prefix, sizeof(stage_prefix), "%s/.staging_%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
+    if (snprintf(stage_prefix, sizeof(stage_prefix), "%s/.staging_%s", install_root,
+                 pkg.manifest.app_id) >= (int)sizeof(stage_prefix)) {
+        kpkg_close(&pkg);
+        return INSTALLER_ERR_INVALID_MANIFEST;
+    }
 
-    bool stage_ok = ensure_vfs_directory_tree(INSTALLER_BASE_DIR)
+    bool stage_ok = ensure_vfs_directory_tree(install_root)
         && ensure_vfs_directory_tree(stage_prefix);
     for (uint32_t i = 0; i < pkg.file_count; i++) {
         uint8_t *file_data = NULL;
@@ -187,7 +204,16 @@ int installer_install(struct kpkg_reader reader, const struct installer_options 
     }
 
     /* Phase 3: Create private data area */
-    ensure_app_data_directory(pkg.manifest.app_id);
+    if (!ensure_app_data_directory(data_root, pkg.manifest.app_id)) {
+        for (uint32_t i = 0; i < pkg.file_count; i++) {
+            char target_file_path[KPKG_MAX_PATH_LEN];
+            snprintf(target_file_path, sizeof(target_file_path), "%s/%s", install_path,
+                     pkg.files[i].path);
+            vfs_unlink_file(target_file_path);
+        }
+        kpkg_close(&pkg);
+        return INSTALLER_ERR_COMMIT_FAIL;
+    }
 
     /* Phase 4: RECORD */
     struct pkg_record *rec = NULL;

@@ -14,6 +14,8 @@ enum {
 static struct vfs_file files[INITRAMFS_MAX_FILES];
 static uint64_t file_count;
 static bool initialized;
+static const uint8_t *archive_data;
+static uint64_t archive_total_size;
 
 static bool strings_equal(const char *left, const char *right) {
     while (*left != '\0' && *right != '\0') {
@@ -174,6 +176,8 @@ bool initramfs_initialize(const void *archive, uint64_t archive_size) {
             if (file_size != 0 || file_count == 0) {
                 return false;
             }
+            archive_data = bytes;
+            archive_total_size = archive_size;
             initialized = true;
             return true;
         }
@@ -190,6 +194,7 @@ bool initramfs_initialize(const void *archive, uint64_t archive_size) {
             .path = path,
             .data = bytes + data_offset,
             .size = file_size,
+            .type = VFS_NODE_FILE,
         };
         ++file_count;
         if (!align4(data_offset + file_size, &offset)) {
@@ -200,3 +205,10 @@ bool initramfs_initialize(const void *archive, uint64_t archive_size) {
 }
 
 bool initramfs_is_initialized(void) { return initialized; }
+
+bool initramfs_get_archive(const uint8_t **archive, uint64_t *size) {
+    if (!initialized || archive == NULL || size == NULL) return false;
+    *archive = archive_data;
+    *size = archive_total_size;
+    return archive_data != NULL && archive_total_size != 0;
+}

@@ -31,6 +31,9 @@ struct installer_options {
     uint32_t key_len;
     bool allow_downgrade;
     bool keep_data_on_uninstall;
+    /* Optional VFS roots for installing a package onto an OS install volume. */
+    const char *target_root;
+    const char *target_data_root;
 };
 
 /* Installer Lifecycle & Operations */

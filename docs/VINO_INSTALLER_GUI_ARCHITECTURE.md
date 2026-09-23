@@ -63,13 +63,15 @@ machine:
 ```text
 WELCOME -> PROFILE_SELECTION -> GUI_SELECTION (Plus only)
          -> DISK_SELECTION -> PARTITION_SETUP -> CONFIRMATION
-         -> INSTALLING_OS -> INSTALLING_GUI -> INSTALLING_BOOTLOADER -> FINISHED
+         -> INSTALLING_OS -> INSTALLING_BOOTLOADER
+         -> INSTALLING_GUI (Plus only) -> FINISHED
 ```
 
-The engine uses callbacks for base OS installation, GUI installation, and
-bootloader installation. This keeps the selection/validation UI independent of
-the destructive storage backend. The default UI provides no write callbacks,
-so confirmation fails with `NOT_IMPLEMENTED` and cannot modify a disk.
+The engine uses separate `install_base_os()`, `install_gui()`, and
+`install_bootloader()` callbacks. This keeps selection and validation separate
+from disk writes. The base OS and Limine UEFI files are installed before the
+selected GUI package so the machine has a CLI boot path if GUI installation
+fails.
 
 The shared contract layer is in `include/kos/installer_contracts.h` and
 `kernel/installer_contracts.c`. It defines the canonical `installer_state`,
@@ -99,6 +101,27 @@ format an existing or newly-created target as FAT32, and show a review step
 before the write. The RAM-disk self-test covers MBR and GPT create/format/
 mount/delete flows. `tools/storage_ci.py` repeats the same manager flow on
 QEMU disk images through AHCI, VirtIO, and NVMe for both MBR and GPT images.
+
+### Phase 3 base OS installer
+
+`kernel/installer_engine.c` implements the three installer operations without
+combining the CLI and GUI editions. A new default target is an EFI System
+partition (GPT EFI System GUID or MBR type `0xEF`) formatted as FAT32. The
+installer writes `VINO/BOOT/KOS.ELF`, the original `INITRAMFS.CPIO`, and all
+remaining initramfs system files below `VINO/SYSTEM`. It writes a SHA-256 list,
+flushes the block cache, invalidates cached sectors, and verifies each copied
+file by reading it back. `VINO/SYSTEM/OS.META`, including
+`os_edition=default` and `install_state=committed`, is written last and read
+back before the base OS transaction is accepted.
+
+The build includes Limine's x86-64 UEFI application in the installer initramfs.
+`install_bootloader()` writes it and a Vino OS Limine configuration to
+`EFI/BOOT`, then verifies their checksums. The GUI package installer can target
+the installed system's `VINO/SYSTEM/Apps` and `VINO/SYSTEM/Data` trees. If the
+selected local package is absent, the installer reports the GUI failure while
+leaving the already installed CLI system bootable. The current media contains
+the GUI manifests but not `DEFAULT.KPKG`, so Vino Plus GUI installation still
+requires that package payload.
 
 ### Native installer UI
 
@@ -157,9 +180,8 @@ Vino Plus installation:
    ELF entry points and all declared assets.
 2. Add a user-space display server, input/event routing, window manager, and
    GUI session lifecycle so `start/stop/restart` can launch real processes.
-3. Extend the installer storage backend with base-OS file copy, persistent
-   install metadata, and bootloader installation. The backend must be
-   transactional and preserve CLI fallback when GUI installation fails.
+3. Load the selected GUI package from persistent metadata during normal OS
+   startup and provide GUI session recovery behavior.
 4. Add persistent default-GUI selection and recovery fallback policy.
 5. Add mouse/extended-input support and replace the keyboard-only installer
    navigation with pointer events once the input stack supports it.
@@ -169,17 +191,8 @@ Vino Plus installation:
 
 ## Verification
 
-The normal smoke gate was run after these changes and passed:
-
-- kernel boot
-- VFS multi-volume checks
-- DHCP and TCP checks
-- block and FAT32 checks
-- installer storage RAM-disk and QEMU MBR/GPT integration checks
-- user-space file syscall checks
-- smoke completion
-
-The installer variant should be built separately with `build --installer`.
-Until the package payload, base-OS copy, metadata, and bootloader backends
-above exist, that variant is a storage-aware selection/format UI rather than a
-complete OS installer.
+The installer variant is built with `build --installer`. Storage-manager RAM
+and QEMU MBR/GPT coverage remains in the Phase 2 validation path. The current
+installer media contains the base OS and Limine UEFI payloads, but does not
+contain the selected Default GUI package, so a Vino Plus attempt reports that
+missing package and leaves the installed OS bootable in CLI mode.

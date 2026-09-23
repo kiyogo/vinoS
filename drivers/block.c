@@ -147,6 +147,8 @@ struct block_device *block_device_register(
     dev->start_lba = 0;
     dev->partition_index = 0;
     dev->partition_type_mbr = 0;
+    kmemset(dev->partition_type_guid, 0, sizeof(dev->partition_type_guid));
+    dev->has_type_guid = false;
     dev->has_guid = false;
     dev->bootable = false;
 
@@ -228,6 +230,8 @@ struct block_device *block_partition_register(
         kmemset(dev->partition_guid, 0, 16);
         dev->has_guid = false;
     }
+    kmemset(dev->partition_type_guid, 0, sizeof(dev->partition_type_guid));
+    dev->has_type_guid = false;
 
     list_add_tail(&dev->list_node, &block_device_list);
     spinlock_unlock_irqrestore(&block_lock, flags);

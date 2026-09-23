@@ -33,7 +33,7 @@ static const char *const c_sources[] = {
     "kernel/process.c", "kernel/task.c", "kernel/object.c", "kernel/handle.c", "kernel/uaccess.c", "kernel/wait.c",
     "lib/asn1.c", "lib/crypto.c", "lib/kpkg.c", "lib/memory.c", "lib/x509.c",
     "kernel/pkg_db.c", "kernel/installer.c", "kernel/installer_contracts.c",
-    "kernel/installer_storage.c",
+    "kernel/installer_storage.c", "kernel/installer_engine.c",
     "kernel/gui_manager.c", "kernel/installer_flow.c",
     "kernel/gui_canvas.c", "kernel/installer_ui.c",
     "kernel/qa_framework.c", "kernel/qa_fuzz.c", "kernel/qa_stress.c", "kernel/fault_injection.c",
@@ -236,17 +236,20 @@ static int make_initramfs(void) {
     unsigned char *kernel = NULL;
     unsigned char *default_manifest = NULL;
     unsigned char *mvp_manifest = NULL;
+    unsigned char *bootx64 = NULL;
     size_t readme_size = 0;
     size_t kernel_size = 0;
     size_t default_manifest_size = 0;
     size_t mvp_manifest_size = 0;
+    size_t bootx64_size = 0;
     size_t offset = 0;
     FILE *archive;
     int result = 1;
     if (!read_file("assets/initramfs/README.TXT", &readme, &readme_size) ||
         !read_file("build/kos.elf", &kernel, &kernel_size) ||
         !read_file("assets/gui/DEFAULT.MANIFEST", &default_manifest, &default_manifest_size) ||
-        !read_file("assets/gui/MVP.MANIFEST", &mvp_manifest, &mvp_manifest_size)) {
+        !read_file("assets/gui/MVP.MANIFEST", &mvp_manifest, &mvp_manifest_size) ||
+        !read_file("third_party/limine-binary/BOOTX64.EFI", &bootx64, &bootx64_size)) {
         goto cleanup;
     }
     if (fopen_s(&archive, "build/initramfs.cpio", "wb") != 0 || archive == NULL) {
@@ -258,6 +261,8 @@ static int make_initramfs(void) {
                     default_manifest_size, 0100644U) ||
         !cpio_entry(archive, &offset, "GUI/MVP.MANIFEST", mvp_manifest,
                     mvp_manifest_size, 0100644U) ||
+        !cpio_entry(archive, &offset, "EFI/BOOT/BOOTX64.EFI", bootx64,
+                    bootx64_size, 0100644U) ||
         !cpio_entry(archive, &offset, "TRAILER!!!", NULL, 0U, 0U)) {
         fclose(archive);
         goto cleanup;
@@ -269,6 +274,7 @@ cleanup:
     free(kernel);
     free(default_manifest);
     free(mvp_manifest);
+    free(bootx64);
     if (result != 0) {
         return fail("could not create build/initramfs.cpio");
     }

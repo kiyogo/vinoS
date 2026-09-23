@@ -233,6 +233,7 @@ int installer_flow_request_partition_creation(struct installer_flow *flow,
         .start_lba = start_lba,
         .block_count = block_count,
         .filesystem = filesystem,
+        .bootable = true,
     };
     flow->state.partition_plan.confirmed = false;
     flow->state.phase = INSTALLER_FLOW_CONFIRMATION;
@@ -400,6 +401,7 @@ int installer_flow_execute(struct installer_flow *flow, const struct installer_e
     flow->state.transaction.target_partition_name[
         sizeof(flow->state.transaction.target_partition_name) - 1] = '\0';
     flow->state.transaction.state = INSTALL_TRANSACTION_APPLYING;
+    flow->state.transaction.cli_fallback_ready = false;
     flow->state.phase = INSTALLER_FLOW_INSTALLING_OS;
     int result = engine->install_base_os(flow, engine->context);
     if (result != 0) {
@@ -409,6 +411,17 @@ int installer_flow_execute(struct installer_flow *flow, const struct installer_e
         return result;
     }
     flow->state.transaction.base_os_applied = true;
+
+    /* Establish a bootable CLI system before attempting the optional GUI package. */
+    flow->state.phase = INSTALLER_FLOW_INSTALLING_BOOTLOADER;
+    result = engine->install_bootloader(flow, engine->context);
+    if (result != 0) {
+        set_error(flow, "Bootloader installation failed; the target is not bootable yet");
+        flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
+        flow->state.transaction.last_error = result;
+        return result;
+    }
+    flow->state.transaction.bootloader_applied = true;
     flow->state.transaction.cli_fallback_ready = true;
 
     if (flow->profile->install_gui) {
@@ -432,8 +445,8 @@ int installer_flow_execute(struct installer_flow *flow, const struct installer_e
         }
         result = engine->install_gui(flow, flow->selected_gui, engine->context);
         if (result != 0) {
-            /* Base OS is deliberately left bootable in CLI mode. */
-            set_error(flow, "GUI installation failed; Vino OS can fall back to CLI");
+            /* Base OS and Limine stay installed so the machine can use CLI mode. */
+            set_error(flow, "GUI installation failed; Vino OS remains bootable in CLI mode");
             flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
             flow->state.transaction.last_error = result;
             return result;
@@ -441,15 +454,6 @@ int installer_flow_execute(struct installer_flow *flow, const struct installer_e
         flow->state.transaction.gui_applied = true;
     }
 
-    flow->state.phase = INSTALLER_FLOW_INSTALLING_BOOTLOADER;
-    result = engine->install_bootloader(flow, engine->context);
-    if (result != 0) {
-        set_error(flow, "Bootloader installation failed");
-        flow->state.transaction.state = INSTALL_TRANSACTION_FAILED;
-        flow->state.transaction.last_error = result;
-        return result;
-    }
-    flow->state.transaction.bootloader_applied = true;
     flow->state.transaction.state = INSTALL_TRANSACTION_VERIFYING;
     flow->state.transaction.state = INSTALL_TRANSACTION_COMMITTED;
     flow->state.phase = INSTALLER_FLOW_FINISHED;

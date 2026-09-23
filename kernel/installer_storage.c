@@ -120,9 +120,16 @@ bool installer_storage_create_partition(struct block_device *disk,
         .table_type = table_type,
         .start_lba = start_lba,
         .block_count = block_count,
-        .mbr_type = MBR_TYPE_FAT32_LBA,
+        .mbr_type = bootable ? MBR_TYPE_EFI_SYSTEM : MBR_TYPE_FAT32_LBA,
         .bootable = bootable,
     };
+    if (bootable && table_type == PARTITION_TABLE_GPT) {
+        static const uint8_t efi_system_guid[16] = {
+            0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11,
+            0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B,
+        };
+        kmemcpy(request.type_guid, efi_system_guid, sizeof(efi_system_guid));
+    }
     return partition_table_create(&request, disk, confirmed)
         && find_partition_by_start(disk, start_lba) != NULL;
 }

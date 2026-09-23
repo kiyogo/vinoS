@@ -3,6 +3,7 @@
 
 #include <kos/block.h>
 #include <kos/gui_canvas.h>
+#include <kos/installer_engine.h>
 #include <kos/installer_flow.h>
 #include <kos/installer_ui.h>
 #include <kos/keyboard.h>
@@ -231,25 +232,6 @@ static int request_default_partition(struct installer_flow *flow) {
         last - first + 1, PARTITION_PLAN_FILESYSTEM_FAT32);
 }
 
-static int unavailable_base_os(struct installer_flow *flow, void *context) {
-    (void)flow;
-    (void)context;
-    return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
-}
-
-static int unavailable_gui(struct installer_flow *flow, const struct gui_manifest *gui, void *context) {
-    (void)flow;
-    (void)gui;
-    (void)context;
-    return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
-}
-
-static int unavailable_bootloader(struct installer_flow *flow, void *context) {
-    (void)flow;
-    (void)context;
-    return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
-}
-
 static void draw_state(const struct installer_flow *flow, uint32_t selected,
                        bool format_confirmation_pending) {
     switch (flow->state.phase) {
@@ -328,9 +310,9 @@ bool installer_ui_run(void) {
                 }
                 else {
                     struct installer_engine engine = {
-                        .install_base_os = unavailable_base_os,
-                        .install_gui = unavailable_gui,
-                        .install_bootloader = unavailable_bootloader,
+                        .install_base_os = install_base_os,
+                        .install_gui = install_gui,
+                        .install_bootloader = install_bootloader,
                     };
                     result = installer_flow_execute(&flow, &engine);
                 }

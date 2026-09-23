@@ -201,7 +201,12 @@ static uint32_t partition_scan_gpt(struct block_device *dev) {
         valid_parts++;
         struct block_device *partition = block_partition_register(
             dev, valid_parts, e->starting_lba, count, 0xEE, e->unique_partition_guid);
-        if (partition != NULL) partition->bootable = (e->attributes & (1ULL << 2)) != 0;
+        if (partition != NULL) {
+            partition->bootable = (e->attributes & (1ULL << 2)) != 0;
+            kmemcpy(partition->partition_type_guid, e->type_guid,
+                    sizeof(partition->partition_type_guid));
+            partition->has_type_guid = true;
+        }
     }
 
     kfree(entries_buf);

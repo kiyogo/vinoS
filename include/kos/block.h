@@ -56,6 +56,8 @@ struct block_device {
     uint64_t start_lba;
     uint32_t partition_index;
     uint8_t partition_type_mbr;
+    uint8_t partition_type_guid[16];
+    bool has_type_guid;
     uint8_t partition_guid[16];
     bool has_guid;
     bool bootable;
