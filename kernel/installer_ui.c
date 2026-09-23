@@ -6,6 +6,7 @@
 #include <kos/installer_flow.h>
 #include <kos/installer_ui.h>
 #include <kos/keyboard.h>
+#include <kos/log.h>
 #include <kos/task.h>
 
 enum {
@@ -43,7 +44,7 @@ static void draw_shell(const struct installer_flow *flow) {
     text(panel.x + 32, panel.y + 28, "Vino OS Installer", color_text);
     text(panel.x + 32, panel.y + 62, "System: Vino OS   Edition: default", color_muted);
     text(panel.x + 32, panel.y + panel.height - 48,
-         "Tab/J/K: select   Enter: continue   Esc: quit", color_muted);
+         "Tab/J/K: select   Enter: continue   C: create   F: format   Esc: quit", color_muted);
     if (flow != NULL && flow->state.phase == INSTALLER_FLOW_ERROR) {
         text(panel.x + 32, panel.y + panel.height - 82, flow->state.error, color_error);
     }
@@ -130,7 +131,19 @@ static void draw_disk_page(const struct installer_flow *flow, uint32_t selected)
         struct block_device *device = disk_at(index);
         struct gui_rect option = { UI_MARGIN + 32, UI_MARGIN + 160 + index * UI_ROW_HEIGHT, 600, UI_ROW_HEIGHT - 4 };
         gui_canvas_fill(option, index == selected ? color_panel_active : color_panel);
-        panel_text(option.x + 14, option.y + 6, device->name, color_text);
+        struct installer_disk_info info;
+        if (installer_storage_disk_at(index, &info)) {
+            char summary[128];
+            const char *table = info.table_type == PARTITION_TABLE_GPT ? "GPT"
+                : info.table_type == PARTITION_TABLE_MBR ? "MBR" : "no table";
+            snprintf(summary, sizeof(summary), "%s  %llu MiB  %s  %u partition(s)",
+                     info.name, (unsigned long long)(info.capacity_bytes / (1024 * 1024)),
+                     table, info.partition_count);
+            panel_text(option.x + 14, option.y + 6, summary, color_text);
+        }
+        else {
+            panel_text(option.x + 14, option.y + 6, device->name, color_error);
+        }
     }
 }
 
@@ -140,26 +153,82 @@ static void draw_partition_page(const struct installer_flow *flow, uint32_t sele
     uint32_t count = partition_count(flow->selected_disk);
     if (count == 0) {
         text(UI_MARGIN + 32, UI_MARGIN + 160, "No partition was detected on this disk.", color_error);
-        text(UI_MARGIN + 32, UI_MARGIN + 196, "Partition creation/formatting backend is not enabled yet.", color_muted);
+        text(UI_MARGIN + 32, UI_MARGIN + 196, "Press C to prepare a full-disk GPT/FAT32 target.", color_muted);
         return;
     }
     for (uint32_t index = 0; index < count; ++index) {
         struct block_device *partition = partition_at(flow->selected_disk, index);
         struct gui_rect option = { UI_MARGIN + 32, UI_MARGIN + 160 + index * UI_ROW_HEIGHT, 600, UI_ROW_HEIGHT - 4 };
         gui_canvas_fill(option, index == selected ? color_panel_active : color_panel);
-        panel_text(option.x + 14, option.y + 6, partition->name, color_text);
+        struct installer_partition_info info;
+        if (installer_storage_partition_at(flow->selected_disk, index, &info)) {
+            char summary[128];
+            snprintf(summary, sizeof(summary), "%s  LBA %llu  %llu blocks  %s",
+                     info.name, (unsigned long long)info.start_lba,
+                     (unsigned long long)info.block_count, info.filesystem);
+            panel_text(option.x + 14, option.y + 6, summary, color_text);
+        }
+        else {
+            panel_text(option.x + 14, option.y + 6, partition->name, color_error);
+        }
     }
 }
 
-static void draw_review_page(const struct installer_flow *flow) {
+static void draw_review_page(const struct installer_flow *flow, bool format_confirmation_pending) {
     draw_shell(flow);
     text(UI_MARGIN + 32, UI_MARGIN + 120, "Review installation", color_text);
+    if (flow->selected_partition == NULL
+        && flow->state.partition_plan.operation_count == 1
+        && flow->state.partition_plan.operations[0].type == PARTITION_PLAN_CREATE) {
+        const struct partition_plan_operation *operation =
+            &flow->state.partition_plan.operations[0];
+        text(UI_MARGIN + 32, UI_MARGIN + 160, "Create partition (destructive)", color_error);
+        text(UI_MARGIN + 32, UI_MARGIN + 192, flow->state.partition_plan.table_type == PARTITION_TABLE_GPT
+             ? "Table: GPT" : "Table: MBR", color_muted);
+        char range[96];
+        snprintf(range, sizeof(range), "LBA %llu, %llu blocks, FAT32",
+                 (unsigned long long)operation->start_lba,
+                 (unsigned long long)operation->block_count);
+        text(UI_MARGIN + 32, UI_MARGIN + 224, range, color_muted);
+        text(UI_MARGIN + 32, UI_MARGIN + 276, "Enter confirms partition creation and FAT32 format.", color_error);
+        return;
+    }
     text(UI_MARGIN + 32, UI_MARGIN + 160, "System: Vino OS", color_muted);
     text(UI_MARGIN + 32, UI_MARGIN + 192, flow->profile->install_gui ? "Mode: Vino Plus preset" : "Mode: Vino CLI", color_muted);
     text(UI_MARGIN + 32, UI_MARGIN + 224, flow->selected_gui == NULL ? "GUI: None" : "GUI: Default", color_muted);
     text(UI_MARGIN + 32, UI_MARGIN + 256, flow->selected_disk->name, color_muted);
     text(UI_MARGIN + 32, UI_MARGIN + 288, flow->selected_partition->name, color_muted);
-    text(UI_MARGIN + 32, UI_MARGIN + 340, "Enter will validate the engine; it will not write a disk without a backend.", color_error);
+    if (format_confirmation_pending) {
+        text(UI_MARGIN + 32, UI_MARGIN + 340,
+             "Press Enter to confirm destructive FAT32 format; Esc cancels.", color_error);
+    }
+    else {
+        text(UI_MARGIN + 32, UI_MARGIN + 340,
+             flow->state.partition_plan.selected_filesystem == PARTITION_PLAN_FILESYSTEM_FAT32
+                 ? "Enter confirms the target; F requests a FAT32 reformat."
+                 : "F requests a destructive FAT32 format for review.", color_error);
+    }
+}
+
+static int request_default_partition(struct installer_flow *flow) {
+    if (flow == NULL || flow->selected_disk == NULL
+        || partition_count(flow->selected_disk) != 0) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    enum partition_table_type table_type = flow->state.partition_plan.table_type;
+    if (table_type == PARTITION_TABLE_NONE) table_type = PARTITION_TABLE_GPT;
+    uint64_t first = 2048;
+    uint64_t last = flow->selected_disk->total_blocks - 1;
+    struct partition_table_info table;
+    if (partition_table_inspect(flow->selected_disk, &table)
+        && table.type != PARTITION_TABLE_NONE) {
+        last = table.last_usable_lba;
+    }
+    if (last < first || last - first + 1 < 4096) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    return installer_flow_request_partition_creation(flow, table_type, first,
+        last - first + 1, PARTITION_PLAN_FILESYSTEM_FAT32);
 }
 
 static int unavailable_base_os(struct installer_flow *flow, void *context) {
@@ -181,7 +250,8 @@ static int unavailable_bootloader(struct installer_flow *flow, void *context) {
     return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
 }
 
-static void draw_state(const struct installer_flow *flow, uint32_t selected) {
+static void draw_state(const struct installer_flow *flow, uint32_t selected,
+                       bool format_confirmation_pending) {
     switch (flow->state.phase) {
         case INSTALLER_FLOW_PROFILE_SELECTION: draw_profile_page(flow, selected); break;
         case INSTALLER_FLOW_GUI_SELECTION: draw_gui_page(flow); break;
@@ -192,7 +262,7 @@ static void draw_state(const struct installer_flow *flow, uint32_t selected) {
             text(UI_MARGIN + 32, UI_MARGIN + 120, "Installer stopped", color_error);
             text(UI_MARGIN + 32, UI_MARGIN + 160, "Esc or Q returns to the existing CLI.", color_muted);
             break;
-        default: draw_review_page(flow); break;
+        default: draw_review_page(flow, format_confirmation_pending); break;
     }
 }
 
@@ -201,7 +271,8 @@ bool installer_ui_run(void) {
     struct installer_flow flow;
     if (!installer_flow_init(&flow)) return false;
     uint32_t selected = 0;
-    draw_state(&flow, selected);
+    bool format_confirmation_pending = false;
+    draw_state(&flow, selected, format_confirmation_pending);
 
     for (;;) {
         char key;
@@ -209,7 +280,14 @@ bool installer_ui_run(void) {
             task_yield();
             continue;
         }
-        if (key == 27) return true;
+        if (key == 27) {
+            if (format_confirmation_pending) {
+                format_confirmation_pending = false;
+                draw_state(&flow, selected, format_confirmation_pending);
+                continue;
+            }
+            return true;
+        }
         if (key == 'j' || key == 'd' || key == '\t') {
             ++selected;
         }
@@ -241,20 +319,37 @@ bool installer_ui_run(void) {
                 selected = 0;
             }
             else if (flow.state.phase == INSTALLER_FLOW_CONFIRMATION) {
-                struct installer_engine engine = {
-                    .install_base_os = unavailable_base_os,
-                    .install_gui = unavailable_gui,
-                    .install_bootloader = unavailable_bootloader,
-                };
-                result = installer_flow_execute(&flow, &engine);
+                if (format_confirmation_pending) {
+                    result = installer_flow_format_selected_partition(&flow, true);
+                    format_confirmation_pending = false;
+                }
+                else if (flow.selected_partition == NULL) {
+                    result = installer_flow_apply_partition_creation(&flow);
+                }
+                else {
+                    struct installer_engine engine = {
+                        .install_base_os = unavailable_base_os,
+                        .install_gui = unavailable_gui,
+                        .install_bootloader = unavailable_bootloader,
+                    };
+                    result = installer_flow_execute(&flow, &engine);
+                }
             }
             if (result != INSTALLER_FLOW_OK && flow.state.phase != INSTALLER_FLOW_ERROR) {
                 flow.state.phase = INSTALLER_FLOW_ERROR;
             }
         }
+        else if (key == 'c' && flow.state.phase == INSTALLER_FLOW_PARTITION_SETUP) {
+            int result = request_default_partition(&flow);
+            if (result != INSTALLER_FLOW_OK) flow.state.phase = INSTALLER_FLOW_ERROR;
+        }
+        else if (key == 'f' && flow.state.phase == INSTALLER_FLOW_CONFIRMATION
+                 && flow.selected_partition != NULL) {
+            format_confirmation_pending = true;
+        }
         else if (key == 'q') {
             return true;
         }
-        draw_state(&flow, selected);
+        draw_state(&flow, selected, format_confirmation_pending);
     }
 }

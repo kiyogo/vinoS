@@ -46,6 +46,7 @@
 #include <kos/nvme.h>
 #include <kos/installer.h>
 #include <kos/installer_contracts.h>
+#include <kos/installer_storage.h>
 #include <kos/gui_manager.h>
 #ifdef KOS_INSTALLER
 #include <kos/installer_ui.h>
@@ -538,6 +539,7 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("gpttest");
     (void)kernel_command_execute("cachetest");
     (void)kernel_command_execute("fattest");
+    (void)kernel_command_execute("installerstoragetest");
     (void)kernel_command_execute("storagetest");
     (void)kernel_command_execute("fdisk");
     log_info("[CI SMOKE] PASS: boot, VFS, DHCP, TCP, block, FAT32 and file syscall gates completed.");
@@ -561,6 +563,7 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("gpttest");
     (void)kernel_command_execute("cachetest");
     (void)kernel_command_execute("fattest");
+    (void)kernel_command_execute("installerstoragetest");
     (void)kernel_command_execute("storagetest");
     (void)kernel_command_execute("fdisk");
     (void)kernel_command_execute("pkgtest");

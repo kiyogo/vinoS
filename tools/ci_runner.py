@@ -105,6 +105,7 @@ def checklist(label, output):
         ("TCP", "tcptest: TCP connection closed cleanly."),
         ("Storage block core", ">>> [PASS] BLOCK DEVICE SUBSYSTEM TEST PASSED <<<"),
         ("FAT32", ">>> [PASS] FAT32 FILESYSTEM ENGINE TEST PASSED <<<"),
+        ("Installer storage manager", ">>> [PASS] INSTALLER STORAGE MANAGER TEST PASSED <<<"),
         ("User-space file syscalls", ">>> [PASS] USER-SPACE FILE SYSCALL TEST PASSED <<<"),
     ]
     if label == "smoke":

@@ -116,7 +116,13 @@ static uint32_t virtio_device_count = 0;
 
 static bool virtio_blk_submit_io(struct virtio_blk_device *vdev, uint32_t type, uint64_t lba, uint32_t count, void *buffer) {
     uint64_t flags = spinlock_lock_irqsave(&vdev->lock);
+    bool has_data = type != VIRTIO_BLK_T_FLUSH;
     uint32_t byte_count = count * BLOCK_DEFAULT_SECTOR_SIZE;
+
+    if (has_data && (count == 0 || buffer == NULL)) {
+        spinlock_unlock_irqrestore(&vdev->lock, flags);
+        return false;
+    }
 
     /* Set up request header */
     vdev->req_hdr->type = type;
@@ -133,13 +139,15 @@ static bool virtio_blk_submit_io(struct virtio_blk_device *vdev, uint32_t type, 
     vdev->desc[0].addr = vdev->req_hdr_phys;
     vdev->desc[0].len = sizeof(struct virtio_blk_req_hdr);
     vdev->desc[0].flags = VRING_DESC_F_NEXT;
-    vdev->desc[0].next = 1;
+    vdev->desc[0].next = has_data ? 1 : 2;
 
-    /* Setup Descriptor 1: Data Buffer */
-    vdev->desc[1].addr = vdev->bounce_phys;
-    vdev->desc[1].len = byte_count;
-    vdev->desc[1].flags = VRING_DESC_F_NEXT | (type == VIRTIO_BLK_T_IN ? VRING_DESC_F_WRITE : 0);
-    vdev->desc[1].next = 2;
+    if (has_data) {
+        /* Setup Descriptor 1: Data Buffer.  FLUSH has no data descriptor. */
+        vdev->desc[1].addr = vdev->bounce_phys;
+        vdev->desc[1].len = byte_count;
+        vdev->desc[1].flags = VRING_DESC_F_NEXT | (type == VIRTIO_BLK_T_IN ? VRING_DESC_F_WRITE : 0);
+        vdev->desc[1].next = 2;
+    }
 
     /* Setup Descriptor 2: Status Byte */
     vdev->desc[2].addr = vdev->status_byte_phys;

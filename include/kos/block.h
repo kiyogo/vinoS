@@ -58,6 +58,7 @@ struct block_device {
     uint8_t partition_type_mbr;
     uint8_t partition_guid[16];
     bool has_guid;
+    bool bootable;
 };
 
 /* Core Block Device Subsystem */

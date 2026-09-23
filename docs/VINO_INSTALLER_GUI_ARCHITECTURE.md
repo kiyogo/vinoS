@@ -83,6 +83,23 @@ Disk and partition selection uses the existing block-device registry. Child
 partitions must belong to the selected parent disk. A machine with no real
 installable disk shows that fact and never creates a fake target.
 
+### Phase 2 storage manager
+
+`include/kos/installer_storage.h` and `kernel/installer_storage.c` expose the
+installer storage boundary. Enumeration reports the real block device,
+capacity, MBR/GPT table type, partition geometry, parent disk, and detected
+FAT32 filesystem. Partition creation and deletion reuse the existing MBR/GPT
+parser and scanner; they validate table bounds, LBA arithmetic, overlap, and
+parent ownership before writing. All destructive calls require an explicit
+confirmation flag. FAT32 formatting is currently the first supported
+filesystem operation and flushes the block cache before completing.
+
+The native UI can now create a default target partition on an empty disk,
+format an existing or newly-created target as FAT32, and show a review step
+before the write. The RAM-disk self-test covers MBR and GPT create/format/
+mount/delete flows. `tools/storage_ci.py` repeats the same manager flow on
+QEMU disk images through AHCI, VirtIO, and NVMe for both MBR and GPT images.
+
 ### Native installer UI
 
 `kernel/gui_canvas.c` provides a small framebuffer canvas and
@@ -140,10 +157,9 @@ Vino Plus installation:
    ELF entry points and all declared assets.
 2. Add a user-space display server, input/event routing, window manager, and
    GUI session lifecycle so `start/stop/restart` can launch real processes.
-3. Add the installer storage backend: partition creation/deletion, filesystem
-   formatting, base-OS file copy, persistent install metadata, and bootloader
-   installation. The backend must be transactional and preserve CLI fallback
-   when GUI installation fails.
+3. Extend the installer storage backend with base-OS file copy, persistent
+   install metadata, and bootloader installation. The backend must be
+   transactional and preserve CLI fallback when GUI installation fails.
 4. Add persistent default-GUI selection and recovery fallback policy.
 5. Add mouse/extended-input support and replace the keyboard-only installer
    navigation with pointer events once the input stack supports it.
@@ -159,10 +175,11 @@ The normal smoke gate was run after these changes and passed:
 - VFS multi-volume checks
 - DHCP and TCP checks
 - block and FAT32 checks
+- installer storage RAM-disk and QEMU MBR/GPT integration checks
 - user-space file syscall checks
 - smoke completion
 
 The installer variant should be built separately with `build --installer`.
-Until the storage and package payload backends above exist, that variant is a
-selection/validation UI and a safe explicit `NOT_IMPLEMENTED` boundary, not an
-installer that mutates a target disk.
+Until the package payload, base-OS copy, metadata, and bootloader backends
+above exist, that variant is a storage-aware selection/format UI rather than a
+complete OS installer.

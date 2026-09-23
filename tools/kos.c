@@ -33,6 +33,7 @@ static const char *const c_sources[] = {
     "kernel/process.c", "kernel/task.c", "kernel/object.c", "kernel/handle.c", "kernel/uaccess.c", "kernel/wait.c",
     "lib/asn1.c", "lib/crypto.c", "lib/kpkg.c", "lib/memory.c", "lib/x509.c",
     "kernel/pkg_db.c", "kernel/installer.c", "kernel/installer_contracts.c",
+    "kernel/installer_storage.c",
     "kernel/gui_manager.c", "kernel/installer_flow.c",
     "kernel/gui_canvas.c", "kernel/installer_ui.c",
     "kernel/qa_framework.c", "kernel/qa_fuzz.c", "kernel/qa_stress.c", "kernel/fault_injection.c",

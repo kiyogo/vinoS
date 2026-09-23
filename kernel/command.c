@@ -57,6 +57,7 @@
 #include <kos/kpkg.h>
 #include <kos/pkg_db.h>
 #include <kos/installer.h>
+#include <kos/installer_storage.h>
 #include <kos/gui_manager.h>
 #include <kos/installer_flow.h>
 #include <kos/installer_ui.h>
@@ -78,7 +79,7 @@ struct command_entry {
 
 static void command_help(const char *arguments) {
     (void)arguments;
-    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv gui installer blocktest storagetest mbrtest gpttest cachetest fattest filetest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
+    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv gui installer blocktest storagetest installerstoragetest mbrtest gpttest cachetest fattest filetest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
 }
 
 static void command_clear(const char *arguments) {
@@ -4079,6 +4080,85 @@ static void command_storagetest(const char *arguments) {
     log_info("==================================================");
 }
 
+static bool installer_storage_test_physical_disk(struct block_device *disk) {
+    struct partition_table_info table;
+    if (!partition_table_inspect(disk, &table)
+        || (table.type != PARTITION_TABLE_MBR && table.type != PARTITION_TABLE_GPT)) {
+        return false;
+    }
+
+    uint64_t start_lba = table.first_usable_lba < 2048 ? 2048 : table.first_usable_lba;
+    const uint64_t block_count = 1024;
+    for (uint32_t index = 0; index < installer_storage_partition_count(disk); ++index) {
+        struct installer_partition_info partition;
+        if (!installer_storage_partition_at(disk, index, &partition)) return false;
+        if (start_lba > UINT64_MAX - block_count) return false;
+        if (start_lba + block_count <= partition.start_lba) break;
+        if (partition.start_lba > UINT64_MAX - partition.block_count) return false;
+        uint64_t partition_end = partition.start_lba + partition.block_count;
+        if (partition_end > start_lba) start_lba = partition_end;
+    }
+    if (start_lba < table.first_usable_lba || start_lba > table.last_usable_lba
+        || block_count > table.last_usable_lba - start_lba + 1) {
+        return false;
+    }
+    if (!installer_storage_create_partition(disk, table.type, start_lba,
+                                            block_count, false, true)) {
+        return false;
+    }
+
+    struct block_device *created = NULL;
+    for (uint32_t index = 0; index < installer_storage_partition_count(disk); ++index) {
+        struct installer_partition_info partition;
+        if (installer_storage_partition_at(disk, index, &partition)
+            && partition.start_lba == start_lba && partition.block_count == block_count) {
+            created = partition.device;
+            break;
+        }
+    }
+    if (created == NULL
+        || !installer_storage_format_partition(created,
+            PARTITION_PLAN_FILESYSTEM_FAT32, true)
+        || !fat32_probe(created)
+        || !installer_storage_delete_partition(created, true)) {
+        return false;
+    }
+    return true;
+}
+
+static void command_installerstoragetest(const char *arguments) {
+    (void)arguments;
+    bool all_ok = installer_storage_self_test();
+    uint32_t physical_tested = 0;
+
+    for (uint32_t index = 0; index < block_device_count(); ++index) {
+        struct block_device *device = block_device_get_at(index);
+        if (device == NULL || device->parent != NULL
+            || (device->type != BLOCK_TYPE_AHCI && device->type != BLOCK_TYPE_VIRTIO
+                && device->type != BLOCK_TYPE_NVME)) {
+            continue;
+        }
+        struct partition_table_info table;
+        if (!partition_table_inspect(device, &table)) {
+            all_ok = false;
+            continue;
+        }
+        if (table.type == PARTITION_TABLE_NONE) continue;
+        ++physical_tested;
+        if (!installer_storage_test_physical_disk(device)) all_ok = false;
+    }
+
+    if (physical_tested == 0) {
+        log_info("[installer-storage] No QEMU/physical disk image attached; RAM disk coverage used.");
+    }
+    if (all_ok) {
+        log_info(">>> [PASS] INSTALLER STORAGE MANAGER TEST PASSED <<<");
+    }
+    else {
+        log_error(">>> [FAIL] INSTALLER STORAGE MANAGER TEST FAILED <<<");
+    }
+}
+
 static void command_mount(const char *arguments) {
     while (*arguments == ' ') arguments++;
     if (*arguments == '\0') {
@@ -5418,6 +5498,7 @@ static const struct command_entry command_registry[] = {
     { "mv", command_mv },
     { "blocktest", command_blocktest },
     { "storagetest", command_storagetest },
+    { "installerstoragetest", command_installerstoragetest },
     { "mbrtest", command_mbrtest },
     { "gpttest", command_gpttest },
     { "cachetest", command_cachetest },

@@ -25,6 +25,12 @@
 #define MBR_TYPE_LINUX_SWAP  0x82
 #define MBR_TYPE_EFI_SYSTEM  0xEF
 
+enum partition_table_type {
+    PARTITION_TABLE_NONE = 0,
+    PARTITION_TABLE_MBR,
+    PARTITION_TABLE_GPT,
+};
+
 /* MBR Partition Entry (16 bytes packed) */
 struct mbr_partition_entry {
     uint8_t boot_indicator;     /* 0x80 = active/bootable, 0x00 = inactive */
@@ -70,11 +76,43 @@ struct gpt_partition_entry {
     uint16_t name[36];          /* UTF-16LE partition name */
 } KOS_PACKED;
 
+struct partition_table_info {
+    enum partition_table_type type;
+    uint32_t partition_count;
+    uint64_t first_usable_lba;
+    uint64_t last_usable_lba;
+    uint64_t partition_entries_lba;
+    uint64_t backup_partition_entries_lba;
+    uint32_t partition_entry_count;
+    uint32_t partition_entry_size;
+};
+
+struct partition_create_request {
+    enum partition_table_type table_type;
+    uint64_t start_lba;
+    uint64_t block_count;
+    uint8_t mbr_type;
+    uint8_t type_guid[16];
+    uint8_t unique_guid[16];
+    bool bootable;
+};
+
 /* CRC32 Utility Function */
 uint32_t partition_crc32(const void *data, size_t length);
 
 /* Scan a block device for MBR or GPT partitions and register child block devices */
 uint32_t partition_scan(struct block_device *dev);
+
+/* Inspect an existing table without changing disk contents. */
+bool partition_table_inspect(const struct block_device *dev, struct partition_table_info *info);
+
+/* Rebuild registered child devices after a table mutation. */
+bool partition_rescan(struct block_device *dev);
+
+/* Confirmed, bounds-checked table mutations. */
+bool partition_table_create(const struct partition_create_request *request,
+                            struct block_device *dev, bool confirmed);
+bool partition_table_delete(struct block_device *partition, bool confirmed);
 
 /* Format helper for GUID string */
 void partition_format_guid(const uint8_t guid[16], char buffer[37]);

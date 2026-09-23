@@ -148,6 +148,7 @@ struct block_device *block_device_register(
     dev->partition_index = 0;
     dev->partition_type_mbr = 0;
     dev->has_guid = false;
+    dev->bootable = false;
 
     list_add_tail(&dev->list_node, &block_device_list);
     spinlock_unlock_irqrestore(&block_lock, flags);
@@ -218,6 +219,7 @@ struct block_device *block_partition_register(
     dev->start_lba = start_lba;
     dev->partition_index = part_index;
     dev->partition_type_mbr = part_type_mbr;
+    dev->bootable = false;
 
     if (guid != NULL) {
         kmemcpy(dev->partition_guid, guid, 16);

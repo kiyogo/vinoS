@@ -59,12 +59,24 @@ bool partition_plan_is_valid(const struct partition_plan *plan) {
     if (plan == NULL || plan->operation_count > INSTALLER_MAX_PARTITION_OPERATIONS) {
         return false;
     }
+    if (plan->table_type < PARTITION_TABLE_NONE
+        || plan->table_type > PARTITION_TABLE_GPT
+        || plan->selected_filesystem < PARTITION_PLAN_FILESYSTEM_NONE
+        || plan->selected_filesystem > PARTITION_PLAN_FILESYSTEM_FAT32) {
+        return false;
+    }
     if (plan->disk_name[0] == '\0') {
         return plan->operation_count == 0 && plan->selected_partition_name[0] == '\0';
     }
     if (plan->disk_block_size == 0 || plan->disk_total_blocks == 0) return false;
     for (uint32_t index = 0; index < plan->operation_count; ++index) {
         const struct partition_plan_operation *operation = &plan->operations[index];
+        if (operation->type < PARTITION_PLAN_SELECT_EXISTING
+            || operation->type > PARTITION_PLAN_FORMAT
+            || operation->filesystem < PARTITION_PLAN_FILESYSTEM_NONE
+            || operation->filesystem > PARTITION_PLAN_FILESYSTEM_FAT32) {
+            return false;
+        }
         if (operation->block_count == 0
             || operation->start_lba > UINT64_MAX - operation->block_count
             || operation->start_lba + operation->block_count > plan->disk_total_blocks) {
@@ -72,6 +84,19 @@ bool partition_plan_is_valid(const struct partition_plan *plan) {
         }
         if (operation->type == PARTITION_PLAN_FORMAT
             && operation->filesystem == PARTITION_PLAN_FILESYSTEM_NONE) {
+            return false;
+        }
+    }
+    bool pending_create = plan->operation_count == 1
+        && plan->operations[0].type == PARTITION_PLAN_CREATE;
+    if (plan->selected_partition_name[0] == '\0') {
+        if (!pending_create
+            && (plan->selected_start_lba != 0 || plan->selected_block_count != 0
+                || plan->selected_filesystem != PARTITION_PLAN_FILESYSTEM_NONE)) {
+            return false;
+        }
+        if (pending_create && (plan->selected_start_lba == 0
+                               || plan->selected_block_count == 0)) {
             return false;
         }
     }
@@ -111,7 +136,8 @@ void gui_session_init(struct gui_session *session, const char *gui_id) {
 }
 
 bool gui_session_is_valid(const struct gui_session *session) {
-    if (session == NULL || session->state > GUI_SESSION_FAILED) return false;
+    if (session == NULL || session->state < GUI_SESSION_STOPPED
+        || session->state > GUI_SESSION_FAILED) return false;
     if (session->state == GUI_SESSION_STOPPED) return true;
     return session->session_id != 0 && has_text(session->gui_id);
 }
@@ -124,7 +150,8 @@ void pending_gui_install_init(struct pending_gui_install *pending) {
 }
 
 bool pending_gui_install_is_valid(const struct pending_gui_install *pending) {
-    if (pending == NULL || pending->state > PENDING_GUI_CANCELLED) return false;
+    if (pending == NULL || pending->state < PENDING_GUI_NONE
+        || pending->state > PENDING_GUI_CANCELLED) return false;
     if (pending->state == PENDING_GUI_NONE) return pending->gui_id[0] == '\0';
     return has_text(pending->gui_id);
 }
@@ -141,8 +168,10 @@ void installer_state_init(struct installer_state *state) {
 }
 
 bool installer_state_is_valid(const struct installer_state *state) {
-    if (state == NULL || state->phase > INSTALLER_FLOW_ERROR
+    if (state == NULL || state->phase < INSTALLER_FLOW_WELCOME
+        || state->phase > INSTALLER_FLOW_ERROR
         || state->selected_profile_id[0] == '\0'
+        || state->transaction.state < INSTALL_TRANSACTION_NEW
         || state->transaction.state > INSTALL_TRANSACTION_FAILED
         || !partition_plan_is_valid(&state->partition_plan)
         || !pending_gui_install_is_valid(&state->pending_gui)) {

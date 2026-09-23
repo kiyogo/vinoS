@@ -129,6 +129,19 @@ int installer_flow_select_disk(struct installer_flow *flow, const char *name) {
         set_error(flow, "Install target disk was not found");
         return INSTALLER_FLOW_ERR_DISK_NOT_FOUND;
     }
+    struct installer_disk_info disk_info;
+    bool found = false;
+    for (uint32_t index = 0; index < installer_storage_disk_count(); ++index) {
+        if (installer_storage_disk_at(index, &disk_info)
+            && disk_info.device == device) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        set_error(flow, "Selected disk has an unreadable partition table");
+        return INSTALLER_FLOW_ERR_DISK_NOT_FOUND;
+    }
     flow->selected_disk = device;
     flow->selected_partition = NULL;
     partition_plan_init(&flow->state.partition_plan);
@@ -137,6 +150,7 @@ int installer_flow_select_disk(struct installer_flow *flow, const char *name) {
     flow->state.partition_plan.disk_name[sizeof(flow->state.partition_plan.disk_name) - 1] = '\0';
     flow->state.partition_plan.disk_block_size = device->block_size;
     flow->state.partition_plan.disk_total_blocks = device->total_blocks;
+    flow->state.partition_plan.table_type = disk_info.table_type;
     flow->state.phase = INSTALLER_FLOW_PARTITION_SETUP;
     log_infof("Installer: selected disk=%s capacity=%lu bytes",
               device->name, device->capacity_bytes);
@@ -152,6 +166,19 @@ int installer_flow_select_partition(struct installer_flow *flow, const char *nam
         set_error(flow, "Install target partition was not found on the selected disk");
         return INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND;
     }
+    struct installer_partition_info partition_info;
+    bool found = false;
+    for (uint32_t index = 0; index < installer_storage_partition_count(flow->selected_disk); ++index) {
+        if (installer_storage_partition_at(flow->selected_disk, index, &partition_info)
+            && partition_info.device == partition) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        set_error(flow, "Selected partition has invalid geometry");
+        return INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND;
+    }
     flow->selected_partition = partition;
     kstrncpy(flow->state.partition_plan.selected_partition_name, partition->name,
              sizeof(flow->state.partition_plan.selected_partition_name) - 1);
@@ -159,23 +186,112 @@ int installer_flow_select_partition(struct installer_flow *flow, const char *nam
         sizeof(flow->state.partition_plan.selected_partition_name) - 1] = '\0';
     flow->state.partition_plan.selected_start_lba = partition->start_lba;
     flow->state.partition_plan.selected_block_count = partition->total_blocks;
+    flow->state.partition_plan.selected_filesystem =
+        kstrcmp(partition_info.filesystem, "FAT32") == 0
+            ? PARTITION_PLAN_FILESYSTEM_FAT32 : PARTITION_PLAN_FILESYSTEM_NONE;
     flow->state.partition_plan.operation_count = 1;
     flow->state.partition_plan.operations[0] = (struct partition_plan_operation){
         .type = PARTITION_PLAN_SELECT_EXISTING,
         .partition_index = partition->partition_index,
         .start_lba = partition->start_lba,
         .block_count = partition->total_blocks,
-        .filesystem = PARTITION_PLAN_FILESYSTEM_NONE,
+        .filesystem = flow->state.partition_plan.selected_filesystem,
     };
+    flow->state.partition_plan.confirmed = false;
     flow->state.phase = INSTALLER_FLOW_CONFIRMATION;
     log_infof("Installer: selected partition=%s start_lba=%lu blocks=%lu",
               partition->name, partition->start_lba, partition->total_blocks);
     return INSTALLER_FLOW_OK;
 }
 
+int installer_flow_request_partition_creation(struct installer_flow *flow,
+                                              enum partition_table_type table_type,
+                                              uint64_t start_lba, uint64_t block_count,
+                                              enum partition_plan_filesystem filesystem) {
+    if (flow == NULL || flow->selected_disk == NULL
+        || flow->state.phase != INSTALLER_FLOW_PARTITION_SETUP
+        || (table_type != PARTITION_TABLE_MBR && table_type != PARTITION_TABLE_GPT)
+        || (filesystem != PARTITION_PLAN_FILESYSTEM_NONE
+            && filesystem != PARTITION_PLAN_FILESYSTEM_FAT32)) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    if (start_lba == 0 || block_count == 0
+        || start_lba > UINT64_MAX - block_count
+        || start_lba + block_count > flow->selected_disk->total_blocks) {
+        set_error(flow, "Requested partition range is outside the selected disk");
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    flow->selected_partition = NULL;
+    flow->state.partition_plan.table_type = table_type;
+    flow->state.partition_plan.selected_partition_name[0] = '\0';
+    flow->state.partition_plan.selected_start_lba = start_lba;
+    flow->state.partition_plan.selected_block_count = block_count;
+    flow->state.partition_plan.selected_filesystem = filesystem;
+    flow->state.partition_plan.operation_count = 1;
+    flow->state.partition_plan.operations[0] = (struct partition_plan_operation){
+        .type = PARTITION_PLAN_CREATE,
+        .start_lba = start_lba,
+        .block_count = block_count,
+        .filesystem = filesystem,
+    };
+    flow->state.partition_plan.confirmed = false;
+    flow->state.phase = INSTALLER_FLOW_CONFIRMATION;
+    return INSTALLER_FLOW_OK;
+}
+
+int installer_flow_apply_partition_creation(struct installer_flow *flow) {
+    if (flow == NULL || flow->selected_disk == NULL
+        || flow->state.phase != INSTALLER_FLOW_CONFIRMATION
+        || flow->state.partition_plan.operation_count != 1
+        || flow->state.partition_plan.operations[0].type != PARTITION_PLAN_CREATE) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    const struct partition_plan_operation operation = flow->state.partition_plan.operations[0];
+    if (!installer_storage_create_partition(flow->selected_disk,
+            flow->state.partition_plan.table_type, operation.start_lba,
+            operation.block_count, operation.bootable, true)) {
+        set_error(flow, "Partition creation failed; no install target was selected");
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+
+    struct block_device *created = NULL;
+    for (uint32_t index = 0; index < installer_storage_partition_count(flow->selected_disk); ++index) {
+        struct installer_partition_info info;
+        if (installer_storage_partition_at(flow->selected_disk, index, &info)
+            && info.start_lba == operation.start_lba
+            && info.block_count == operation.block_count) {
+            created = info.device;
+            break;
+        }
+    }
+    if (created == NULL
+        || (operation.filesystem == PARTITION_PLAN_FILESYSTEM_FAT32
+            && !installer_storage_format_partition(created,
+                PARTITION_PLAN_FILESYSTEM_FAT32, true))) {
+        set_error(flow, "Partition was created but FAT32 formatting failed");
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    int result = installer_flow_select_partition(flow, created->name);
+    if (result == INSTALLER_FLOW_OK) flow->state.partition_plan.confirmed = true;
+    return result;
+}
+
+int installer_flow_format_selected_partition(struct installer_flow *flow, bool confirmed) {
+    if (flow == NULL || flow->selected_partition == NULL
+        || flow->state.phase != INSTALLER_FLOW_CONFIRMATION
+        || !confirmed
+        || !installer_storage_format_partition(flow->selected_partition,
+            PARTITION_PLAN_FILESYSTEM_FAT32, confirmed)) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    flow->state.partition_plan.selected_filesystem = PARTITION_PLAN_FILESYSTEM_FAT32;
+    flow->state.partition_plan.operations[0].filesystem = PARTITION_PLAN_FILESYSTEM_FAT32;
+    flow->state.partition_plan.confirmed = true;
+    return INSTALLER_FLOW_OK;
+}
+
 bool installer_flow_is_valid(const struct installer_flow *flow) {
-    if (flow == NULL || flow->profile == NULL || flow->selected_disk == NULL
-        || flow->selected_partition == NULL) {
+    if (flow == NULL || flow->profile == NULL || flow->selected_disk == NULL) {
         return false;
     }
     if (!installer_state_is_valid(&flow->state)
@@ -191,6 +307,17 @@ bool installer_flow_is_valid(const struct installer_flow *flow) {
             || kstrcmp(flow->state.selected_gui_id, flow->selected_gui->id) != 0
             || !gui_manifest_is_valid(flow->selected_gui))) {
         return false;
+    }
+    if (flow->selected_disk->parent != NULL
+        || kstrcmp(flow->state.partition_plan.disk_name, flow->selected_disk->name) != 0
+        || flow->state.partition_plan.disk_block_size != flow->selected_disk->block_size
+        || flow->state.partition_plan.disk_total_blocks != flow->selected_disk->total_blocks) {
+        return false;
+    }
+    if (flow->selected_partition == NULL) {
+        return flow->state.phase == INSTALLER_FLOW_CONFIRMATION
+            && flow->state.partition_plan.operation_count == 1
+            && flow->state.partition_plan.operations[0].type == PARTITION_PLAN_CREATE;
     }
     return flow->selected_partition->parent == flow->selected_disk
         && flow->selected_partition->total_blocks != 0

@@ -372,6 +372,134 @@ bool fat32_probe(struct block_device *dev) {
     return true;
 }
 
+static bool fat32_format_geometry(uint64_t total_sectors, uint8_t *sectors_per_cluster,
+                                  uint32_t *fat_sectors, uint32_t *total_clusters) {
+    if (total_sectors <= 32 || total_sectors > UINT32_MAX
+        || sectors_per_cluster == NULL || fat_sectors == NULL || total_clusters == NULL) {
+        return false;
+    }
+
+    for (uint32_t spc = 1; spc <= 128; spc <<= 1) {
+        uint32_t fat = 1;
+        uint64_t clusters = 0;
+        for (uint32_t iteration = 0; iteration < 8; ++iteration) {
+            uint64_t data_sectors = total_sectors - 32ULL - 2ULL * fat;
+            clusters = data_sectors / spc;
+            if (clusters == 0 || clusters > 0x0FFFFFF5ULL) break;
+            uint64_t required_fat = ((clusters + 2ULL) * 4ULL + 511ULL) / 512ULL;
+            if (required_fat == fat) break;
+            if (required_fat > UINT32_MAX) {
+                clusters = 0;
+                break;
+            }
+            fat = (uint32_t)required_fat;
+        }
+        if (clusters == 0 || clusters > 0x0FFFFFF5ULL) continue;
+        uint64_t required_fat = ((clusters + 2ULL) * 4ULL + 511ULL) / 512ULL;
+        uint64_t data_start = 32ULL + 2ULL * required_fat;
+        if (required_fat == 0 || required_fat > UINT32_MAX
+            || data_start >= total_sectors
+            || data_start + clusters * spc > total_sectors) {
+            continue;
+        }
+        *sectors_per_cluster = (uint8_t)spc;
+        *fat_sectors = (uint32_t)required_fat;
+        *total_clusters = (uint32_t)clusters;
+        return true;
+    }
+    return false;
+}
+
+bool fat32_format(struct block_device *dev, const char *label) {
+    if (dev == NULL || dev->state != BLOCK_DEVICE_ONLINE
+        || dev->block_size != 512 || dev->total_blocks <= 32
+        || dev->total_blocks > UINT32_MAX) {
+        return false;
+    }
+
+    uint8_t sectors_per_cluster = 0;
+    uint32_t fat_sectors = 0;
+    uint32_t total_clusters = 0;
+    if (!fat32_format_geometry(dev->total_blocks, &sectors_per_cluster,
+                               &fat_sectors, &total_clusters)) {
+        return false;
+    }
+
+    (void)block_cache_flush_device(dev);
+    block_cache_invalidate_device(dev);
+
+    uint8_t boot_sector[512];
+    kmemset(boot_sector, 0, sizeof(boot_sector));
+    struct fat32_bpb *bpb = (struct fat32_bpb *)boot_sector;
+    bpb->jmp_boot[0] = 0xEB;
+    bpb->jmp_boot[1] = 0x58;
+    bpb->jmp_boot[2] = 0x90;
+    kmemcpy(bpb->oem_name, "VINO OS ", 8);
+    bpb->bytes_per_sector = 512;
+    bpb->sectors_per_cluster = sectors_per_cluster;
+    bpb->reserved_sector_count = 32;
+    bpb->num_fats = 2;
+    bpb->media = 0xF8;
+    bpb->sectors_per_track = 63;
+    bpb->num_heads = 255;
+    bpb->total_sectors_32 = (uint32_t)dev->total_blocks;
+    bpb->fat_size_32 = fat_sectors;
+    bpb->root_cluster = 2;
+    bpb->fs_info_sector = 1;
+    bpb->backup_boot_sector = 6;
+    bpb->drive_number = 0x80;
+    bpb->boot_signature = 0x29;
+    bpb->volume_id = (uint32_t)dev->total_blocks ^ 0x56494E4FU;
+    kmemset(bpb->volume_label, ' ', sizeof(bpb->volume_label));
+    if (label != NULL) {
+        for (uint32_t index = 0; index < sizeof(bpb->volume_label) && label[index] != '\0'; ++index) {
+            bpb->volume_label[index] = label[index];
+        }
+    }
+    kmemcpy(bpb->fs_type, "FAT32   ", 8);
+    boot_sector[510] = 0x55;
+    boot_sector[511] = 0xAA;
+    if (!block_write(dev, 0, 1, boot_sector)) return false;
+
+    uint8_t fsinfo_sector[512];
+    kmemset(fsinfo_sector, 0, sizeof(fsinfo_sector));
+    struct fat32_fsinfo *fsinfo = (struct fat32_fsinfo *)fsinfo_sector;
+    fsinfo->lead_sig = 0x41615252;
+    fsinfo->struct_sig = 0x61417272;
+    fsinfo->free_count = total_clusters > 0 ? total_clusters - 1 : 0xFFFFFFFFU;
+    fsinfo->next_free = 3;
+    fsinfo->trail_sig = 0xAA550000;
+    if (!block_write(dev, 1, 1, fsinfo_sector)
+        || !block_write(dev, 6, 1, boot_sector)
+        || !block_write(dev, 7, 1, fsinfo_sector)) {
+        return false;
+    }
+
+    uint8_t zero_sector[512];
+    kmemset(zero_sector, 0, sizeof(zero_sector));
+    uint8_t fat_sector[512];
+    kmemset(fat_sector, 0, sizeof(fat_sector));
+    uint32_t *fat_entries = (uint32_t *)fat_sector;
+    fat_entries[0] = 0x0FFFFFF8;
+    fat_entries[1] = FAT32_CLUSTER_END;
+    fat_entries[2] = FAT32_CLUSTER_END;
+
+    uint64_t fat_start = 32;
+    for (uint32_t fat_index = 0; fat_index < 2; ++fat_index) {
+        uint64_t fat_lba = fat_start + (uint64_t)fat_index * fat_sectors;
+        for (uint32_t sector = 0; sector < fat_sectors; ++sector) {
+            const uint8_t *data = sector == 0 ? fat_sector : zero_sector;
+            if (!block_write(dev, fat_lba + sector, 1, data)) return false;
+        }
+    }
+
+    uint64_t cluster_start = fat_start + 2ULL * fat_sectors;
+    for (uint32_t sector = 0; sector < sectors_per_cluster; ++sector) {
+        if (!block_write(dev, cluster_start + sector, 1, zero_sector)) return false;
+    }
+    return block_flush(dev);
+}
+
 static void fat32_refresh_cached_files_locked(struct fat32_volume *vol);
 
 struct fat32_volume *fat32_mount(struct block_device *dev) {

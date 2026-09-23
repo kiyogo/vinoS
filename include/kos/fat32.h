@@ -100,6 +100,7 @@ struct fat32_volume;
 
 /* Volume Management & Lifecycle */
 bool fat32_probe(struct block_device *dev);
+bool fat32_format(struct block_device *dev, const char *label);
 struct fat32_volume *fat32_mount(struct block_device *dev);
 bool fat32_unmount(struct fat32_volume *vol);
 

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <kos/block.h>
+#include <kos/partition.h>
 
 /* Vino CLI and Vino Plus are installer profiles, never OS editions. */
 #define VINO_OS_EDITION_DEFAULT "default"
@@ -107,6 +108,7 @@ struct partition_plan {
     char disk_name[BLOCK_NAME_MAX];
     uint64_t disk_block_size;
     uint64_t disk_total_blocks;
+    enum partition_table_type table_type;
     uint32_t operation_count;
     struct partition_plan_operation operations[INSTALLER_MAX_PARTITION_OPERATIONS];
     char selected_partition_name[BLOCK_NAME_MAX];

@@ -5,6 +5,7 @@
 #include <stdint.h>
 
 #include <kos/installer_contracts.h>
+#include <kos/installer_storage.h>
 #include <kos/gui_manager.h>
 
 struct installer_flow {
@@ -31,6 +32,12 @@ int installer_flow_select_profile(struct installer_flow *flow, const char *id);
 int installer_flow_select_gui(struct installer_flow *flow, const char *id);
 int installer_flow_select_disk(struct installer_flow *flow, const char *name);
 int installer_flow_select_partition(struct installer_flow *flow, const char *name);
+int installer_flow_request_partition_creation(struct installer_flow *flow,
+                                              enum partition_table_type table_type,
+                                              uint64_t start_lba, uint64_t block_count,
+                                              enum partition_plan_filesystem filesystem);
+int installer_flow_apply_partition_creation(struct installer_flow *flow);
+int installer_flow_format_selected_partition(struct installer_flow *flow, bool confirmed);
 int installer_flow_next(struct installer_flow *flow);
 int installer_flow_back(struct installer_flow *flow);
 bool installer_flow_is_valid(const struct installer_flow *flow);
