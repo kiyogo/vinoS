@@ -68,23 +68,38 @@ def version_code(version: str) -> int:
 
 def compile_entry(clang: str, linker: str, source: Path, output: Path, name: str) -> bytes:
     output.parent.mkdir(parents=True, exist_ok=True)
-    object_path = output.with_suffix(".o")
-    compile_command = [
-        clang,
-        "--target=x86_64-unknown-none-elf",
-        "-std=c17",
-        "-O2",
-        "-ffreestanding",
-        "-fno-stack-protector",
-        "-fno-pic",
-        "-fno-pie",
-        f'-DGUI_PACKAGE_NAME="{name}"',
-        "-c",
-        str(source),
-        "-o",
-        str(object_path),
+    object_paths = []
+    sources = [
+        source,
+        ROOT / "user" / "lib" / "gui.c",
+        ROOT / "user" / "lib" / "widgets.c",
+        ROOT / "user" / "lib" / "memory.c",
     ]
-    subprocess.run(compile_command, cwd=ROOT, check=True)
+    for index, input_source in enumerate(sources):
+        object_path = output.with_name(f"{output.stem}.{index}.o")
+        compile_command = [
+            clang,
+            "--target=x86_64-unknown-none-elf",
+            "-std=c17",
+            "-O2",
+            "-ffreestanding",
+            "-fno-stack-protector",
+            "-fno-pic",
+            "-fno-pie",
+            "-fno-builtin",
+            "-mno-mmx",
+            "-mno-sse",
+            "-mno-80387",
+            "-Iinclude",
+            "-Iuser/include",
+            f'-DGUI_PACKAGE_NAME="{name}"',
+            "-c",
+            str(input_source),
+            "-o",
+            str(object_path),
+        ]
+        subprocess.run(compile_command, cwd=ROOT, check=True)
+        object_paths.append(str(object_path))
     subprocess.run([
         linker,
         "-static",
@@ -92,7 +107,7 @@ def compile_entry(clang: str, linker: str, source: Path, output: Path, name: str
         "_start",
         "-o",
         str(output),
-        str(object_path),
+        *object_paths,
     ], cwd=ROOT, check=True)
     data = output.read_bytes()
     if len(data) < 64 or data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:

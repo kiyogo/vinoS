@@ -35,7 +35,8 @@ static const char *const c_sources[] = {
     "kernel/pkg_db.c", "kernel/installer.c", "kernel/installer_contracts.c",
     "kernel/installer_storage.c", "kernel/installer_engine.c",
     "kernel/gui_manager.c", "kernel/installer_flow.c",
-    "kernel/gui_canvas.c", "kernel/installer_ui.c",
+    "kernel/gui_canvas.c", "kernel/gui_service.c", "kernel/installer_service.c",
+    "kernel/installer_ui.c",
     "kernel/qa_framework.c", "kernel/qa_fuzz.c", "kernel/qa_stress.c", "kernel/fault_injection.c",
     "net/arp.c", "net/dhcp.c", "net/dns.c", "net/ethernet.c", "net/http.c", "net/httpd.c", "net/icmp.c",
     "net/ipv4.c", "net/net_device.c", "net/socket.c", "net/socket_subsystem.c", "net/tcp.c", "net/tls.c",
@@ -238,6 +239,7 @@ static int make_initramfs(void) {
     unsigned char *mvp_package = NULL;
     unsigned char *default_checksum = NULL;
     unsigned char *mvp_checksum = NULL;
+    unsigned char *installer_app = NULL;
     unsigned char *bootx64 = NULL;
     size_t readme_size = 0;
     size_t kernel_size = 0;
@@ -245,6 +247,7 @@ static int make_initramfs(void) {
     size_t mvp_package_size = 0;
     size_t default_checksum_size = 0;
     size_t mvp_checksum_size = 0;
+    size_t installer_app_size = 0;
     size_t bootx64_size = 0;
     size_t offset = 0;
     FILE *archive;
@@ -257,6 +260,8 @@ static int make_initramfs(void) {
                    &default_checksum_size) ||
         !read_file("build/gui-packages/MVP.KPKG.SHA256", &mvp_checksum,
                    &mvp_checksum_size) ||
+        !read_file("build/user-apps/installer.elf", &installer_app,
+                   &installer_app_size) ||
         !read_file("third_party/limine-binary/BOOTX64.EFI", &bootx64, &bootx64_size)) {
         goto cleanup;
     }
@@ -273,6 +278,8 @@ static int make_initramfs(void) {
                     default_checksum_size, 0100644U) ||
         !cpio_entry(archive, &offset, "GUI/MVP.KPKG.SHA256", mvp_checksum,
                     mvp_checksum_size, 0100644U) ||
+        !cpio_entry(archive, &offset, "SYSTEM/GUI/INSTALLER.ELF", installer_app,
+                    installer_app_size, 0100755U) ||
         !cpio_entry(archive, &offset, "EFI/BOOT/BOOTX64.EFI", bootx64,
                     bootx64_size, 0100644U) ||
         !cpio_entry(archive, &offset, "TRAILER!!!", NULL, 0U, 0U)) {
@@ -288,6 +295,7 @@ cleanup:
     free(mvp_package);
     free(default_checksum);
     free(mvp_checksum);
+    free(installer_app);
     free(bootx64);
     if (result != 0) {
         return fail("could not create build/initramfs.cpio");
@@ -492,7 +500,9 @@ static int build_kernel(bool kernel_only, bool panic_test, bool ci_smoke, bool i
     if (!command_exists("python") && !command_exists("py")) {
         return fail("Python 3 is required to build the Vino GUI KPKG packages");
     }
-    if (execute_format("%s tools/build_gui_packages.py --clang \"%s\" --lld \"%s\" --output build/gui-packages",
+    if (execute_format("%s tools/build_user_apps.py --clang \"%s\" --lld \"%s\" --output build/user-apps",
+                       python_command, clang_command(), lld_command()) != 0 ||
+        execute_format("%s tools/build_gui_packages.py --clang \"%s\" --lld \"%s\" --output build/gui-packages",
                        python_command, clang_command(), lld_command()) != 0 ||
         make_initramfs() != 0 ||
         !copy_file("third_party/limine-binary/BOOTX64.EFI", "build/esp/EFI/BOOT/BOOTX64.EFI") ||

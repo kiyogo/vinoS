@@ -4,7 +4,9 @@
 
 #include <kos/console.h>
 #include <kos/file.h>
+#include <kos/gui_service.h>
 #include <kos/handle.h>
+#include <kos/installer_service.h>
 #include <kos/keyboard.h>
 #include <kos/log.h>
 #include <kos/memory.h>
@@ -511,6 +513,15 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
             return (uint64_t)ret;
         }
 
+        case SYS_gui_display:
+            return gui_service_display(arg0, arg1);
+
+        case SYS_gui_input:
+            return gui_service_input(arg0);
+
+        case SYS_installer:
+            return installer_service_dispatch(arg0, arg1);
+
         default:
             return (uint64_t)-ENOSYS;
     }
@@ -549,6 +560,9 @@ const char *kos_syscall_name(uint64_t number) {
         case SYS_rename:   return "rename";
         case SYS_gettime:  return "gettime";
         case SYS_sysinfo:  return "sysinfo";
+        case SYS_gui_display: return "gui_display";
+        case SYS_gui_input: return "gui_input";
+        case SYS_installer: return "installer";
         default:           return "unknown";
     }
 }

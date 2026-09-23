@@ -17,6 +17,7 @@ enum gui_manager_status {
     GUI_MANAGER_ERR_NOT_IMPLEMENTED = -7,
     GUI_MANAGER_ERR_INTEGRITY = -8,
     GUI_MANAGER_ERR_AUTH = -9,
+    GUI_MANAGER_ERR_BUSY = -10,
 };
 
 bool gui_manager_init(void);

@@ -5415,7 +5415,8 @@ static void command_installer(const char *arguments) {
         return;
     }
     if (kstrcmp(operation, "ui") == 0) {
-        if (!installer_ui_run()) log_error("installer ui: framebuffer or input is unavailable");
+        if (!installer_ui_run())
+            log_error("installer ui: user-space app could not start or exited with an error");
         return;
     }
     log_info("Usage: installer [profiles|disks|ui]");

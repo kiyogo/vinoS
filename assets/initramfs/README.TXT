@@ -6,3 +6,8 @@ Vino GUI packages included in this installer/recovery initramfs:
   GUI/MVP.KPKG      - MVP recovery GUI package (x86_64)
 Each package embeds its manifest and file-ownership/checksum metadata; detached
 SHA-256 sidecars are stored alongside the packages.
+
+User-space components:
+  SYSTEM/GUI/INSTALLER.ELF - installer UI; disk changes are requested from the
+  privileged installer engine and never performed directly by the UI.
+  Display/input operations are provided by kernel services through UAPI syscalls.

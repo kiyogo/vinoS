@@ -6,8 +6,10 @@
 #include <kos/log.h>
 #include <kos/memory.h>
 #include <kos/pkg_db.h>
+#include <kos/process.h>
 #include <kos/vfs.h>
 #include <kos/volume.h>
+#include <uapi/kos/syscall_numbers.h>
 
 static const struct gui_manifest gui_registry[] = {
     {
@@ -46,6 +48,35 @@ static const struct gui_manifest gui_registry[] = {
 
 static bool manager_initialized;
 static char default_gui_id[GUI_MAX_ID_LENGTH];
+static struct gui_session active_gui_session;
+static struct process *active_gui_process;
+static char active_gui_entry_path[GUI_MAX_PATH_LENGTH];
+static uint32_t next_gui_session_id = 1;
+
+static bool find_installed_vino_volume(char *letter_out);
+
+static void gui_process_entry(void *argument) {
+    const char *path = (const char *)argument;
+    int result = process_exec(path, 0, 0);
+    struct process *process = process_get_current();
+    if (process != 0 && process->pid > 1) process_exit(process, result);
+    thread_exit(result);
+}
+
+static bool resolve_gui_entry_path(const struct gui_manifest *manifest,
+                                   char *path, uint64_t capacity) {
+    if (manifest == 0 || path == 0 || capacity == 0) return false;
+    char volume = 0;
+    int written;
+    if (find_installed_vino_volume(&volume)) {
+        written = snprintf(path, capacity, "%c:/VINO/%s/%s", volume,
+                           manifest->install_root, manifest->entry_point);
+    } else {
+        written = snprintf(path, capacity, "D:/%s/%s", manifest->install_root,
+                           manifest->entry_point);
+    }
+    return written > 0 && (uint64_t)written < capacity;
+}
 
 struct gui_memory_reader {
     const uint8_t *data;
@@ -241,6 +272,8 @@ bool gui_manager_init(void) {
     }
     manager_initialized = true;
     default_gui_id[0] = '\0';
+    active_gui_process = 0;
+    gui_session_init(&active_gui_session, "");
     log_info("GUI Manager: manifest registry initialized (Vino OS edition=default).");
     return true;
 }
@@ -335,25 +368,89 @@ int gui_reinstall(const char *id) {
 }
 
 int gui_start(const char *id) {
+    const struct gui_manifest *manifest = find_manifest(id);
+    if (manifest == 0) return GUI_MANAGER_ERR_NOT_FOUND;
     if (!gui_is_installed(id)) {
         return GUI_MANAGER_ERR_NOT_INSTALLED;
     }
-    /* Process/display-session ownership is intentionally outside the kernel registry. */
-    return GUI_MANAGER_ERR_NOT_IMPLEMENTED;
+    if (active_gui_process != 0) {
+        if (active_gui_process->state == PROCESS_STATE_ACTIVE)
+            return kstrcmp(active_gui_session.gui_id, id) == 0
+                ? GUI_MANAGER_OK : GUI_MANAGER_ERR_BUSY;
+        int exit_code = active_gui_process->exit_code;
+        if (process_wait(active_gui_process, 0, 0)) active_gui_process = 0;
+        active_gui_session.state = exit_code == 0 ? GUI_SESSION_STOPPED : GUI_SESSION_CRASHED;
+        active_gui_session.last_error = exit_code;
+    }
+    if (!resolve_gui_entry_path(manifest, active_gui_entry_path,
+                                sizeof(active_gui_entry_path))) return GUI_MANAGER_ERR_IO;
+
+    struct process *process = process_create("vino-gui-session");
+    if (process == 0) return GUI_MANAGER_ERR_IO;
+    gui_session_init(&active_gui_session, id);
+    active_gui_session.session_id = next_gui_session_id++;
+    if (active_gui_session.session_id == 0)
+        active_gui_session.session_id = next_gui_session_id++;
+    active_gui_session.process_id = (uint32_t)process->pid;
+    active_gui_session.state = GUI_SESSION_STARTING;
+    if (thread_create(process, gui_process_entry, active_gui_entry_path,
+                      "gui-session") == 0) {
+        process_exit(process, -ENOMEM);
+        (void)process_wait(process, 0, 0);
+        active_gui_session.state = GUI_SESSION_FAILED;
+        active_gui_session.last_error = -ENOMEM;
+        return GUI_MANAGER_ERR_IO;
+    }
+    active_gui_process = process;
+    active_gui_session.state = GUI_SESSION_RUNNING;
+    log_infof("GUI session %u: started '%s' in process %u",
+              active_gui_session.session_id, id, active_gui_session.process_id);
+
+    int exit_code = 0;
+    if (!process_wait(process, &exit_code, UINT64_MAX)) {
+        active_gui_session.state = GUI_SESSION_FAILED;
+        active_gui_session.last_error = -EIO;
+        return GUI_MANAGER_ERR_IO;
+    }
+    active_gui_process = 0;
+    active_gui_session.state = exit_code == 0 ? GUI_SESSION_STOPPED : GUI_SESSION_CRASHED;
+    active_gui_session.last_error = exit_code;
+    if (exit_code != 0) {
+        log_errorf("GUI session '%s' exited with %d", id, exit_code);
+        return GUI_MANAGER_ERR_IO;
+    }
+    log_infof("GUI session '%s' stopped; CLI remains available", id);
+    return GUI_MANAGER_OK;
 }
 
 int gui_stop(const char *id) {
     if (!gui_is_installed(id)) {
         return GUI_MANAGER_ERR_NOT_INSTALLED;
     }
-    return GUI_MANAGER_ERR_NOT_IMPLEMENTED;
+    if (active_gui_process == 0 || kstrcmp(active_gui_session.gui_id, id) != 0)
+        return GUI_MANAGER_ERR_NOT_FOUND;
+    if (active_gui_process->state == PROCESS_STATE_ACTIVE) {
+        active_gui_session.state = GUI_SESSION_STOPPING;
+        process_exit(active_gui_process, 0);
+    }
+    int exit_code = 0;
+    if (!process_wait(active_gui_process, &exit_code, UINT64_MAX))
+        return GUI_MANAGER_ERR_IO;
+    active_gui_process = 0;
+    active_gui_session.state = GUI_SESSION_STOPPED;
+    active_gui_session.last_error = 0;
+    return GUI_MANAGER_OK;
 }
 
 int gui_restart(const char *id) {
     if (!gui_is_installed(id)) {
         return GUI_MANAGER_ERR_NOT_INSTALLED;
     }
-    return GUI_MANAGER_ERR_NOT_IMPLEMENTED;
+    if (active_gui_process != 0 && kstrcmp(active_gui_session.gui_id, id) == 0) {
+        int stopped = gui_stop(id);
+        if (stopped != GUI_MANAGER_OK) return stopped;
+    }
+    return gui_start(id);
 }
 
 int gui_set_default(const char *id) {
@@ -385,6 +482,7 @@ const char *gui_manager_status_string(int status) {
         case GUI_MANAGER_ERR_NOT_IMPLEMENTED: return "GUI process/session backend is not implemented";
         case GUI_MANAGER_ERR_INTEGRITY: return "GUI package SHA-256 verification failed";
         case GUI_MANAGER_ERR_AUTH: return "GUI package signature verification failed";
+        case GUI_MANAGER_ERR_BUSY: return "Another GUI session owns the display";
         default: return "Unknown GUI manager status";
     }
 }

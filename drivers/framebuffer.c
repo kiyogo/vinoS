@@ -76,6 +76,10 @@ uint64_t framebuffer_height(void) {
     return framebuffer.height;
 }
 
+uint64_t framebuffer_pitch(void) {
+    return framebuffer.pitch;
+}
+
 uint64_t framebuffer_virtual_address(void) {
     return (uint64_t)framebuffer.address;
 }

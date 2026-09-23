@@ -36,6 +36,9 @@
 #define SYS_mkdir       32
 #define SYS_getdents    33
 #define SYS_rename      34
+#define SYS_gui_display 35
+#define SYS_gui_input   36
+#define SYS_installer   37
 
 #define KOS_MAX_SYSCALL_NR 64
 
