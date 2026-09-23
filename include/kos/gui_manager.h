@@ -15,6 +15,8 @@ enum gui_manager_status {
     GUI_MANAGER_ERR_PACKAGE_MISSING = -5,
     GUI_MANAGER_ERR_IO = -6,
     GUI_MANAGER_ERR_NOT_IMPLEMENTED = -7,
+    GUI_MANAGER_ERR_INTEGRITY = -8,
+    GUI_MANAGER_ERR_AUTH = -9,
 };
 
 bool gui_manager_init(void);

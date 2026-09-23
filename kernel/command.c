@@ -79,7 +79,7 @@ struct command_entry {
 
 static void command_help(const char *arguments) {
     (void)arguments;
-    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv gui installer blocktest storagetest installerstoragetest mbrtest gpttest cachetest fattest filetest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
+    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv gui vino installer blocktest storagetest installerstoragetest mbrtest gpttest cachetest fattest filetest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
 }
 
 static void command_clear(const char *arguments) {
@@ -5379,6 +5379,16 @@ static void command_gui(const char *arguments) {
     else log_errorf("gui %s %s: %s", operation, id, gui_manager_status_string(status));
 }
 
+static void command_vino(const char *arguments) {
+    char component[24];
+    const char *cursor = command_next_token(arguments, component, sizeof(component));
+    if (cursor == NULL || kstrcmp(component, "gui") != 0) {
+        log_info("Usage: vino gui [list|installed|available|install|remove|reinstall|start|stop|restart|set-default|get-default|status] <id>");
+        return;
+    }
+    command_gui(cursor);
+}
+
 static void command_installer(const char *arguments) {
     char operation[24];
     const char *cursor = command_next_token(arguments, operation, sizeof(operation));
@@ -5469,6 +5479,7 @@ static const struct command_entry command_registry[] = {
     { "x509test", command_x509test },
     { "tlstest", command_tlstest },
     { "gui", command_gui },
+    { "vino", command_vino },
     { "installer", command_installer },
     { "nslookup", command_nslookup },
     { "curl", command_curl },

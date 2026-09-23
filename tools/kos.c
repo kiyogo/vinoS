@@ -234,21 +234,29 @@ static bool cpio_entry(FILE *archive, size_t *offset, const char *name,
 static int make_initramfs(void) {
     unsigned char *readme = NULL;
     unsigned char *kernel = NULL;
-    unsigned char *default_manifest = NULL;
-    unsigned char *mvp_manifest = NULL;
+    unsigned char *default_package = NULL;
+    unsigned char *mvp_package = NULL;
+    unsigned char *default_checksum = NULL;
+    unsigned char *mvp_checksum = NULL;
     unsigned char *bootx64 = NULL;
     size_t readme_size = 0;
     size_t kernel_size = 0;
-    size_t default_manifest_size = 0;
-    size_t mvp_manifest_size = 0;
+    size_t default_package_size = 0;
+    size_t mvp_package_size = 0;
+    size_t default_checksum_size = 0;
+    size_t mvp_checksum_size = 0;
     size_t bootx64_size = 0;
     size_t offset = 0;
     FILE *archive;
     int result = 1;
     if (!read_file("assets/initramfs/README.TXT", &readme, &readme_size) ||
         !read_file("build/kos.elf", &kernel, &kernel_size) ||
-        !read_file("assets/gui/DEFAULT.MANIFEST", &default_manifest, &default_manifest_size) ||
-        !read_file("assets/gui/MVP.MANIFEST", &mvp_manifest, &mvp_manifest_size) ||
+        !read_file("build/gui-packages/DEFAULT.KPKG", &default_package, &default_package_size) ||
+        !read_file("build/gui-packages/MVP.KPKG", &mvp_package, &mvp_package_size) ||
+        !read_file("build/gui-packages/DEFAULT.KPKG.SHA256", &default_checksum,
+                   &default_checksum_size) ||
+        !read_file("build/gui-packages/MVP.KPKG.SHA256", &mvp_checksum,
+                   &mvp_checksum_size) ||
         !read_file("third_party/limine-binary/BOOTX64.EFI", &bootx64, &bootx64_size)) {
         goto cleanup;
     }
@@ -257,10 +265,14 @@ static int make_initramfs(void) {
     }
     if (!cpio_entry(archive, &offset, "README.TXT", readme, readme_size, 0100644U) ||
         !cpio_entry(archive, &offset, "KOS.ELF", kernel, kernel_size, 0100644U) ||
-        !cpio_entry(archive, &offset, "GUI/DEFAULT.MANIFEST", default_manifest,
-                    default_manifest_size, 0100644U) ||
-        !cpio_entry(archive, &offset, "GUI/MVP.MANIFEST", mvp_manifest,
-                    mvp_manifest_size, 0100644U) ||
+        !cpio_entry(archive, &offset, "GUI/DEFAULT.KPKG", default_package,
+                    default_package_size, 0100644U) ||
+        !cpio_entry(archive, &offset, "GUI/MVP.KPKG", mvp_package,
+                    mvp_package_size, 0100644U) ||
+        !cpio_entry(archive, &offset, "GUI/DEFAULT.KPKG.SHA256", default_checksum,
+                    default_checksum_size, 0100644U) ||
+        !cpio_entry(archive, &offset, "GUI/MVP.KPKG.SHA256", mvp_checksum,
+                    mvp_checksum_size, 0100644U) ||
         !cpio_entry(archive, &offset, "EFI/BOOT/BOOTX64.EFI", bootx64,
                     bootx64_size, 0100644U) ||
         !cpio_entry(archive, &offset, "TRAILER!!!", NULL, 0U, 0U)) {
@@ -272,8 +284,10 @@ static int make_initramfs(void) {
 cleanup:
     free(readme);
     free(kernel);
-    free(default_manifest);
-    free(mvp_manifest);
+    free(default_package);
+    free(mvp_package);
+    free(default_checksum);
+    free(mvp_checksum);
     free(bootx64);
     if (result != 0) {
         return fail("could not create build/initramfs.cpio");
@@ -474,7 +488,13 @@ static int build_kernel(bool kernel_only, bool panic_test, bool ci_smoke, bool i
     if (!file_exists("third_party/limine-binary/BOOTX64.EFI")) {
         return fail("Limine UEFI binary is absent; run bootstrap-limine");
     }
-    if (make_initramfs() != 0 ||
+    const char *python_command = command_exists("python") ? "python" : "py -3";
+    if (!command_exists("python") && !command_exists("py")) {
+        return fail("Python 3 is required to build the Vino GUI KPKG packages");
+    }
+    if (execute_format("%s tools/build_gui_packages.py --clang \"%s\" --lld \"%s\" --output build/gui-packages",
+                       python_command, clang_command(), lld_command()) != 0 ||
+        make_initramfs() != 0 ||
         !copy_file("third_party/limine-binary/BOOTX64.EFI", "build/esp/EFI/BOOT/BOOTX64.EFI") ||
         !copy_file("boot/limine.conf", "build/esp/EFI/BOOT/limine.conf") ||
         !copy_file("build/kos.elf", "build/esp/boot/kos.elf") ||

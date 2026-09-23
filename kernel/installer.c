@@ -43,10 +43,10 @@ static bool ensure_vfs_file_parent(const char *file_path) {
     return ensure_vfs_directory_tree(parent);
 }
 
-static bool ensure_app_data_directory(const char *data_root, const char *app_id) {
+static bool ensure_app_data_directory(const char *data_path) {
     char marker_path[KPKG_MAX_PATH_LEN];
-    if (data_root == NULL || app_id == NULL
-        || snprintf(marker_path, sizeof(marker_path), "%s/%s/.keep", data_root, app_id)
+    if (data_path == NULL || data_path[0] == '\0'
+        || snprintf(marker_path, sizeof(marker_path), "%s/.keep", data_path)
             >= (int)sizeof(marker_path)) {
         return false;
     }
@@ -112,25 +112,40 @@ int installer_install(struct kpkg_reader reader, const struct installer_options 
         && opts->target_root[0] != '\0' ? opts->target_root : INSTALLER_BASE_DIR;
     const char *data_root = opts != NULL && opts->target_data_root != NULL
         && opts->target_data_root[0] != '\0' ? opts->target_data_root : INSTALLER_DATA_DIR;
+    bool has_install_override = opts != NULL && opts->target_install_path != NULL
+        && opts->target_install_path[0] != '\0';
+    bool has_data_override = opts != NULL && opts->target_data_path != NULL
+        && opts->target_data_path[0] != '\0';
     char install_path[KPKG_MAX_PATH_LEN];
     char data_path[KPKG_MAX_PATH_LEN];
-    if (snprintf(install_path, sizeof(install_path), "%s/%s", install_root,
-                 pkg.manifest.app_id) >= (int)sizeof(install_path)
-        || snprintf(data_path, sizeof(data_path), "%s/%s", data_root,
-                    pkg.manifest.app_id) >= (int)sizeof(data_path)) {
+    int install_path_size = has_install_override
+        ? snprintf(install_path, sizeof(install_path), "%s", opts->target_install_path)
+        : snprintf(install_path, sizeof(install_path), "%s/%s", install_root,
+                   pkg.manifest.app_id);
+    int data_path_size = has_data_override
+        ? snprintf(data_path, sizeof(data_path), "%s", opts->target_data_path)
+        : snprintf(data_path, sizeof(data_path), "%s/%s", data_root,
+                   pkg.manifest.app_id);
+    if (install_path_size <= 0 || (uint64_t)install_path_size >= sizeof(install_path)
+        || data_path_size <= 0 || (uint64_t)data_path_size >= sizeof(data_path)) {
         kpkg_close(&pkg);
         return INSTALLER_ERR_INVALID_MANIFEST;
     }
 
     /* Phase 1: STAGING */
     char stage_prefix[KPKG_MAX_PATH_LEN];
-    if (snprintf(stage_prefix, sizeof(stage_prefix), "%s/.staging_%s", install_root,
-                 pkg.manifest.app_id) >= (int)sizeof(stage_prefix)) {
+    int stage_path_size = has_install_override
+        ? snprintf(stage_prefix, sizeof(stage_prefix), "%s.staging", install_path)
+        : snprintf(stage_prefix, sizeof(stage_prefix), "%s/.staging_%s", install_root,
+                   pkg.manifest.app_id);
+    if (stage_path_size <= 0 || (uint64_t)stage_path_size >= sizeof(stage_prefix)) {
         kpkg_close(&pkg);
         return INSTALLER_ERR_INVALID_MANIFEST;
     }
 
-    bool stage_ok = ensure_vfs_directory_tree(install_root)
+    bool stage_ok = (has_install_override
+            ? ensure_vfs_file_parent(stage_prefix)
+            : ensure_vfs_directory_tree(install_root))
         && ensure_vfs_directory_tree(stage_prefix);
     for (uint32_t i = 0; i < pkg.file_count; i++) {
         uint8_t *file_data = NULL;
@@ -204,7 +219,7 @@ int installer_install(struct kpkg_reader reader, const struct installer_options 
     }
 
     /* Phase 3: Create private data area */
-    if (!ensure_app_data_directory(data_root, pkg.manifest.app_id)) {
+    if (!ensure_app_data_directory(data_path)) {
         for (uint32_t i = 0; i < pkg.file_count; i++) {
             char target_file_path[KPKG_MAX_PATH_LEN];
             snprintf(target_file_path, sizeof(target_file_path), "%s/%s", install_path,
@@ -266,13 +281,28 @@ int installer_update(struct kpkg_reader reader, const struct installer_options *
     }
 
     char install_path[KPKG_MAX_PATH_LEN];
+    char data_path[KPKG_MAX_PATH_LEN];
     char backup_prefix[KPKG_MAX_PATH_LEN];
     char stage_prefix[KPKG_MAX_PATH_LEN];
-    snprintf(install_path, sizeof(install_path), "%s/%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
-    snprintf(backup_prefix, sizeof(backup_prefix), "%s/.backup_%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
-    snprintf(stage_prefix, sizeof(stage_prefix), "%s/.staging_%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
+    const char *requested_install_path = opts != NULL
+            && opts->target_install_path != NULL && opts->target_install_path[0] != '\0'
+        ? opts->target_install_path : existing->install_path;
+    const char *requested_data_path = opts != NULL
+            && opts->target_data_path != NULL && opts->target_data_path[0] != '\0'
+        ? opts->target_data_path : existing->data_path;
+    int install_path_size = snprintf(install_path, sizeof(install_path), "%s",
+                                     requested_install_path);
+    int data_path_size = snprintf(data_path, sizeof(data_path), "%s", requested_data_path);
+    int backup_path_size = snprintf(backup_prefix, sizeof(backup_prefix), "%s.backup",
+                                    install_path);
+    int stage_path_size = snprintf(stage_prefix, sizeof(stage_prefix), "%s.staging",
+                                   install_path);
 
-    if (!ensure_vfs_directory_tree(INSTALLER_BASE_DIR)
+    if (install_path_size <= 0 || (uint64_t)install_path_size >= sizeof(install_path)
+        || data_path_size <= 0 || (uint64_t)data_path_size >= sizeof(data_path)
+        || backup_path_size <= 0 || (uint64_t)backup_path_size >= sizeof(backup_prefix)
+        || stage_path_size <= 0 || (uint64_t)stage_path_size >= sizeof(stage_prefix)
+        || !ensure_vfs_file_parent(stage_prefix)
         || !ensure_vfs_directory_tree(backup_prefix)
         || !ensure_vfs_directory_tree(stage_prefix)) {
         kpkg_close(&pkg);
@@ -360,7 +390,8 @@ int installer_update(struct kpkg_reader reader, const struct installer_options *
 
     /* 4. Update Package Database */
     struct pkg_record *rec = NULL;
-    pkg_db_register(&pkg.manifest, install_path, existing->data_path, pkg.files, pkg.file_count, &rec);
+    pkg_db_register(&pkg.manifest, install_path, data_path, pkg.files,
+                    pkg.file_count, &rec);
 
     /* 5. Clean backup files */
     for (uint32_t f = 0; f < existing->file_count; f++) {
@@ -378,6 +409,12 @@ int installer_uninstall(const char *app_id, bool keep_data) {
     if (rec == NULL) {
         return INSTALLER_ERR_NOT_FOUND;
     }
+    char install_path[KPKG_MAX_PATH_LEN];
+    char data_path[KPKG_MAX_PATH_LEN];
+    kstrncpy(install_path, rec->install_path, sizeof(install_path) - 1);
+    install_path[sizeof(install_path) - 1] = '\0';
+    kstrncpy(data_path, rec->data_path, sizeof(data_path) - 1);
+    data_path[sizeof(data_path) - 1] = '\0';
 
     /* Unlink every file recorded for this package before unregistering it. */
     for (uint32_t f = 0; f < rec->file_count; f++) {
@@ -392,8 +429,6 @@ int installer_uninstall(const char *app_id, bool keep_data) {
     }
 
     /* Remove empty package directories from deepest path back to the package root. */
-    char install_path[KPKG_MAX_PATH_LEN];
-    snprintf(install_path, sizeof(install_path), "%s/%s", INSTALLER_BASE_DIR, app_id);
     for (uint32_t f = 0; f < rec->file_count; f++) {
         uint32_t f_idx = rec->file_indices[f];
         const struct pkg_file_record *file = pkg_db_file_at(f_idx);
@@ -417,11 +452,12 @@ int installer_uninstall(const char *app_id, bool keep_data) {
     (void)vfs_unlink_file(install_path);
 
     /* If not keeping data, remove data directory */
-    if (!keep_data) {
+    if (!keep_data && data_path[0] != '\0') {
         char marker_path[KPKG_MAX_PATH_LEN];
-        char data_path[KPKG_MAX_PATH_LEN];
-        snprintf(marker_path, sizeof(marker_path), "%s/%s/.keep", INSTALLER_DATA_DIR, app_id);
-        snprintf(data_path, sizeof(data_path), "%s/%s", INSTALLER_DATA_DIR, app_id);
+        if (snprintf(marker_path, sizeof(marker_path), "%s/.keep", data_path)
+            >= (int)sizeof(marker_path)) {
+            return INSTALLER_ERR_IO;
+        }
         vfs_unlink_file(marker_path);
         vfs_unlink_file(data_path);
     }

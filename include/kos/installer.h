@@ -34,6 +34,9 @@ struct installer_options {
     /* Optional VFS roots for installing a package onto an OS install volume. */
     const char *target_root;
     const char *target_data_root;
+    /* Optional exact package paths, used for named system namespaces. */
+    const char *target_install_path;
+    const char *target_data_path;
 };
 
 /* Installer Lifecycle & Operations */

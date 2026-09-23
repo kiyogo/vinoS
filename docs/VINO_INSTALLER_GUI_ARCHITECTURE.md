@@ -27,12 +27,16 @@ the manager API. The registry currently contains:
 | `default` | Default | local ISO | yes | no |
 | `mvp` | MVP | local ISO | no | yes |
 
-The descriptors are also staged into the initramfs as
-`C:/GUI/DEFAULT.MANIFEST` and `C:/GUI/MVP.MANIFEST` (the initramfs path is
-`GUI/*.MANIFEST`). The manager checks the package path through the real VFS and
-passes a real KPKG reader to the existing installer. Therefore `gui install`
-returns `GUI_MANAGER_ERR_PACKAGE_MISSING` until a valid `DEFAULT.KPKG` or
-`MVP.KPKG` payload is added to the ISO.
+The generated packages and detached checksums are staged into the same
+initramfs included by the bootable ISO and recovery media:
+`C:/GUI/{DEFAULT,MVP}.KPKG` and `.KPKG.SHA256`. Each package embeds its manifest;
+the build-time descriptors are not separate runtime files. The existing KPKG
+installer validates each member hash and records package ownership. Both
+packages declare an x86-64 ELF entry point, version, architecture, and isolated
+`/system/gui/<id>` namespace. A detached whole-package SHA-256 is checked before
+installation. Packages currently declare `signature_type=none` because this
+repository has no signing key; checksums provide integrity, not publisher
+authenticity.
 
 The CLI commands are:
 
@@ -48,6 +52,7 @@ gui stop <id>
 gui restart <id>
 gui set-default <id>
 gui status <id>
+vino gui install <id>
 ```
 
 Install/remove/reinstall are wired to the package database and transactional
@@ -114,14 +119,15 @@ file by reading it back. `VINO/SYSTEM/OS.META`, including
 `os_edition=default` and `install_state=committed`, is written last and read
 back before the base OS transaction is accepted.
 
-The build includes Limine's x86-64 UEFI application in the installer initramfs.
+The build includes Limine's x86-64 UEFI application and both generated GUI
+packages in the installer initramfs.
 `install_bootloader()` writes it and a Vino OS Limine configuration to
-`EFI/BOOT`, then verifies their checksums. The GUI package installer can target
-the installed system's `VINO/SYSTEM/Apps` and `VINO/SYSTEM/Data` trees. If the
-selected local package is absent, the installer reports the GUI failure while
-leaving the already installed CLI system bootable. The current media contains
-the GUI manifests but not `DEFAULT.KPKG`, so Vino Plus GUI installation still
-requires that package payload.
+`EFI/BOOT`, then verifies their checksums. The GUI package installer targets
+`VINO/SYSTEM/GUI/<id>` and stores package data under
+`VINO/SYSTEM/GUI/DATA/<id>` on the installed system volume. Outside a
+persistent installed volume, packages use the equivalent `D:/system/gui`
+namespace. Missing or checksum-invalid packages fail without reporting a
+successful install; the installed CLI remains bootable.
 
 ### Native installer UI
 
@@ -184,8 +190,8 @@ native Vino GUI implementation.
 The following pieces still need real implementation before claiming a complete
 Vino Plus installation:
 
-1. Build and sign actual `DEFAULT.KPKG` and recovery `MVP.KPKG` payloads with
-   ELF entry points and all declared assets.
+1. Add a release signing key and signature verification policy; current package
+   payloads are unsigned and carry SHA-256 integrity metadata only.
 2. Add a user-space display server, input/event routing, window manager, and
    GUI session lifecycle so `start/stop/restart` can launch real processes.
 3. Load the selected GUI package from persistent metadata during normal OS

@@ -675,6 +675,14 @@ int install_gui(struct installer_flow *flow, const struct gui_manifest *gui,
         log_errorf("[installer] GUI '%s' is pending; remote transport is unavailable.", gui->id);
         return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
     }
+    if (!gui_manifest_package_available(gui)) {
+        set_pending_gui(flow, gui, PENDING_GUI_FAILED,
+                        "The selected GUI package is missing or failed SHA-256 verification.",
+                        INSTALLER_FLOW_ERR_NOT_IMPLEMENTED);
+        log_errorf("[installer] GUI package is missing or has an invalid checksum: %s",
+                   gui->package_path);
+        return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
+    }
 
     const uint8_t *package_data = NULL;
     uint64_t package_size = 0;
@@ -696,17 +704,24 @@ int install_gui(struct installer_flow *flow, const struct gui_manifest *gui,
         .read = gui_package_read,
         .get_size = gui_package_size,
     };
-    char target_root[VFS_MAX_PATH];
+    char target_install_path[VFS_MAX_PATH];
     char target_data_root[VFS_MAX_PATH];
-    if (!make_volume_root(target_root, sizeof(target_root), volume,
-                          "VINO/SYSTEM/Apps")
+    char target_data_path[VFS_MAX_PATH];
+    if (!make_volume_root(target_install_path, sizeof(target_install_path), volume,
+                          gui->install_root)
         || !make_volume_root(target_data_root, sizeof(target_data_root), volume,
-                             "VINO/SYSTEM/Data")) {
+                             "VINO/SYSTEM/GUI/DATA")) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    int target_data_path_size = snprintf(target_data_path, sizeof(target_data_path),
+                                         "%s/%s", target_data_root, gui->id);
+    if (target_data_path_size <= 0
+        || (uint64_t)target_data_path_size >= sizeof(target_data_path)) {
         return INSTALLER_FLOW_ERR_INVALID_STATE;
     }
     struct installer_options options = {
-        .target_root = target_root,
-        .target_data_root = target_data_root,
+        .target_install_path = target_install_path,
+        .target_data_path = target_data_path,
     };
     int result = installer_install(reader, &options);
     if (result != INSTALLER_OK) {
