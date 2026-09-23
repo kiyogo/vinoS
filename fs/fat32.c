@@ -290,7 +290,7 @@ static bool fat32_lookup_path(
     const char *path,
     struct fat32_lookup_result *result
 ) {
-    if (path == NULL || *path == '\0') {
+    if (path == NULL) {
         return false;
     }
 
@@ -1026,6 +1026,8 @@ static void fat32_scan_files_recursive(struct fat32_volume *vol, uint32_t dir_cl
                         cf->vfs_f.path = cf->path;
                         cf->vfs_f.data = NULL;
                         cf->vfs_f.size = cf->size;
+                        cf->vfs_f.type = VFS_NODE_FILE;
+                        cf->vfs_f.attributes = de->attr;
                         cf->valid = true;
                     }
                 }
@@ -1049,31 +1051,28 @@ static void fat32_refresh_cached_files_locked(struct fat32_volume *vol) {
     fat32_scan_files_recursive(vol, vol->root_cluster, "");
 }
 
-/* VFS backend adapter methods */
-static struct fat32_volume *g_active_vfs_vol = NULL;
-
-static bool fat32_vfs_read_file(const char *path, const uint8_t **data, uint64_t *size) {
-    if (g_active_vfs_vol == NULL) return false;
-    return fat32_read_file(g_active_vfs_vol, path, data, size);
+/* VFS backend adapter methods. Each mounted FAT32 volume carries its own context. */
+static bool fat32_vfs_read_file(void *context, const char *path, const uint8_t **data, uint64_t *size) {
+    return fat32_read_file((struct fat32_volume *)context, path, data, size);
 }
 
-static bool fat32_vfs_write_file(const char *path, const uint8_t *data, uint64_t size) {
-    if (g_active_vfs_vol == NULL) return false;
-    return fat32_write_file(g_active_vfs_vol, path, data, size);
+static bool fat32_vfs_write_file(void *context, const char *path, const uint8_t *data, uint64_t size) {
+    return fat32_write_file((struct fat32_volume *)context, path, data, size);
 }
 
-static uint64_t fat32_vfs_file_count(void) {
-    if (g_active_vfs_vol == NULL) return 0;
-    return g_active_vfs_vol->cached_file_count;
+static uint64_t fat32_vfs_file_count(void *context) {
+    struct fat32_volume *vol = (struct fat32_volume *)context;
+    return vol == NULL || !vol->mounted ? 0 : vol->cached_file_count;
 }
 
-static const struct vfs_file *fat32_vfs_file_at(uint64_t index) {
-    if (g_active_vfs_vol == NULL || index >= g_active_vfs_vol->cached_file_count) return NULL;
-    struct fat32_cached_file *cf = &g_active_vfs_vol->cached_files[index];
+static const struct vfs_file *fat32_vfs_file_at(void *context, uint64_t index) {
+    struct fat32_volume *vol = (struct fat32_volume *)context;
+    if (vol == NULL || !vol->mounted || index >= vol->cached_file_count) return NULL;
+    struct fat32_cached_file *cf = &vol->cached_files[index];
     if (cf->data == NULL && cf->size > 0) {
         const uint8_t *d = NULL;
         uint64_t s = 0;
-        if (fat32_read_file(g_active_vfs_vol, cf->path, &d, &s)) {
+        if (fat32_read_file(vol, cf->path, &d, &s)) {
             cf->data = (uint8_t *)d;
             cf->vfs_f.data = d;
         }
@@ -1081,18 +1080,66 @@ static const struct vfs_file *fat32_vfs_file_at(uint64_t index) {
     return &cf->vfs_f;
 }
 
-static bool fat32_vfs_unlink_file(const char *path) {
-    if (g_active_vfs_vol == NULL) return false;
-    return fat32_unlink_file(g_active_vfs_vol, path);
+static bool fat32_vfs_unlink_file(void *context, const char *path) {
+    struct fat32_volume *vol = (struct fat32_volume *)context;
+    return fat32_unlink_file(vol, path) || fat32_rmdir(vol, path);
+}
+
+static bool fat32_vfs_mkdir(void *context, const char *path) {
+    return fat32_mkdir((struct fat32_volume *)context, path);
+}
+
+struct fat32_readdir_bridge {
+    vfs_readdir_callback callback;
+    void *user_arg;
+};
+
+static void fat32_vfs_readdir_callback(const char *name, uint64_t size, uint8_t attr, void *user_arg) {
+    struct fat32_readdir_bridge *bridge = (struct fat32_readdir_bridge *)user_arg;
+    struct vfs_dir_entry entry = {0};
+    kstrncpy(entry.name, name, sizeof(entry.name) - 1);
+    entry.size = size;
+    entry.type = (attr & FAT_ATTR_DIRECTORY) ? VFS_NODE_DIRECTORY : VFS_NODE_FILE;
+    entry.attributes = attr;
+    bridge->callback(&entry, bridge->user_arg);
+}
+
+static bool fat32_vfs_readdir(void *context, const char *path, vfs_readdir_callback callback, void *user_arg) {
+    if (callback == NULL) return false;
+    struct fat32_readdir_bridge bridge = { .callback = callback, .user_arg = user_arg };
+    return fat32_readdir((struct fat32_volume *)context, path, fat32_vfs_readdir_callback, &bridge);
+}
+
+static bool fat32_vfs_rename(void *context, const char *old_path, const char *new_path) {
+    return fat32_rename((struct fat32_volume *)context, old_path, new_path);
+}
+
+static bool fat32_vfs_stat(void *context, const char *path, struct vfs_metadata *metadata) {
+    struct fat32_volume *vol = (struct fat32_volume *)context;
+    if (vol == NULL || !vol->mounted || path == NULL || metadata == NULL) return false;
+    uint64_t flags = spinlock_lock_irqsave(&vol->lock);
+    struct fat32_lookup_result result;
+    bool found = fat32_lookup_path(vol, path, &result);
+    if (found) {
+        metadata->type = (result.entry.attr & FAT_ATTR_DIRECTORY) ? VFS_NODE_DIRECTORY : VFS_NODE_FILE;
+        metadata->size = result.entry.file_size;
+        metadata->attributes = result.entry.attr;
+    }
+    spinlock_unlock_irqrestore(&vol->lock, flags);
+    return found;
 }
 
 const struct vfs_backend *fat32_get_vfs_backend(struct fat32_volume *vol) {
     if (vol == NULL) return NULL;
-    g_active_vfs_vol = vol;
+    vol->backend.context = vol;
     vol->backend.read_file = fat32_vfs_read_file;
     vol->backend.write_file = fat32_vfs_write_file;
     vol->backend.file_count = fat32_vfs_file_count;
     vol->backend.file_at = fat32_vfs_file_at;
     vol->backend.unlink_file = fat32_vfs_unlink_file;
+    vol->backend.mkdir = fat32_vfs_mkdir;
+    vol->backend.readdir = fat32_vfs_readdir;
+    vol->backend.rename = fat32_vfs_rename;
+    vol->backend.stat = fat32_vfs_stat;
     return &vol->backend;
 }

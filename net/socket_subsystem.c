@@ -156,8 +156,10 @@ int kos_bind(struct socket *sock, const struct sockaddr *addr, uint32_t addrlen)
     uint16_t port = ntohs(sin->sin_port);
 
     uint64_t flags = spinlock_lock_irqsave(&sock->lock);
-    sock->local_endpoint.address = ip;
-    sock->local_endpoint.port = port;
+    if (sock->state != SS_UNCONNECTED) {
+        spinlock_unlock_irqrestore(&sock->lock, flags);
+        return -EINVAL;
+    }
 
     if (sock->type == SOCK_DGRAM) {
         struct net_ipv4_endpoint ep = { .address = ip, .port = port };
@@ -166,6 +168,9 @@ int kos_bind(struct socket *sock, const struct sockaddr *addr, uint32_t addrlen)
             return -EADDRINUSE;
         }
     }
+
+    sock->local_endpoint.address = ip;
+    sock->local_endpoint.port = port;
 
     spinlock_unlock_irqrestore(&sock->lock, flags);
     return 0;
@@ -177,6 +182,10 @@ int kos_listen(struct socket *sock, int backlog) {
     }
 
     uint64_t flags = spinlock_lock_irqsave(&sock->lock);
+    if (sock->state != SS_UNCONNECTED) {
+        spinlock_unlock_irqrestore(&sock->lock, flags);
+        return -EINVAL;
+    }
     if (sock->local_endpoint.port == 0) {
         spinlock_unlock_irqrestore(&sock->lock, flags);
         return -EINVAL;
@@ -233,6 +242,7 @@ int kos_accept(struct socket *sock, struct sockaddr *addr, uint32_t *addrlen, st
     client->type = sock->type;
     client->protocol = sock->protocol;
     client->state = SS_CONNECTED;
+    client->nonblocking = sock->nonblocking;
     client->transport_handle = child_tcp;
     client->remote_endpoint = remote_ep;
     client->local_endpoint = sock->local_endpoint;
@@ -263,6 +273,10 @@ int kos_connect(struct socket *sock, const struct sockaddr *addr, uint32_t addrl
     uint16_t port = ntohs(sin->sin_port);
 
     uint64_t flags = spinlock_lock_irqsave(&sock->lock);
+    if (sock->state != SS_UNCONNECTED) {
+        spinlock_unlock_irqrestore(&sock->lock, flags);
+        return sock->state == SS_CONNECTING ? -EALREADY : -EISCONN;
+    }
     sock->remote_endpoint.address = ip;
     sock->remote_endpoint.port = port;
 
@@ -327,6 +341,10 @@ int kos_recv(struct socket *sock, void *buf, size_t len, int flags) {
     if (sock->type == SOCK_STREAM) {
         if (sock->state != SS_CONNECTED || sock->transport_handle < 0) {
             return -ENOTCONN;
+        }
+        if ((sock->nonblocking || (flags & MSG_DONTWAIT))
+                && !net_tcp_has_data(sock->transport_handle)) {
+            return -EAGAIN;
         }
         int recvd = tcp_receive(sock->transport_handle, (uint8_t *)buf, len);
         if (recvd < 0) {
@@ -457,6 +475,16 @@ int kos_getsockopt(struct socket *sock, int level, int optname, void *optval, ui
             *(int *)optval = sock->broadcast ? 1 : 0;
             *optlen = sizeof(int);
             return 0;
+        case SO_RCVTIMEO:
+            if (*optlen < sizeof(uint32_t)) return -EINVAL;
+            *(uint32_t *)optval = sock->rcvtimeo_ms;
+            *optlen = sizeof(uint32_t);
+            return 0;
+        case SO_SNDTIMEO:
+            if (*optlen < sizeof(uint32_t)) return -EINVAL;
+            *(uint32_t *)optval = sock->sndtimeo_ms;
+            *optlen = sizeof(uint32_t);
+            return 0;
         case SO_ERROR:
             if (*optlen < sizeof(int)) return -EINVAL;
             *(int *)optval = sock->last_error;
@@ -476,24 +504,42 @@ int kos_setsockopt(struct socket *sock, int level, int optname, const void *optv
     }
 
     if (level == SOL_SOCKET) {
+        uint64_t flags = spinlock_lock_irqsave(&sock->lock);
         switch (optname) {
         case SO_REUSEADDR:
-            if (optlen < sizeof(int)) return -EINVAL;
+            if (optlen < sizeof(int)) {
+                spinlock_unlock_irqrestore(&sock->lock, flags);
+                return -EINVAL;
+            }
             sock->reuse_addr = (*(const int *)optval != 0);
+            spinlock_unlock_irqrestore(&sock->lock, flags);
             return 0;
         case SO_BROADCAST:
-            if (optlen < sizeof(int)) return -EINVAL;
+            if (optlen < sizeof(int)) {
+                spinlock_unlock_irqrestore(&sock->lock, flags);
+                return -EINVAL;
+            }
             sock->broadcast = (*(const int *)optval != 0);
+            spinlock_unlock_irqrestore(&sock->lock, flags);
             return 0;
         case SO_RCVTIMEO:
-            if (optlen < sizeof(uint32_t)) return -EINVAL;
+            if (optlen < sizeof(uint32_t)) {
+                spinlock_unlock_irqrestore(&sock->lock, flags);
+                return -EINVAL;
+            }
             sock->rcvtimeo_ms = *(const uint32_t *)optval;
+            spinlock_unlock_irqrestore(&sock->lock, flags);
             return 0;
         case SO_SNDTIMEO:
-            if (optlen < sizeof(uint32_t)) return -EINVAL;
+            if (optlen < sizeof(uint32_t)) {
+                spinlock_unlock_irqrestore(&sock->lock, flags);
+                return -EINVAL;
+            }
             sock->sndtimeo_ms = *(const uint32_t *)optval;
+            spinlock_unlock_irqrestore(&sock->lock, flags);
             return 0;
         default:
+            spinlock_unlock_irqrestore(&sock->lock, flags);
             return -ENOPROTOOPT;
         }
     }
@@ -512,34 +558,40 @@ int kos_poll(struct socket *sock, uint32_t events, uint32_t *revents) {
             ready |= POLLOUT;
         }
         if (events & POLLIN) {
-            uint8_t peek_buf[1];
-            struct net_ipv4_endpoint ep;
-            uint64_t actual = 0;
-            if (net_udp_recvfrom((uint16_t)sock->transport_handle, &ep, peek_buf, 0, &actual)) {
+            if (net_udp_has_data((uint16_t)sock->transport_handle)) {
                 ready |= POLLIN;
             }
         }
     }
     else if (sock->type == SOCK_STREAM) {
         if (sock->state == SS_CONNECTED) {
+            struct net_tcp_socket_info info;
+            bool transport_alive = net_tcp_socket_info_at(sock->transport_handle, &info);
+            if (!transport_alive) {
+                ready |= POLLERR | POLLHUP;
+            }
             if (events & POLLOUT) {
-                ready |= POLLOUT;
+                if (transport_alive && info.state == TCP_STATE_ESTABLISHED) {
+                    ready |= POLLOUT;
+                }
             }
             if (events & POLLIN) {
-                struct net_tcp_socket_info info[1];
-                if (net_tcp_get_sockets(info, 1) > 0 && info[0].rx_buffered_bytes > 0) {
+                if (transport_alive && net_tcp_has_data(sock->transport_handle)) {
                     ready |= POLLIN;
                 }
             }
+            if (transport_alive && info.state == TCP_STATE_CLOSE_WAIT && info.rx_buffered_bytes == 0) {
+                ready |= POLLHUP;
+            }
         }
         else if (sock->state == SS_LISTENING) {
-            if (events & POLLIN) {
+            if ((events & POLLIN) && net_tcp_listener_pending(sock->transport_handle)) {
                 ready |= POLLIN;
             }
         }
     }
 
-    *revents = ready & events;
+    *revents = (ready & events) | (ready & (POLLERR | POLLHUP | POLLNVAL));
     return 0;
 }
 
@@ -588,6 +640,13 @@ bool socket_self_test(void) {
         return false;
     }
 
+    uint32_t revents = 0;
+    if (kos_poll(receiver, POLLIN, &revents) != 0 || (revents & POLLIN) == 0) {
+        kos_close(sender);
+        kos_close(receiver);
+        return false;
+    }
+
     char recv_buf[64] = { 0 };
     struct sockaddr_in from_addr;
     uint32_t from_len = sizeof(from_addr);
@@ -626,6 +685,23 @@ bool socket_self_test(void) {
         return false;
     }
 
+    uint32_t timeout_ms = 125;
+    if (kos_setsockopt(nb_sock, SOL_SOCKET, SO_RCVTIMEO, &timeout_ms, sizeof(timeout_ms)) != 0) {
+        kos_close(nb_sock);
+        kos_close(sender);
+        kos_close(receiver);
+        return false;
+    }
+    uint32_t configured_timeout = 0;
+    uint32_t configured_timeout_len = sizeof(configured_timeout);
+    if (kos_getsockopt(nb_sock, SOL_SOCKET, SO_RCVTIMEO, &configured_timeout,
+            &configured_timeout_len) != 0 || configured_timeout != timeout_ms) {
+        kos_close(nb_sock);
+        kos_close(sender);
+        kos_close(receiver);
+        return false;
+    }
+
     char dummy[16];
     int nb_res = kos_recv(nb_sock, dummy, sizeof(dummy), 0);
     if (nb_res != -EAGAIN) {
@@ -647,7 +723,7 @@ bool socket_self_test(void) {
     socket_unref(nb_sock);
 
     /* Test 4: Poll readiness */
-    uint32_t revents = 0;
+    revents = 0;
     if (kos_poll(sender, POLLOUT, &revents) != 0 || (revents & POLLOUT) == 0) {
         kos_close(nb_sock);
         kos_close(sender);

@@ -6,7 +6,9 @@
 #include <kos/cpu.h>
 #include <kos/heap.h>
 #include <kos/log.h>
+#include <kos/memory.h>
 #include <kos/nvme.h>
+#include <kos/partition.h>
 #include <kos/pci.h>
 #include <kos/pmm.h>
 #include <kos/timer.h>
@@ -179,7 +181,8 @@ static bool init_nvme_controller(struct nvme_controller *ctrl, const struct pci_
     ctrl->num_namespaces = *(const uint32_t *)&id_buf[516];
     if (ctrl->num_namespaces == 0) ctrl->num_namespaces = 1;
 
-    log_infof("NVMe: Model: '%s' | Serial: '%s' | Firmware: '%s' | Namespaces: %u",
+    log_infof("[storage][nvme] Detected controller %u:%u.%u: model '%s', serial '%s', firmware '%s', namespaces %u",
+              pci->bus, pci->device, pci->function,
               ctrl->model_number, ctrl->serial_number, ctrl->firmware_rev, (unsigned)ctrl->num_namespaces);
 
     /* 6. Create I/O Completion Queue (Admin Opcode 0x03) */
@@ -239,6 +242,9 @@ static bool init_nvme_controller(struct nvme_controller *ctrl, const struct pci_
 
     if (nsze == 0) nsze = 2097152; /* Fallback: 1GB */
 
+    /* Partition probing issues I/O immediately after registration. */
+    ctrl->initialized = true;
+
     if (g_namespace_count < NVME_MAX_NAMESPACES) {
         struct nvme_namespace *ns = &g_namespaces[g_namespace_count++];
         ns->controller = ctrl;
@@ -256,12 +262,16 @@ static bool init_nvme_controller(struct nvme_controller *ctrl, const struct pci_
 
         ns->bdev = block_device_register("nvme0n1", BLOCK_TYPE_NVME, lba_size, nsze, &nvme_ops, ns);
         if (ns->bdev != 0) {
-            log_infof("NVMe: Registered block device 'nvme0n1' (%lu MB, %lu blocks of %u B)",
+            log_infof("[storage][nvme] Registered %s (%lu MiB, %lu blocks of %u B)", ns->bdev->name,
                       (unsigned long)(ns->capacity_bytes / (1024 * 1024)), (unsigned long)nsze, (unsigned)lba_size);
+            uint32_t partitions = partition_scan(ns->bdev);
+            log_infof("[storage][nvme] %s partition scan completed: %u child partition(s)",
+                      ns->bdev->name, partitions);
+        } else {
+            log_error("[storage][nvme] Failed to register namespace block device");
         }
     }
 
-    ctrl->initialized = true;
     return true;
 }
 
@@ -287,83 +297,58 @@ bool nvme_initialize(void) {
     return true;
 }
 
-bool nvme_read_blocks(struct block_device *dev, uint64_t lba, uint32_t count, void *buffer) {
+static bool nvme_transfer_blocks(struct block_device *dev, uint64_t lba, uint32_t count,
+                                 void *buffer, bool write) {
     if (dev == 0 || buffer == 0 || count == 0) return false;
     struct nvme_namespace *ns = (struct nvme_namespace *)dev->private_data;
     if (ns == 0 || ns->controller == 0 || !ns->controller->initialized) return false;
-
-    uint64_t dma_phys = vmm_virtual_to_physical(buffer);
-    bool use_temp = false;
-    uint64_t temp_phys = 0;
-    void *temp_virt = 0;
-
-    if (dma_phys == 0) {
-        temp_phys = pmm_allocate_frame();
-        if (temp_phys == 0) return false;
-        temp_virt = vmm_physical_to_virtual(temp_phys);
-        dma_phys = temp_phys;
-        use_temp = true;
+    if (lba >= ns->total_blocks || count > ns->total_blocks - lba ||
+        ns->block_size == 0 || ns->block_size > KOS_PAGE_SIZE) {
+        return false;
     }
 
-    struct nvme_sqe read_cmd = {
-        .opcode = NVME_NVM_OP_READ,
-        .nsid = ns->nsid,
-        .prp1 = dma_phys,
-        .cdw10 = (uint32_t)lba,
-        .cdw11 = (uint32_t)(lba >> 32),
-        .cdw12 = (count - 1) & 0xFFFF,
-    };
+    /* A command with only PRP1 must not cross a page boundary. */
+    uint32_t max_blocks = (uint32_t)(KOS_PAGE_SIZE / ns->block_size);
+    uint64_t dma_phys = pmm_allocate_frame();
+    if (dma_phys == 0) return false;
+    uint8_t *dma_virt = (uint8_t *)vmm_physical_to_virtual(dma_phys);
+    uint8_t *data = (uint8_t *)buffer;
+    bool ok = dma_virt != 0;
 
-    bool ok = nvme_submit_cmd(&ns->controller->io_queue, &read_cmd, 0);
-    if (ok && use_temp) {
-        uint64_t bytes = (uint64_t)count * ns->block_size;
-        uint8_t *dst = (uint8_t *)buffer;
-        uint8_t *src = (uint8_t *)temp_virt;
-        for (uint64_t i = 0; i < bytes; ++i) dst[i] = src[i];
+    while (ok && count > 0) {
+        uint32_t chunk = count > max_blocks ? max_blocks : count;
+        uint64_t bytes = (uint64_t)chunk * ns->block_size;
+        if (write) {
+            kmemcpy(dma_virt, data, bytes);
+        }
+
+        struct nvme_sqe command = {
+            .opcode = write ? NVME_NVM_OP_WRITE : NVME_NVM_OP_READ,
+            .nsid = ns->nsid,
+            .prp1 = dma_phys,
+            .cdw10 = (uint32_t)lba,
+            .cdw11 = (uint32_t)(lba >> 32),
+            .cdw12 = (chunk - 1) & 0xFFFF,
+        };
+        ok = nvme_submit_cmd(&ns->controller->io_queue, &command, 0);
+        if (ok && !write) {
+            kmemcpy(data, dma_virt, bytes);
+        }
+        data += bytes;
+        lba += chunk;
+        count -= chunk;
     }
 
-    if (use_temp) {
-        pmm_free_frame(temp_phys);
-    }
+    pmm_free_frame(dma_phys);
     return ok;
 }
 
+bool nvme_read_blocks(struct block_device *dev, uint64_t lba, uint32_t count, void *buffer) {
+    return nvme_transfer_blocks(dev, lba, count, buffer, false);
+}
+
 bool nvme_write_blocks(struct block_device *dev, uint64_t lba, uint32_t count, const void *buffer) {
-    if (dev == 0 || buffer == 0 || count == 0) return false;
-    struct nvme_namespace *ns = (struct nvme_namespace *)dev->private_data;
-    if (ns == 0 || ns->controller == 0 || !ns->controller->initialized) return false;
-
-    uint64_t dma_phys = vmm_virtual_to_physical(buffer);
-    bool use_temp = false;
-    uint64_t temp_phys = 0;
-    void *temp_virt = 0;
-
-    if (dma_phys == 0) {
-        temp_phys = pmm_allocate_frame();
-        if (temp_phys == 0) return false;
-        temp_virt = vmm_physical_to_virtual(temp_phys);
-        uint64_t bytes = (uint64_t)count * ns->block_size;
-        uint8_t *dst = (uint8_t *)temp_virt;
-        const uint8_t *src = (const uint8_t *)buffer;
-        for (uint64_t i = 0; i < bytes; ++i) dst[i] = src[i];
-        dma_phys = temp_phys;
-        use_temp = true;
-    }
-
-    struct nvme_sqe write_cmd = {
-        .opcode = NVME_NVM_OP_WRITE,
-        .nsid = ns->nsid,
-        .prp1 = dma_phys,
-        .cdw10 = (uint32_t)lba,
-        .cdw11 = (uint32_t)(lba >> 32),
-        .cdw12 = (count - 1) & 0xFFFF,
-    };
-
-    bool ok = nvme_submit_cmd(&ns->controller->io_queue, &write_cmd, 0);
-    if (use_temp) {
-        pmm_free_frame(temp_phys);
-    }
-    return ok;
+    return nvme_transfer_blocks(dev, lba, count, (void *)buffer, true);
 }
 
 bool nvme_flush(struct block_device *dev) {

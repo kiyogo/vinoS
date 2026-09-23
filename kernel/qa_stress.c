@@ -38,6 +38,7 @@ bool qa_stress_process_lifecycle(uint32_t iterations) {
 
     enum { WORKERS = 4 };
     static struct stress_worker_ctx ctxs[WORKERS];
+    uint64_t reaped_before = reaper_reaped_count();
 
     for (int w = 0; w < WORKERS; w++) {
         ctxs[w].iterations = iterations;
@@ -65,7 +66,18 @@ bool qa_stress_process_lifecycle(uint32_t iterations) {
         return false;
     }
 
+    /* Let the dedicated reaper release every worker stack before the snapshot. */
+    uint64_t reap_deadline = timer_get_ticks() + timer_ms_to_ticks(1000);
+    while (reaper_reaped_count() < reaped_before + WORKERS
+           && timer_get_ticks() < reap_deadline) {
+        task_reap_terminated();
+        task_yield();
+    }
     task_reap_terminated();
+    if (reaper_reaped_count() < reaped_before + WORKERS) {
+        log_error("  [FAIL] Thread reaper did not reclaim every stress worker.");
+        return false;
+    }
     log_infof("  [PASS] %d concurrent threads completed %u iterations each.", WORKERS, iterations);
     return true;
 }

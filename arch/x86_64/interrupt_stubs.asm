@@ -49,6 +49,14 @@ isr_common:
     push r14
     push r15
 
+    ; Hardware interrupts keep the user GS base when they arrive from ring 3.
+    ; C interrupt handlers use GS for per-CPU state, so enter the kernel GS
+    ; context here and restore the user GS context immediately before iretq.
+    test byte [rsp + 18 * 8], 3
+    jz .kernel_gs_ready
+    swapgs
+.kernel_gs_ready:
+
     mov r12, rsp
     and rsp, -16
     mov rdi, r12
@@ -71,6 +79,13 @@ isr_common:
     pop rcx
     pop rbx
     pop rax
+
+    ; After restoring GPRs the frame is vector, error, RIP, CS, RFLAGS...
+    ; Inspect saved CS, not RIP, before restoring the user GS base.
+    test byte [rsp + 3 * 8], 3
+    jz .user_gs_ready
+    swapgs
+.user_gs_ready:
     add rsp, 16
     iretq
 

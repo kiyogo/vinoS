@@ -4,10 +4,7 @@
 #include <kos/sync.h>
 #include <kos/vfs.h>
 
-enum {
-    VFS_MAX_VOLUMES = 8,
-    VFS_MAX_PATH = 256,
-};
+enum { VFS_MAX_VOLUMES = 8 };
 
 struct vfs_volume {
     char letter;
@@ -102,8 +99,9 @@ static bool path_is_safe(const char *path) {
     return true;
 }
 
-static bool parse_path_locked(const char *path, const struct vfs_backend **backend, char relative_path[VFS_MAX_PATH]) {
-    if (path == 0 || backend == 0 || relative_path == 0) {
+static bool parse_path_locked(const char *path, const struct vfs_backend **backend,
+                              void **context, char relative_path[VFS_MAX_PATH], bool allow_empty) {
+    if (path == 0 || backend == 0 || context == 0 || relative_path == 0) {
         return false;
     }
     char letter = 'C';
@@ -114,7 +112,7 @@ static bool parse_path_locked(const char *path, const struct vfs_backend **backe
     while (*path == '/' || *path == '\\') {
         ++path;
     }
-    if (!path_is_safe(path)) {
+    if (!allow_empty && !path_is_safe(path)) {
         return false;
     }
     uint64_t length = 0;
@@ -130,19 +128,21 @@ static bool parse_path_locked(const char *path, const struct vfs_backend **backe
         return false;
     }
     *backend = vol->backend;
+    *context = vol->backend->context;
     return true;
 }
 
 bool vfs_read_file(const char *path, const uint8_t **data, uint64_t *size) {
     const struct vfs_backend *backend = 0;
+    void *context = 0;
     char relative_path[VFS_MAX_PATH];
     uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
-    if (!parse_path_locked(path, &backend, relative_path) || backend == 0 || backend->read_file == 0) {
+    if (!parse_path_locked(path, &backend, &context, relative_path, false) || backend == 0 || backend->read_file == 0) {
         spinlock_unlock_irqrestore(&vfs_lock, flags);
         return false;
     }
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return backend->read_file(relative_path, data, size);
+    return backend->read_file(context, relative_path, data, size);
 }
 
 bool vfs_write_file(const char *path, const uint8_t *data, uint64_t size) {
@@ -150,26 +150,85 @@ bool vfs_write_file(const char *path, const uint8_t *data, uint64_t size) {
         return false;
     }
     const struct vfs_backend *backend = 0;
+    void *context = 0;
     char relative_path[VFS_MAX_PATH];
     uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
-    if (!parse_path_locked(path, &backend, relative_path) || backend == 0 || backend->write_file == 0) {
+    if (!parse_path_locked(path, &backend, &context, relative_path, false) || backend == 0 || backend->write_file == 0) {
         spinlock_unlock_irqrestore(&vfs_lock, flags);
         return false;
     }
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return backend->write_file(relative_path, data, size);
+    return backend->write_file(context, relative_path, data, size);
 }
 
 bool vfs_unlink_file(const char *path) {
     const struct vfs_backend *backend = 0;
+    void *context = 0;
     char relative_path[VFS_MAX_PATH];
     uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
-    if (!parse_path_locked(path, &backend, relative_path) || backend == 0 || backend->unlink_file == 0) {
+    if (!parse_path_locked(path, &backend, &context, relative_path, false) || backend == 0 || backend->unlink_file == 0) {
         spinlock_unlock_irqrestore(&vfs_lock, flags);
         return false;
     }
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return backend->unlink_file(relative_path);
+    return backend->unlink_file(context, relative_path);
+}
+
+bool vfs_mkdir(const char *path) {
+    const struct vfs_backend *backend = 0;
+    void *context = 0;
+    char relative_path[VFS_MAX_PATH];
+    uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
+    if (!parse_path_locked(path, &backend, &context, relative_path, false) || backend == 0 || backend->mkdir == 0) {
+        spinlock_unlock_irqrestore(&vfs_lock, flags);
+        return false;
+    }
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return backend->mkdir(context, relative_path);
+}
+
+bool vfs_readdir(const char *path, vfs_readdir_callback callback, void *user_arg) {
+    const struct vfs_backend *backend = 0;
+    void *context = 0;
+    char relative_path[VFS_MAX_PATH];
+    uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
+    if (!parse_path_locked(path, &backend, &context, relative_path, true) || backend == 0 || backend->readdir == 0) {
+        spinlock_unlock_irqrestore(&vfs_lock, flags);
+        return false;
+    }
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return backend->readdir(context, relative_path, callback, user_arg);
+}
+
+bool vfs_rename(const char *old_path, const char *new_path) {
+    const struct vfs_backend *old_backend = 0;
+    const struct vfs_backend *new_backend = 0;
+    void *old_context = 0;
+    void *new_context = 0;
+    char old_relative[VFS_MAX_PATH];
+    char new_relative[VFS_MAX_PATH];
+    uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
+    bool valid = parse_path_locked(old_path, &old_backend, &old_context, old_relative, false) &&
+                 parse_path_locked(new_path, &new_backend, &new_context, new_relative, false);
+    if (!valid || old_backend != new_backend || old_context != new_context || old_backend->rename == 0) {
+        spinlock_unlock_irqrestore(&vfs_lock, flags);
+        return false;
+    }
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return old_backend->rename(old_context, old_relative, new_relative);
+}
+
+bool vfs_stat(const char *path, struct vfs_metadata *metadata) {
+    const struct vfs_backend *backend = 0;
+    void *context = 0;
+    char relative_path[VFS_MAX_PATH];
+    uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
+    if (!parse_path_locked(path, &backend, &context, relative_path, true) || backend == 0 || backend->stat == 0) {
+        spinlock_unlock_irqrestore(&vfs_lock, flags);
+        return false;
+    }
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return backend->stat(context, relative_path, metadata);
 }
 
 uint64_t vfs_file_count(void) {
@@ -205,7 +264,7 @@ bool vfs_volume_info_at(uint64_t index, struct vfs_volume_info *info) {
     *info = (struct vfs_volume_info){
         .letter = letter,
         .label = label,
-        .file_count = backend->file_count(),
+        .file_count = backend->file_count(backend->context),
     };
     return true;
 }
@@ -226,7 +285,7 @@ uint64_t vfs_file_count_on_volume(char letter) {
     }
     const struct vfs_backend *backend = volume->backend;
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return backend->file_count();
+    return backend->file_count(backend->context);
 }
 
 const struct vfs_file *vfs_file_at_on_volume(char letter, uint64_t index) {
@@ -238,5 +297,5 @@ const struct vfs_file *vfs_file_at_on_volume(char letter, uint64_t index) {
     }
     const struct vfs_backend *backend = volume->backend;
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return backend->file_at(index);
+    return backend->file_at(backend->context, index);
 }

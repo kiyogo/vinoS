@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include <kos/initramfs.h>
+#include <kos/memory.h>
 
 enum {
     CPIO_NEWC_HEADER_SIZE = 110,
@@ -74,7 +75,8 @@ static bool align4(uint64_t value, uint64_t *aligned_value) {
     return true;
 }
 
-static bool initramfs_read_file(const char *path, const uint8_t **data, uint64_t *size) {
+static bool initramfs_read_file(void *context, const char *path, const uint8_t **data, uint64_t *size) {
+    (void)context;
     if (!initialized || path == 0 || data == 0 || size == 0) {
         return false;
     }
@@ -88,16 +90,52 @@ static bool initramfs_read_file(const char *path, const uint8_t **data, uint64_t
     return false;
 }
 
-static uint64_t initramfs_file_count(void) { return file_count; }
+static uint64_t initramfs_file_count(void *context) {
+    (void)context;
+    return file_count;
+}
 
-static const struct vfs_file *initramfs_file_at(uint64_t index) {
+static const struct vfs_file *initramfs_file_at(void *context, uint64_t index) {
+    (void)context;
     return index < file_count ? &files[index] : 0;
 }
 
+static bool initramfs_readdir(void *context, const char *path, vfs_readdir_callback callback, void *user_arg) {
+    (void)context;
+    if (!initialized || path == 0 || *path != '\0' || callback == 0) return false;
+    for (uint64_t i = 0; i < file_count; i++) {
+        struct vfs_dir_entry entry = {0};
+        kstrncpy(entry.name, files[i].path, sizeof(entry.name) - 1);
+        entry.size = files[i].size;
+        entry.type = VFS_NODE_FILE;
+        callback(&entry, user_arg);
+    }
+    return true;
+}
+
+static bool initramfs_stat(void *context, const char *path, struct vfs_metadata *metadata) {
+    (void)context;
+    if (!initialized || path == 0 || metadata == 0) return false;
+    if (*path == '\0') {
+        *metadata = (struct vfs_metadata){ .type = VFS_NODE_DIRECTORY };
+        return true;
+    }
+    for (uint64_t i = 0; i < file_count; i++) {
+        if (strings_equal(path, files[i].path)) {
+            *metadata = (struct vfs_metadata){ .type = VFS_NODE_FILE, .size = files[i].size };
+            return true;
+        }
+    }
+    return false;
+}
+
 const struct vfs_backend initramfs_vfs_backend = {
+    .context = 0,
     .read_file = initramfs_read_file,
     .file_count = initramfs_file_count,
     .file_at = initramfs_file_at,
+    .readdir = initramfs_readdir,
+    .stat = initramfs_stat,
 };
 
 bool initramfs_initialize(const void *archive, uint64_t archive_size) {

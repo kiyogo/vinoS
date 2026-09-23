@@ -345,6 +345,16 @@ int tcp_send(int socket_id, const uint8_t *data, uint64_t size) {
             chunk_size = s->mss;
         }
         uint32_t eff_wnd = s->snd_wnd < s->cwnd ? s->snd_wnd : s->cwnd;
+        if (eff_wnd == 0) {
+            spinlock_unlock_irqrestore(&tcp_lock, lock_flags);
+            net_poll();
+            if (task_is_multitasking_active()) {
+                task_sleep(1);
+            } else {
+                cpu_wait_for_interrupt();
+            }
+            continue;
+        }
         if (eff_wnd < chunk_size && eff_wnd > 0) {
             chunk_size = eff_wnd;
         }
@@ -655,13 +665,11 @@ int tcp_accept(int listen_socket, struct net_ipv4_endpoint *remote_endpoint) {
     uint8_t found_index = 0;
     for (uint8_t i = 0; i < ls->accepted_count; ++i) {
         int candidate = ls->accepted_queue[i];
-        if (candidate >= 0 && candidate < NET_TCP_SOCKET_MAX && tcp_sockets[candidate].in_use) {
-            if (tcp_sockets[candidate].rx_count > 0 || tcp_sockets[candidate].fin_received
-                || tcp_sockets[candidate].state != TCP_STATE_ESTABLISHED) {
-                child_sock = candidate;
-                found_index = i;
-                break;
-            }
+        if (candidate >= 0 && candidate < NET_TCP_SOCKET_MAX && tcp_sockets[candidate].in_use
+            && tcp_sockets[candidate].state != TCP_STATE_CLOSED) {
+            child_sock = candidate;
+            found_index = i;
+            break;
         }
     }
 
@@ -709,6 +717,47 @@ uint64_t net_tcp_get_sockets(struct net_tcp_socket_info *out_sockets, uint64_t m
     }
     spinlock_unlock_irqrestore(&tcp_lock, lock_flags);
     return count;
+}
+
+bool net_tcp_socket_info_at(int socket_id, struct net_tcp_socket_info *info) {
+    if (socket_id < 0 || socket_id >= NET_TCP_SOCKET_MAX || info == 0) {
+        return false;
+    }
+    uint64_t lock_flags = spinlock_lock_irqsave(&tcp_lock);
+    struct tcp_socket *socket = &tcp_sockets[socket_id];
+    if (!socket->in_use) {
+        spinlock_unlock_irqrestore(&tcp_lock, lock_flags);
+        return false;
+    }
+    *info = (struct net_tcp_socket_info){
+        .in_use = true,
+        .state = socket->state,
+        .local_ip = socket->local_ip,
+        .local_port = socket->local_port,
+        .remote_ip = socket->remote_ip,
+        .remote_port = socket->remote_port,
+        .rx_buffered_bytes = socket->rx_count,
+        .tx_buffered_bytes = socket->retransmit_pending ? socket->pending_packet_size : 0,
+    };
+    spinlock_unlock_irqrestore(&tcp_lock, lock_flags);
+    return true;
+}
+
+bool net_tcp_has_data(int socket_id) {
+    struct net_tcp_socket_info info;
+    return net_tcp_socket_info_at(socket_id, &info)
+        && (info.rx_buffered_bytes != 0 || info.state == TCP_STATE_CLOSE_WAIT);
+}
+
+bool net_tcp_listener_pending(int socket_id) {
+    if (socket_id < 0 || socket_id >= NET_TCP_SOCKET_MAX) {
+        return false;
+    }
+    uint64_t lock_flags = spinlock_lock_irqsave(&tcp_lock);
+    struct tcp_socket *socket = &tcp_sockets[socket_id];
+    bool pending = socket->in_use && socket->is_listening && socket->accepted_count != 0;
+    spinlock_unlock_irqrestore(&tcp_lock, lock_flags);
+    return pending;
 }
 
 void net_tcp_receive(uint32_t source, uint32_t destination, const uint8_t *packet, uint64_t size) {

@@ -8,12 +8,47 @@
 #define INSTALLER_BASE_DIR   "D:/Apps"
 #define INSTALLER_DATA_DIR   "D:/Data"
 
+static bool ensure_vfs_directory_tree(const char *path) {
+    if (path == NULL || *path == '\0') return false;
+
+    char current[KPKG_MAX_PATH_LEN];
+    kstrncpy(current, path, sizeof(current) - 1);
+    uint64_t length = kstrlen(current);
+    for (uint64_t index = 3; index <= length; index++) {
+        if (index < length && current[index] != '/') continue;
+        char saved = current[index];
+        current[index] = '\0';
+        if (index > 3) {
+            struct vfs_metadata metadata;
+            if (vfs_stat(current, &metadata)) {
+                if (metadata.type != VFS_NODE_DIRECTORY) return false;
+            } else if (!vfs_mkdir(current)) {
+                return false;
+            }
+        }
+        current[index] = saved;
+    }
+    return true;
+}
+
+static bool ensure_vfs_file_parent(const char *file_path) {
+    if (file_path == NULL) return false;
+    char parent[KPKG_MAX_PATH_LEN];
+    kstrncpy(parent, file_path, sizeof(parent) - 1);
+    uint64_t length = kstrlen(parent);
+    uint64_t slash = length;
+    while (slash > 0 && parent[slash - 1] != '/') slash--;
+    if (slash <= 3) return true;
+    parent[slash - 1] = '\0';
+    return ensure_vfs_directory_tree(parent);
+}
+
 static bool ensure_app_data_directory(const char *app_id) {
-    /* Write a marker file so the app data directory is created in VFS */
     char marker_path[KPKG_MAX_PATH_LEN];
     snprintf(marker_path, sizeof(marker_path), "%s/%s/.keep", INSTALLER_DATA_DIR, app_id);
     static const char marker_data[] = "KOS App Data Directory\n";
-    return vfs_write_file(marker_path, (const uint8_t *)marker_data, sizeof(marker_data) - 1);
+    return ensure_vfs_file_parent(marker_path)
+        && vfs_write_file(marker_path, (const uint8_t *)marker_data, sizeof(marker_data) - 1);
 }
 
 const char *installer_status_string(int status) {
@@ -78,7 +113,8 @@ int installer_install(struct kpkg_reader reader, const struct installer_options 
     char stage_prefix[KPKG_MAX_PATH_LEN];
     snprintf(stage_prefix, sizeof(stage_prefix), "%s/.staging_%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
 
-    bool stage_ok = true;
+    bool stage_ok = ensure_vfs_directory_tree(INSTALLER_BASE_DIR)
+        && ensure_vfs_directory_tree(stage_prefix);
     for (uint32_t i = 0; i < pkg.file_count; i++) {
         uint8_t *file_data = NULL;
         uint64_t file_size = 0;
@@ -90,7 +126,8 @@ int installer_install(struct kpkg_reader reader, const struct installer_options 
         char staged_file_path[KPKG_MAX_PATH_LEN];
         snprintf(staged_file_path, sizeof(staged_file_path), "%s/%s", stage_prefix, pkg.files[i].path);
 
-        if (!vfs_write_file(staged_file_path, file_data, file_size)) {
+        if (!ensure_vfs_file_parent(staged_file_path)
+            || !vfs_write_file(staged_file_path, file_data, file_size)) {
             kfree(file_data);
             stage_ok = false;
             break;
@@ -125,7 +162,8 @@ int installer_install(struct kpkg_reader reader, const struct installer_options 
         char target_file_path[KPKG_MAX_PATH_LEN];
         snprintf(target_file_path, sizeof(target_file_path), "%s/%s", install_path, pkg.files[i].path);
 
-        if (!vfs_write_file(target_file_path, staged_data, staged_size)) {
+        if (!ensure_vfs_file_parent(target_file_path)
+            || !vfs_write_file(target_file_path, staged_data, staged_size)) {
             commit_ok = false;
             break;
         }
@@ -208,6 +246,13 @@ int installer_update(struct kpkg_reader reader, const struct installer_options *
     snprintf(backup_prefix, sizeof(backup_prefix), "%s/.backup_%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
     snprintf(stage_prefix, sizeof(stage_prefix), "%s/.staging_%s", INSTALLER_BASE_DIR, pkg.manifest.app_id);
 
+    if (!ensure_vfs_directory_tree(INSTALLER_BASE_DIR)
+        || !ensure_vfs_directory_tree(backup_prefix)
+        || !ensure_vfs_directory_tree(stage_prefix)) {
+        kpkg_close(&pkg);
+        return INSTALLER_ERR_STAGING_FAIL;
+    }
+
     /* 1. Backup old version files */
     for (uint32_t f = 0; f < existing->file_count; f++) {
         uint32_t f_idx = existing->file_indices[f];
@@ -218,6 +263,7 @@ int installer_update(struct kpkg_reader reader, const struct installer_options *
             if (vfs_read_file(src_path, &old_data, &old_sz)) {
                 char backup_file[KPKG_MAX_PATH_LEN];
                 snprintf(backup_file, sizeof(backup_file), "%s/file_%u", backup_prefix, f);
+                ensure_vfs_file_parent(backup_file);
                 vfs_write_file(backup_file, old_data, old_sz);
             }
         }
@@ -236,7 +282,8 @@ int installer_update(struct kpkg_reader reader, const struct installer_options *
         char staged_file_path[KPKG_MAX_PATH_LEN];
         snprintf(staged_file_path, sizeof(staged_file_path), "%s/%s", stage_prefix, pkg.files[i].path);
 
-        if (!vfs_write_file(staged_file_path, file_data, file_size)) {
+        if (!ensure_vfs_file_parent(staged_file_path)
+            || !vfs_write_file(staged_file_path, file_data, file_size)) {
             kfree(file_data);
             stage_ok = false;
             break;
@@ -271,7 +318,8 @@ int installer_update(struct kpkg_reader reader, const struct installer_options *
         char target_file_path[KPKG_MAX_PATH_LEN];
         snprintf(target_file_path, sizeof(target_file_path), "%s/%s", install_path, pkg.files[i].path);
 
-        if (!vfs_write_file(target_file_path, staged_data, staged_size)) {
+        if (!ensure_vfs_file_parent(target_file_path)
+            || !vfs_write_file(target_file_path, staged_data, staged_size)) {
             commit_ok = false;
             break;
         }

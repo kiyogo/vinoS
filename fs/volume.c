@@ -15,6 +15,20 @@ static struct volume_entry g_volumes[VOLUME_MAX_ENTRIES];
 static uint32_t g_volume_count = 0;
 static kos_spinlock_t g_volume_lock = KOS_SPINLOCK_INITIALIZER;
 
+static void volume_manager_remove_at_locked(uint32_t index) {
+    struct volume_entry *entry = &g_volumes[index];
+    if (kstrcmp(entry->fs_type, "FAT32") == 0) {
+        fat32_unmount((struct fat32_volume *)entry->fs_handle);
+    }
+    vfs_unmount_volume(entry->letter);
+
+    for (uint32_t i = index + 1; i < g_volume_count; i++) {
+        g_volumes[i - 1] = g_volumes[i];
+    }
+    g_volume_count--;
+    kmemset(&g_volumes[g_volume_count], 0, sizeof(g_volumes[g_volume_count]));
+}
+
 static char get_next_available_letter(void) {
     /* Drive letters 'C' is Initramfs/System, 'D' is Ramfs.
      * Block / FAT32 volumes get 'E', 'F', 'G', ... 'Z' */
@@ -82,7 +96,7 @@ bool volume_manager_mount_device(struct block_device *dev, char requested_letter
         entry->fs_handle = fat_vol;
         entry->is_mounted = true;
 
-        log_infof("[volume] Mounted %s on %c: (FAT32, label '%s')",
+        log_infof("[storage][volume] Mounted %s on %c: (FAT32, label '%s')",
                   dev->name, target_letter, entry->label);
 
         spinlock_unlock_irqrestore(&g_volume_lock, flags);
@@ -151,11 +165,7 @@ bool volume_manager_unmount_letter(char letter) {
 
     for (uint32_t i = 0; i < g_volume_count; i++) {
         if (g_volumes[i].letter == letter && g_volumes[i].is_mounted) {
-            if (kstrcmp(g_volumes[i].fs_type, "FAT32") == 0) {
-                fat32_unmount((struct fat32_volume *)g_volumes[i].fs_handle);
-            }
-            vfs_unmount_volume(letter);
-            g_volumes[i].is_mounted = false;
+            volume_manager_remove_at_locked(i);
             spinlock_unlock_irqrestore(&g_volume_lock, flags);
             return true;
         }
@@ -163,6 +173,25 @@ bool volume_manager_unmount_letter(char letter) {
 
     spinlock_unlock_irqrestore(&g_volume_lock, flags);
     return false;
+}
+
+bool volume_manager_unmount_device(struct block_device *dev) {
+    if (dev == NULL) return false;
+
+    bool unmounted = false;
+    uint64_t flags = spinlock_lock_irqsave(&g_volume_lock);
+    for (uint32_t i = 0; i < g_volume_count;) {
+        if (g_volumes[i].bdev == dev && g_volumes[i].is_mounted) {
+            log_infof("[storage][volume] Unmounting %s from %c: before device removal",
+                      dev->name, g_volumes[i].letter);
+            volume_manager_remove_at_locked(i);
+            unmounted = true;
+            continue;
+        }
+        i++;
+    }
+    spinlock_unlock_irqrestore(&g_volume_lock, flags);
+    return unmounted;
 }
 
 bool volume_manager_sync_all(void) {

@@ -95,12 +95,12 @@ bool qa_fuzz_syscall_args(uint32_t iterations) {
         uint64_t expected;
     };
     static const struct syscall_rejection_probe rejection_probes[] = {
-        { SYS_read,     { UINT64_MAX, 0, 1, 0, 0, 0 }, (uint64_t)-EFAULT },
-        { SYS_write,    { UINT64_MAX, 0, 1, 0, 0, 0 }, (uint64_t)-EFAULT },
+        { SYS_read,     { UINT64_MAX, 0, 1, 0, 0, 0 }, (uint64_t)-EBADF },
+        { SYS_write,    { UINT64_MAX, 0, 1, 0, 0, 0 }, (uint64_t)-EBADF },
         { SYS_open,     { 0, 0, 0, 0, 0, 0 },          (uint64_t)-EFAULT },
-        { SYS_close,    { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)0 },
+        { SYS_close,    { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)-EBADF },
         { SYS_socket,   { UINT64_MAX, UINT64_MAX, UINT64_MAX, 0, 0, 0 },
-                                                        (uint64_t)-EINVAL },
+                                                        (uint64_t)-EAFNOSUPPORT },
         { SYS_connect,  { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)-EINVAL },
         { SYS_sendto,   { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)-EBADF },
         { SYS_recvfrom, { UINT64_MAX, 0, 0, 0, 0, 0 }, (uint64_t)-EBADF },

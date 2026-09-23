@@ -53,6 +53,10 @@ static kos_spinlock_t sleep_lock = SPINLOCK_INIT;
 static struct list_head sleep_queue = LIST_HEAD_INIT(sleep_queue);
 static volatile uint64_t sleeping_task_count = 0;
 
+static bool task_scheduler_is_bsp(void) {
+    return smp_get_cpu_id() == 0;
+}
+
 static void sleep_queue_insert_sorted(struct task *task) {
     struct list_head *pos = sleep_queue.next;
     while (pos != &sleep_queue) {
@@ -144,7 +148,11 @@ void task_reap_terminated(void) {
 }
 
 void task_start_trampoline(void) {
-    current_task->entry(current_task->argument);
+    struct task *task = task_current();
+    if (task == NULL || task->entry == NULL) {
+        thread_exit(-1);
+    }
+    task->entry(task->argument);
     thread_exit(0);
 }
 
@@ -216,6 +224,10 @@ bool task_initialize(void) {
     list_init(&tasks[0].reaper_node);
     list_init(&tasks[0].process_node);
     current_task = &tasks[0];
+    struct percpu_data *bsp = smp_get_current_cpu();
+    if (bsp != NULL) {
+        bsp->current_task = &tasks[0];
+    }
 
     /* Dedicated Idle task (TID 0) */
     uint64_t idle_stack_top = ((uint64_t)idle_stack + sizeof(idle_stack)) & ~0xfull;
@@ -261,7 +273,7 @@ bool task_create_kernel(const char *name, task_entry entry, void *argument) {
 }
 
 void schedule(void) {
-    if (!initialized) {
+    if (!initialized || !task_scheduler_is_bsp()) {
         return;
     }
 
@@ -325,14 +337,14 @@ void task_yield(void) {
 }
 
 void preempt_disable(void) {
-    if (!initialized || current_task == NULL) {
+    if (!initialized || !task_scheduler_is_bsp() || current_task == NULL) {
         return;
     }
     current_task->preempt_count++;
 }
 
 void preempt_enable(void) {
-    if (!initialized || current_task == NULL) {
+    if (!initialized || !task_scheduler_is_bsp() || current_task == NULL) {
         return;
     }
     if (current_task->preempt_count > 0) {
@@ -354,7 +366,7 @@ uint32_t preempt_count(void) {
 }
 
 void task_block(struct task *task) {
-    if (!initialized) {
+    if (!initialized || !task_scheduler_is_bsp()) {
         return;
     }
     if (task == 0) {
@@ -419,7 +431,8 @@ KOS_NORETURN void task_exit(void) {
 
 void task_sleep(uint64_t ms) {
     /* Safeguard 1: Single-task / early boot / interrupt context */
-    if (!task_is_multitasking_active() || !spinlock_irqs_enabled() || current_task == NULL) {
+    if (!task_is_multitasking_active() || !task_scheduler_is_bsp()
+        || !spinlock_irqs_enabled() || current_task == NULL) {
         timer_delay_ms(ms);
         return;
     }
@@ -459,7 +472,7 @@ void task_sleep(uint64_t ms) {
 }
 
 void task_timer_tick(void) {
-    if (!initialized) {
+    if (!initialized || !task_scheduler_is_bsp()) {
         return;
     }
 
@@ -528,7 +541,7 @@ void task_timer_tick(void) {
 }
 
 void task_reschedule_if_needed(void) {
-    if (!initialized || current_task == NULL) {
+    if (!initialized || !task_scheduler_is_bsp() || current_task == NULL) {
         return;
     }
     if (current_task->preempt_count > 0) {
@@ -543,6 +556,9 @@ void task_reschedule_if_needed(void) {
 }
 
 void task_request_reschedule(void) {
+    if (!task_scheduler_is_bsp()) {
+        return;
+    }
     __atomic_store_n(&reschedule_requested, true, __ATOMIC_RELAXED);
     if (current_task != NULL && current_task->preempt_count > 0) {
         current_task->reschedule_pending = true;

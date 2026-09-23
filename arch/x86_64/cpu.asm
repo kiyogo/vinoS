@@ -41,6 +41,15 @@ enter_userspace:
     ; Disable interrupts while preparing the iretq stack frame
     cli
 
+    ; A task may reach this path while another user-origin interrupt frame is
+    ; suspended in the scheduler. In that case SWAPGS left the per-CPU base in
+    ; IA32_GS_BASE and the user base in IA32_KERNEL_GS_BASE. Preserve the
+    ; current per-CPU base as the kernel SWAPGS target before loading user GS.
+    mov ecx, 0xC0000101       ; IA32_GS_BASE
+    rdmsr
+    mov ecx, 0xC0000102       ; IA32_KERNEL_GS_BASE
+    wrmsr
+
     ; Load data segment registers (DS, ES, FS, GS) with 0x2b (GDT_USER_DS)
     mov ax, 0x2b
     mov ds, ax

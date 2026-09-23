@@ -130,6 +130,7 @@ bool net_udp_sendto(uint16_t socket_id, struct net_ipv4_endpoint destination,
         const uint8_t *data, uint64_t size);
 bool net_udp_recvfrom(uint16_t socket_id, struct net_ipv4_endpoint *source,
         uint8_t *data, uint64_t capacity, uint64_t *size);
+bool net_udp_has_data(uint16_t socket_id);
 bool net_udp_recvfrom_timeout(uint16_t socket_id, struct net_ipv4_endpoint *source,
         uint8_t *data, uint64_t capacity, uint64_t *size, uint64_t timeout_ms);
 bool net_udp_loopback_self_test(void);
@@ -161,6 +162,9 @@ struct net_tcp_socket_info {
     uint64_t tx_buffered_bytes;
 };
 uint64_t net_tcp_get_sockets(struct net_tcp_socket_info *out_sockets, uint64_t max_count);
+bool net_tcp_socket_info_at(int socket_id, struct net_tcp_socket_info *info);
+bool net_tcp_has_data(int socket_id);
+bool net_tcp_listener_pending(int socket_id);
 
 void net_tcp_receive(uint32_t source, uint32_t destination, const uint8_t *packet, uint64_t size);
 void net_tcp_poll(void);

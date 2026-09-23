@@ -3,18 +3,28 @@
 #include <stdint.h>
 
 #include <kos/block.h>
+#include <kos/block_cache.h>
 #include <kos/heap.h>
 #include <kos/log.h>
 #include <kos/memory.h>
 #include <kos/pmm.h>
 #include <kos/spinlock.h>
 #include <kos/vmm.h>
+#include <kos/volume.h>
 
 static struct block_device block_devices[BLOCK_MAX_DEVICES];
 static struct list_head block_device_list = LIST_HEAD_INIT(block_device_list);
 static kos_spinlock_t block_lock = SPINLOCK_INIT;
 static uint32_t next_device_id = 1;
 static bool block_initialized = false;
+
+static void block_device_reset(struct block_device *dev) {
+    kmemset(dev, 0, sizeof(*dev));
+    dev->type = BLOCK_TYPE_UNKNOWN;
+    dev->state = BLOCK_DEVICE_OFFLINE;
+    list_init(&dev->list_node);
+    spinlock_init(&dev->lock);
+}
 
 /* Helper string comparison */
 static bool block_streq(const char *a, const char *b) {
@@ -84,11 +94,7 @@ bool block_subsystem_init(void) {
     uint64_t flags = spinlock_lock_irqsave(&block_lock);
     list_init(&block_device_list);
     for (size_t i = 0; i < BLOCK_MAX_DEVICES; i++) {
-        block_devices[i].id = 0;
-        block_devices[i].state = BLOCK_DEVICE_OFFLINE;
-        block_devices[i].type = BLOCK_TYPE_UNKNOWN;
-        list_init(&block_devices[i].list_node);
-        spinlock_init(&block_devices[i].lock);
+        block_device_reset(&block_devices[i]);
     }
     block_initialized = true;
     spinlock_unlock_irqrestore(&block_lock, flags);
@@ -162,7 +168,8 @@ struct block_device *block_partition_register(
     uint8_t part_type_mbr,
     const uint8_t *guid
 ) {
-    if (parent == NULL || block_count == 0 || start_lba + block_count > parent->total_blocks) {
+    if (parent == NULL || parent->state != BLOCK_DEVICE_ONLINE || block_count == 0 ||
+        start_lba >= parent->total_blocks || block_count > parent->total_blocks - start_lba) {
         log_error("[block] Invalid partition registration parameters!");
         return NULL;
     }
@@ -235,30 +242,65 @@ bool block_device_unregister(struct block_device *dev) {
     if (dev == NULL) {
         return false;
     }
+
+    struct block_device *children[BLOCK_MAX_DEVICES];
+    uint32_t child_count = 0;
+
     uint64_t flags = spinlock_lock_irqsave(&block_lock);
-    if (dev->state == BLOCK_DEVICE_OFFLINE && dev->id == 0) {
+    if (dev->state != BLOCK_DEVICE_ONLINE || dev->id == 0) {
         spinlock_unlock_irqrestore(&block_lock, flags);
         return false;
     }
 
-    /* Unregister any child partitions first */
+    /* Collect child partitions before flushing their mounted filesystems. */
     for (size_t i = 0; i < BLOCK_MAX_DEVICES; i++) {
-        if (block_devices[i].parent == dev && block_devices[i].state != BLOCK_DEVICE_OFFLINE) {
-            list_del_init(&block_devices[i].list_node);
-            block_devices[i].state = BLOCK_DEVICE_OFFLINE;
-            block_devices[i].id = 0;
+        if (block_devices[i].parent == dev && block_devices[i].state == BLOCK_DEVICE_ONLINE) {
+            children[child_count++] = &block_devices[i];
+        }
+    }
+
+    spinlock_unlock_irqrestore(&block_lock, flags);
+
+    /* Filesystems and dirty cache entries must be flushed while I/O is valid. */
+    for (uint32_t i = 0; i < child_count; i++) {
+        (void)volume_manager_unmount_device(children[i]);
+        block_cache_invalidate_device(children[i]);
+    }
+    (void)volume_manager_unmount_device(dev);
+    block_cache_invalidate_device(dev);
+
+    flags = spinlock_lock_irqsave(&block_lock);
+    if (dev->state != BLOCK_DEVICE_ONLINE || dev->id == 0) {
+        spinlock_unlock_irqrestore(&block_lock, flags);
+        return false;
+    }
+
+    /* Remove and fully reset every child before releasing the parent slot. */
+    for (size_t i = 0; i < BLOCK_MAX_DEVICES; i++) {
+        struct block_device *child = &block_devices[i];
+        if (child->parent == dev && child->state == BLOCK_DEVICE_ONLINE) {
+            log_infof("[block] Unregistered partition %s with parent %s", child->name, dev->name);
+            list_del_init(&child->list_node);
+            block_device_reset(child);
         }
     }
 
     list_del_init(&dev->list_node);
-    if (dev->ops != NULL && dev->ops->destroy != NULL) {
-        dev->ops->destroy(dev);
+    const struct block_device_ops *ops = dev->ops;
+    uint32_t device_id = dev->id;
+    dev->state = BLOCK_DEVICE_OFFLINE;
+    spinlock_unlock_irqrestore(&block_lock, flags);
+
+    if (ops != NULL && ops->destroy != NULL) {
+        ops->destroy(dev);
     }
 
-    dev->state = BLOCK_DEVICE_OFFLINE;
-    dev->id = 0;
-    dev->parent = NULL;
+    flags = spinlock_lock_irqsave(&block_lock);
+    block_device_reset(dev);
     spinlock_unlock_irqrestore(&block_lock, flags);
+
+    log_infof("[block] Unregistered device ID %u and %u child partition(s)",
+              device_id, child_count);
     return true;
 }
 
@@ -331,7 +373,7 @@ bool block_read(struct block_device *dev, uint64_t lba, uint32_t count, void *bu
         log_errorf("[block] Cannot read from offline/error device %s", dev->name);
         return false;
     }
-    if (lba + count > dev->total_blocks) {
+    if (lba >= dev->total_blocks || count > dev->total_blocks - lba) {
         log_errorf("[block] Read out of bounds on %s (LBA %llu + %u > total %llu)",
                    dev->name, (unsigned long long)lba, count, (unsigned long long)dev->total_blocks);
         return false;
@@ -350,7 +392,7 @@ bool block_write(struct block_device *dev, uint64_t lba, uint32_t count, const v
         log_errorf("[block] Cannot write to offline/error device %s", dev->name);
         return false;
     }
-    if (lba + count > dev->total_blocks) {
+    if (lba >= dev->total_blocks || count > dev->total_blocks - lba) {
         log_errorf("[block] Write out of bounds on %s (LBA %llu + %u > total %llu)",
                    dev->name, (unsigned long long)lba, count, (unsigned long long)dev->total_blocks);
         return false;

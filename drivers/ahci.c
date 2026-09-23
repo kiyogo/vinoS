@@ -369,12 +369,13 @@ static bool ahci_probe_port(struct ahci_hba_mem *abar, uint32_t port_num) {
         return false;
     }
 
-    log_infof("[ahci] AHCI SATA drive %s (Port %u) registered (%llu sectors, %llu MiB)",
+    log_infof("[storage][ahci] Detected SATA drive %s on port %u (%llu sectors, %llu MiB)",
               adev->bdev->name, (unsigned int)port_num, (unsigned long long)sectors,
               (unsigned long long)((sectors * 512) / (1024 * 1024)));
 
-    /* Scan partitions */
-    partition_scan(adev->bdev);
+    uint32_t partitions = partition_scan(adev->bdev);
+    log_infof("[storage][ahci] %s partition scan completed: %u child partition(s)",
+              adev->bdev->name, partitions);
 
     ahci_device_num++;
     return true;
@@ -386,6 +387,8 @@ bool ahci_initialize(void) {
     for (uint64_t i = 0; i < pci_device_count(); i++) {
         const struct pci_device *pci = pci_device_at(i);
         if (pci != NULL && pci->class_code == 0x01 && pci->subclass == 0x06) {
+            log_infof("[storage][ahci] Detected SATA controller %u:%u.%u",
+                      pci->bus, pci->device, pci->function);
             /* Enable Bus Master & Memory Space */
             if (!pci_enable_memory_bus_mastering(pci)) {
                 log_error("[ahci] Failed to enable PCI bus mastering on SATA controller");
@@ -399,7 +402,7 @@ bool ahci_initialize(void) {
             }
 
             /* Map ABAR MMIO */
-            struct ahci_hba_mem *abar = (struct ahci_hba_mem *)vmm_physical_to_virtual(abar_phys);
+            struct ahci_hba_mem *abar = (struct ahci_hba_mem *)vmm_map_mmio(abar_phys, 0x2000);
             if (abar == NULL) {
                 log_error("[ahci] Failed to map ABAR virtual address");
                 continue;

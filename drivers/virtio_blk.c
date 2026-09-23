@@ -253,6 +253,9 @@ static bool virtio_blk_probe_pci(const struct pci_device *pci) {
         return false;
     }
 
+    log_infof("[storage][virtio] Detected VirtIO block controller %u:%u.%u",
+              pci->bus, pci->device, pci->function);
+
     if (!pci_enable_memory_bus_mastering(pci)) {
         log_error("[virtio-blk] Failed to enable PCI bus mastering");
         return false;
@@ -277,6 +280,11 @@ static bool virtio_blk_probe_pci(const struct pci_device *pci) {
 
     /* 3. Set DRIVER bit */
     io_out8(io_base + VIRTIO_REG_DEVICE_STATUS, VIRTIO_STATUS_ACK | VIRTIO_STATUS_DRIVER);
+
+    /* Legacy devices still require explicit feature negotiation before queues. */
+    uint32_t device_features = io_in32(io_base + VIRTIO_REG_DEVICE_FEATURES);
+    (void)device_features;
+    io_out32(io_base + VIRTIO_REG_GUEST_FEATURES, 0);
 
     /* 4. Select queue 0 and read size */
     io_out16(io_base + VIRTIO_REG_QUEUE_SELECT, 0);
@@ -351,12 +359,13 @@ static bool virtio_blk_probe_pci(const struct pci_device *pci) {
         return false;
     }
 
-    log_infof("[virtio-blk] VirtIO block device %s initialized (%llu sectors, %llu MiB)",
+    log_infof("[storage][virtio] Registered %s (%llu sectors, %llu MiB)",
               vdev->bdev->name, (unsigned long long)capacity_sectors,
               (unsigned long long)((capacity_sectors * 512) / (1024 * 1024)));
 
-    /* Scan for MBR / GPT partitions */
-    partition_scan(vdev->bdev);
+    uint32_t partitions = partition_scan(vdev->bdev);
+    log_infof("[storage][virtio] %s partition scan completed: %u child partition(s)",
+              vdev->bdev->name, partitions);
 
     virtio_device_count++;
     return true;

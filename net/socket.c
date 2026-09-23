@@ -439,6 +439,14 @@ bool net_udp_recvfrom(uint16_t socket_id, struct net_ipv4_endpoint *source,
     return true;
 }
 
+bool net_udp_has_data(uint16_t socket_id) {
+    uint64_t flags = spinlock_lock_irqsave(&network_lock);
+    struct udp_socket *socket = socket_at(socket_id);
+    bool ready = socket != 0 && socket->queue_count != 0;
+    spinlock_unlock_irqrestore(&network_lock, flags);
+    return ready;
+}
+
 static bool udp_recv_cond(void *arg) {
     struct udp_socket *s = (struct udp_socket *)arg;
     if (s == 0 || !s->open) {

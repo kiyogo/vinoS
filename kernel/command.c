@@ -75,7 +75,7 @@ struct command_entry {
 
 static void command_help(const char *arguments) {
     (void)arguments;
-    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv blocktest mbrtest gpttest cachetest fattest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
+    log_info("help clear meminfo uptime sysinfo netinfo ifconfig arp arping ping dhcp udptest tcptest sockettest cryptotest x509test tlstest nslookup curl httpd netstat echo reboot irqinfo kbdinfo drivers lspci taskinfo tasktest taskdemo vol ls cat elfinfo fdisk blkinfo mount umount sync touch mkdir rm mv blocktest storagetest mbrtest gpttest cachetest fattest filetest handletest waittest synctest usertest atomictest locktest mutextest timertest sleeptest preempttest processtest stacktest pftest panictest kstress taskstress");
 }
 
 static void command_clear(const char *arguments) {
@@ -893,22 +893,6 @@ static void command_taskdemo(const char *arguments) {
     }
 }
 
-static bool command_parse_volume(const char *arguments, char *letter) {
-    if (arguments == 0 || letter == 0) {
-        return false;
-    }
-    if (*arguments == '\0') {
-        *letter = 'C';
-        return true;
-    }
-    if (arguments[1] != ':' || arguments[2] != '\0') {
-        return false;
-    }
-    *letter = arguments[0] >= 'a' && arguments[0] <= 'z'
-        ? (char)(arguments[0] - ('a' - 'A')) : arguments[0];
-    return vfs_volume_is_mounted(*letter);
-}
-
 static void command_vol(const char *arguments) {
     (void)arguments;
     log_info("vol");
@@ -925,20 +909,31 @@ static void command_vol(const char *arguments) {
     }
 }
 
+static void command_ls_entry(const struct vfs_dir_entry *entry, void *user_arg) {
+    (void)user_arg;
+    log_infof("  %s %-24s %llu bytes",
+              entry->type == VFS_NODE_DIRECTORY ? "DIR " : "FILE",
+              entry->name, (unsigned long long)entry->size);
+}
+
 static void command_ls(const char *arguments) {
-    char letter;
-    if (!command_parse_volume(arguments, &letter)) {
-        log_error("ls: use a mounted volume, for example C: or D:.");
+    while (*arguments == ' ') arguments++;
+    char path[VFS_MAX_PATH];
+    if (*arguments == '\0') {
+        kstrncpy(path, "C:", sizeof(path) - 1);
+    } else {
+        if (arguments[1] != ':') {
+            log_error("ls: use a path such as C: or D:/folder");
+            return;
+        }
+        kstrncpy(path, arguments, sizeof(path) - 1);
+    }
+    char letter = path[0] >= 'a' && path[0] <= 'z' ? (char)(path[0] - ('a' - 'A')) : path[0];
+    if (!vfs_volume_is_mounted(letter) || !vfs_readdir(path, command_ls_entry, NULL)) {
+        log_error("ls: directory not found or backend does not support listing.");
         return;
     }
-    char name[] = { letter, ':', '\\', '\0' };
-    log_info(name);
-    for (uint64_t index = 0; index < vfs_file_count_on_volume(letter); ++index) {
-        const struct vfs_file *file = vfs_file_at_on_volume(letter, index);
-        if (file != 0) {
-            log_info(file->path);
-        }
-    }
+    log_infof("%s", path);
 }
 
 static void command_cat(const char *arguments) {
@@ -2291,6 +2286,41 @@ static void usertest_child_launcher(void *arg) {
     thread_exit(res);
 }
 
+static void usertest_emit_u8(uint8_t *code, uint64_t *length, uint8_t value) {
+    code[(*length)++] = value;
+}
+
+static void usertest_emit_u32(uint8_t *code, uint64_t *length, uint32_t value) {
+    for (uint32_t i = 0; i < 4; ++i) {
+        usertest_emit_u8(code, length, (uint8_t)(value >> (i * 8)));
+    }
+}
+
+static void usertest_emit_u64(uint8_t *code, uint64_t *length, uint64_t value) {
+    for (uint32_t i = 0; i < 8; ++i) {
+        usertest_emit_u8(code, length, (uint8_t)(value >> (i * 8)));
+    }
+}
+
+static void usertest_emit_mov_rax_imm32(uint8_t *code, uint64_t *length, uint32_t value) {
+    usertest_emit_u8(code, length, 0x48);
+    usertest_emit_u8(code, length, 0xC7);
+    usertest_emit_u8(code, length, 0xC0);
+    usertest_emit_u32(code, length, value);
+}
+
+static void usertest_emit_mov_imm64(uint8_t *code, uint64_t *length,
+                                    uint8_t opcode, uint64_t value) {
+    usertest_emit_u8(code, length, 0x48);
+    usertest_emit_u8(code, length, opcode);
+    usertest_emit_u64(code, length, value);
+}
+
+static void usertest_emit_syscall(uint8_t *code, uint64_t *length) {
+    usertest_emit_u8(code, length, 0x0F);
+    usertest_emit_u8(code, length, 0x05);
+}
+
 /*
  * Test 1: Valid ELF64 binary execution in Ring 3
  */
@@ -2299,58 +2329,104 @@ static bool test_valid_elf_execution(void) {
     uint64_t initial_frames = pmm_free_frame_count();
     uint64_t initial_heap = heap_active_allocation_count();
 
-    /* Ring 3 user code:
-     * mov rax, 4   ; KOS_SYSCALL_EXIT
-     * mov rdi, 42  ; exit code 42
-     * int 0x80     ; syscall dispatch -> process_exit
-     * jmp $
-     */
-    static const uint8_t valid_code[] = {
-        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00, /* mov rax, 4 */
-        0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00, /* mov rdi, 42 */
-        0xCD, 0x80,                               /* int 0x80 */
-        0xEB, 0xFE                                /* jmp $ */
-    };
+    /* Ring 3 user code exercises the hardware syscall path and file ABI. */
+    static const char elf_path[] = "D:/hw-syscall.elf";
+    static const char output_path[] = "D:/hw-syscall.txt";
+    static const char payload[] = "hardware syscall file\n";
+    const uint64_t text_base = 0x00400000ull;
+    const uint64_t code_base = text_base + sizeof(Elf64_Ehdr) + sizeof(Elf64_Phdr);
+    const uint64_t path_offset = 192;
+    const uint64_t payload_offset = 224;
+    uint8_t valid_code[256] = {0};
+    uint64_t code_length = 0;
+
+    usertest_emit_mov_rax_imm32(valid_code, &code_length, SYS_open);
+    usertest_emit_mov_imm64(valid_code, &code_length, 0xBF, code_base + path_offset);
+    usertest_emit_mov_imm64(valid_code, &code_length, 0xBE,
+                            KOS_O_CREAT | KOS_O_WRONLY | KOS_O_TRUNC);
+    usertest_emit_u8(valid_code, &code_length, 0x49);
+    usertest_emit_u8(valid_code, &code_length, 0xC7);
+    usertest_emit_u8(valid_code, &code_length, 0xC2);
+    usertest_emit_u32(valid_code, &code_length, 0644); /* mov r10d, 0644 */
+    usertest_emit_syscall(valid_code, &code_length);
+    usertest_emit_u8(valid_code, &code_length, 0x49);
+    usertest_emit_u8(valid_code, &code_length, 0x89);
+    usertest_emit_u8(valid_code, &code_length, 0xC4); /* mov r12, rax */
+    usertest_emit_mov_rax_imm32(valid_code, &code_length, SYS_write);
+    usertest_emit_u8(valid_code, &code_length, 0x4C);
+    usertest_emit_u8(valid_code, &code_length, 0x89);
+    usertest_emit_u8(valid_code, &code_length, 0xE7); /* mov rdi, r12 */
+    usertest_emit_mov_imm64(valid_code, &code_length, 0xBE, code_base + payload_offset);
+    usertest_emit_u8(valid_code, &code_length, 0x48);
+    usertest_emit_u8(valid_code, &code_length, 0xC7);
+    usertest_emit_u8(valid_code, &code_length, 0xC2);
+    usertest_emit_u32(valid_code, &code_length, sizeof(payload) - 1);
+    usertest_emit_syscall(valid_code, &code_length);
+    usertest_emit_mov_rax_imm32(valid_code, &code_length, SYS_close);
+    usertest_emit_u8(valid_code, &code_length, 0x4C);
+    usertest_emit_u8(valid_code, &code_length, 0x89);
+    usertest_emit_u8(valid_code, &code_length, 0xE7); /* mov rdi, r12 */
+    usertest_emit_syscall(valid_code, &code_length);
+    usertest_emit_mov_rax_imm32(valid_code, &code_length, SYS_exit);
+    usertest_emit_mov_imm64(valid_code, &code_length, 0xBF, 42);
+    usertest_emit_syscall(valid_code, &code_length);
+    usertest_emit_u8(valid_code, &code_length, 0xEB);
+    usertest_emit_u8(valid_code, &code_length, 0xFE); /* jmp $ if exit returns */
+    memcpy(valid_code + path_offset, output_path, sizeof(output_path));
+    memcpy(valid_code + payload_offset, payload, sizeof(payload));
 
     uint8_t elf_buf[512];
     uint64_t elf_size = 0;
-    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, 0x00400000ull, valid_code, sizeof(valid_code))) {
+    uint64_t code_size = payload_offset + sizeof(payload);
+    if (!create_test_elf(elf_buf, sizeof(elf_buf), &elf_size, text_base, valid_code, code_size)) {
         log_error("  [FAIL] Failed to construct valid test ELF image");
         return false;
     }
 
-    if (!vfs_write_file("D:/valid.elf", elf_buf, elf_size)) {
-        log_error("  [FAIL] Failed to write D:/valid.elf to ramfs");
+    if (!vfs_write_file(elf_path, elf_buf, elf_size)) {
+        log_error("  [FAIL] Failed to write hardware syscall ELF to ramfs");
         return false;
     }
 
     struct process *child = process_create("valid_proc");
     if (child == NULL) {
         log_error("  [FAIL] Failed to create valid_proc child process");
-        vfs_unlink_file("D:/valid.elf");
+        vfs_unlink_file(elf_path);
         return false;
     }
 
-    struct thread *t = thread_create(child, usertest_child_launcher, (void *)"D:/valid.elf", "valid_t");
+    struct thread *t = thread_create(child, usertest_child_launcher, (void *)elf_path, "valid_t");
     if (t == NULL) {
         log_error("  [FAIL] Failed to create valid_t thread");
         process_destroy(child);
-        vfs_unlink_file("D:/valid.elf");
+        vfs_unlink_file(elf_path);
         return false;
     }
 
     int exit_code = 0;
     bool wait_ok = process_wait(child, &exit_code, 3000);
-    vfs_unlink_file("D:/valid.elf");
+    const uint8_t *written_data = NULL;
+    uint64_t written_size = 0;
+    bool file_ok = vfs_read_file(output_path, &written_data, &written_size)
+        && written_data != NULL
+        && written_size == sizeof(payload) - 1
+        && memcmp(written_data, payload, sizeof(payload) - 1) == 0;
+    vfs_unlink_file(elf_path);
+    vfs_unlink_file(output_path);
     task_yield();
 
     if (!wait_ok) {
-        log_error("  [FAIL] process_wait timed out for valid_proc");
+        log_error("  [FAIL] process_wait timed out for hardware syscall process");
         return false;
     }
 
     if (exit_code != 42) {
         log_errorf("  [FAIL] Expected exit code 42, got %d", exit_code);
+        return false;
+    }
+
+    if (!file_ok) {
+        log_error("  [FAIL] Hardware syscall file ABI did not write the expected payload");
         return false;
     }
 
@@ -2374,7 +2450,7 @@ static bool test_valid_elf_execution(void) {
         return false;
     }
 
-    log_info("  [PASS] Test 1: Valid ELF64 binary execution (exit_code=42, 0 leaks)");
+    log_info("  [PASS] Hardware syscall Ring 3 execution (open/write/close/exit, exit_code=42, 0 leaks)");
     return true;
 }
 
@@ -2826,7 +2902,7 @@ static bool test_preemption_hardware(void) {
      * loop_dec:
      * dec rcx
      * jnz loop_dec
-     * mov rax, 4
+     * mov rax, SYS_exit
      * mov rdi, 55
      * int 0x80
      * jmp $
@@ -2835,7 +2911,7 @@ static bool test_preemption_hardware(void) {
         0x48, 0xC7, 0xC1, 0x80, 0x5D, 0xC9, 0x01, /* mov rcx, 30000000 (0x01C95D80) */
         0x48, 0xFF, 0xC9,                         /* dec rcx */
         0x75, 0xFB,                               /* jnz -5 */
-        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00, /* mov rax, 4 */
+        0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, /* mov rax, SYS_exit */
         0x48, 0xC7, 0xC7, 0x37, 0x00, 0x00, 0x00, /* mov rdi, 55 */
         0xCD, 0x80,                               /* int 0x80 */
         0xEB, 0xFE                                /* jmp $ */
@@ -2926,7 +3002,7 @@ static bool test_leak_50_iterations(void) {
     uint64_t baseline_heap = heap_active_allocation_count();
 
     static const uint8_t iter_code[] = {
-        0x48, 0xC7, 0xC0, 0x04, 0x00, 0x00, 0x00, /* mov rax, 4 */
+        0x48, 0xC7, 0xC0, 0x01, 0x00, 0x00, 0x00, /* mov rax, SYS_exit */
         0x48, 0xC7, 0xC7, 0x2A, 0x00, 0x00, 0x00, /* mov rdi, 42 */
         0xCD, 0x80,                               /* int 0x80 */
         0xEB, 0xFE                                /* jmp $ */
@@ -3886,6 +3962,7 @@ static void command_fdisk(const char *arguments) {
         if (dev->type == BLOCK_TYPE_RAMDISK) type_str = "RAMDISK";
         else if (dev->type == BLOCK_TYPE_AHCI) type_str = "AHCI-SATA";
         else if (dev->type == BLOCK_TYPE_VIRTIO) type_str = "VIRTIO-BLK";
+        else if (dev->type == BLOCK_TYPE_NVME) type_str = "NVME";
         else if (dev->type == BLOCK_TYPE_PARTITION) type_str = "PARTITION";
 
         uint64_t mib = (dev->total_blocks * dev->block_size) / (1024 * 1024);
@@ -3899,6 +3976,104 @@ static void command_fdisk(const char *arguments) {
                       (unsigned int)dev->partition_index, (unsigned int)dev->partition_type_mbr);
         }
     }
+}
+
+static const char *storage_table_name(struct block_device *dev) {
+    static uint8_t sector[BLOCK_DEFAULT_SECTOR_SIZE];
+    if (dev->block_size != BLOCK_DEFAULT_SECTOR_SIZE || !block_read(dev, 0, 1, sector)) {
+        return "unreadable";
+    }
+
+    struct mbr_sector *mbr = (struct mbr_sector *)sector;
+    if (mbr->signature != MBR_BOOT_SIGNATURE) {
+        return "none";
+    }
+    if (mbr->partitions[0].partition_type == MBR_GPT_PROTECTIVE_TYPE) {
+        return "GPT";
+    }
+    for (uint32_t i = 0; i < MBR_PARTITION_COUNT; i++) {
+        if (mbr->partitions[i].partition_type != MBR_TYPE_EMPTY && mbr->partitions[i].sector_count != 0) {
+            return "MBR";
+        }
+    }
+    return "empty MBR";
+}
+
+static uint32_t storage_child_partition_count(const struct block_device *parent) {
+    uint32_t children = 0;
+    uint32_t count = block_device_count();
+    for (uint32_t i = 0; i < count; i++) {
+        struct block_device *dev = block_device_get_at(i);
+        if (dev != NULL && dev->type == BLOCK_TYPE_PARTITION && dev->parent == parent) {
+            children++;
+        }
+    }
+    return children;
+}
+
+static bool storage_test_device(struct block_device *dev) {
+    static uint8_t buffer[4096];
+    if (dev->block_size == 0 || dev->block_size > sizeof(buffer) || dev->total_blocks == 0) {
+        log_errorf("  [FAIL] %s has unsupported geometry", dev->name);
+        return false;
+    }
+
+    uint32_t read_count = (uint32_t)(sizeof(buffer) / dev->block_size);
+    if (read_count > 8) read_count = 8;
+    if (read_count > dev->total_blocks) read_count = (uint32_t)dev->total_blocks;
+    if (!block_read(dev, 0, read_count, buffer)) {
+        log_errorf("  [FAIL] %s multi-sector read (%u blocks) failed", dev->name, read_count);
+        return false;
+    }
+    if (block_read(dev, dev->total_blocks, 1, buffer) ||
+        block_read(dev, dev->total_blocks - 1, 2, buffer)) {
+        log_errorf("  [FAIL] %s accepted an out-of-bounds read", dev->name);
+        return false;
+    }
+
+    const char *table = storage_table_name(dev);
+    uint32_t children = storage_child_partition_count(dev);
+    if ((kstrcmp(table, "MBR") == 0 || kstrcmp(table, "GPT") == 0) && children == 0) {
+        log_errorf("  [FAIL] %s exposes %s but registered no child partition", dev->name, table);
+        return false;
+    }
+
+    log_infof("  [PASS] %s: multi-sector read, OOB rejection, %s table, %u child partition(s)",
+              dev->name, table, children);
+    return true;
+}
+
+/* Non-destructive integration test for physical AHCI, VirtIO and NVMe disks. */
+static void command_storagetest(const char *arguments) {
+    (void)arguments;
+    bool all_ok = true;
+    uint32_t tested = 0;
+
+    log_info("==================================================");
+    log_info(">>> STARTING STORAGE BACKEND INTEGRATION TEST <<<");
+    log_info("==================================================");
+
+    uint32_t count = block_device_count();
+    for (uint32_t i = 0; i < count; i++) {
+        struct block_device *dev = block_device_get_at(i);
+        if (dev == NULL || (dev->type != BLOCK_TYPE_AHCI && dev->type != BLOCK_TYPE_VIRTIO &&
+                            dev->type != BLOCK_TYPE_NVME)) {
+            continue;
+        }
+        tested++;
+        if (!storage_test_device(dev)) {
+            all_ok = false;
+        }
+    }
+
+    if (tested == 0) {
+        log_info("  [SKIP] No AHCI, VirtIO, or NVMe block devices detected.");
+    } else if (all_ok) {
+        log_info(">>> [PASS] STORAGE BACKEND INTEGRATION TEST PASSED <<<");
+    } else {
+        log_error(">>> [FAIL] STORAGE BACKEND INTEGRATION TEST FAILED <<<");
+    }
+    log_info("==================================================");
 }
 
 static void command_mount(const char *arguments) {
@@ -4001,20 +4176,9 @@ static void command_mkdir(const char *arguments) {
         return;
     }
 
-    char letter = 'C';
-    const char *rel_path = arguments;
-    if (arguments[0] != '\0' && arguments[1] == ':') {
-        letter = arguments[0];
-        if (letter >= 'a' && letter <= 'z') letter = (char)(letter - ('a' - 'A'));
-        rel_path = arguments + 2;
-    }
-
-    const struct volume_entry *vol_ent = volume_manager_find_by_letter(letter);
-    if (vol_ent != NULL && kstrcmp(vol_ent->fs_type, "FAT32") == 0) {
-        if (fat32_mkdir((struct fat32_volume *)vol_ent->fs_handle, rel_path)) {
-            log_infof("mkdir: directory '%s' created on %c:", rel_path, letter);
-            return;
-        }
+    if (vfs_mkdir(arguments)) {
+        log_infof("mkdir: directory '%s' created", arguments);
+        return;
     }
     log_errorf("mkdir: failed to create directory '%s'", arguments);
 }
@@ -4052,20 +4216,11 @@ static void command_mv(const char *arguments) {
         return;
     }
 
-    const uint8_t *data = NULL;
-    uint64_t size = 0;
-    if (!vfs_read_file(src, &data, &size)) {
-        log_errorf("mv: source file '%s' not found", src);
+    if (!vfs_rename(src, arguments)) {
+        log_errorf("mv: failed to rename '%s' -> '%s'", src, arguments);
         return;
     }
-
-    if (!vfs_write_file(arguments, data, size)) {
-        log_errorf("mv: failed to write destination file '%s'", arguments);
-        return;
-    }
-
-    vfs_unlink_file(src);
-    log_infof("mv: moved '%s' -> '%s' (%llu bytes)", src, arguments, (unsigned long long)size);
+    log_infof("mv: moved '%s' -> '%s'", src, arguments);
 }
 
 /* Diagnostic Test: Block Device Core */
@@ -4076,6 +4231,7 @@ static void command_blocktest(const char *arguments) {
     log_info("==================================================");
 
     bool all_ok = true;
+    uint32_t device_count_before = block_device_count();
 
     /* 1. Create a 1 MiB RAM Block Device (2048 sectors of 512 bytes = 1048576 bytes) */
     struct block_device *ram_dev = ramdisk_create("test_ram0", 2048ULL * 512, 512);
@@ -4094,27 +4250,27 @@ static void command_blocktest(const char *arguments) {
         log_info("  [OK] block_device_find_by_name matched");
     }
 
-    /* 3. Write pattern to multiple sectors */
-    uint8_t write_buf[1024];
-    for (int i = 0; i < 1024; i++) {
+    /* 3. Write a multi-sector pattern. */
+    static uint8_t write_buf[16 * BLOCK_DEFAULT_SECTOR_SIZE];
+    static uint8_t read_buf[16 * BLOCK_DEFAULT_SECTOR_SIZE];
+    for (uint32_t i = 0; i < sizeof(write_buf); i++) {
         write_buf[i] = (uint8_t)(i ^ 0xA5);
     }
 
-    if (!block_write(ram_dev, 10, 2, write_buf)) {
-        log_error("  [FAIL] block_write sectors 10-11 failed");
+    if (!block_write(ram_dev, 10, 16, write_buf)) {
+        log_error("  [FAIL] block_write sectors 10-25 failed");
         all_ok = false;
     } else {
-        log_info("  [OK] block_write 2 sectors at LBA 10 passed");
+        log_info("  [OK] block_write 16 sectors at LBA 10 passed");
     }
 
-    /* 4. Read back and verify integrity */
-    uint8_t read_buf[1024];
+    /* 4. Read back and verify integrity. */
     kmemset(read_buf, 0, sizeof(read_buf));
 
-    if (!block_read(ram_dev, 10, 2, read_buf)) {
-        log_error("  [FAIL] block_read sectors 10-11 failed");
+    if (!block_read(ram_dev, 10, 16, read_buf)) {
+        log_error("  [FAIL] block_read sectors 10-25 failed");
         all_ok = false;
-    } else if (kmemcmp(write_buf, read_buf, 1024) != 0) {
+    } else if (kmemcmp(write_buf, read_buf, sizeof(write_buf)) != 0) {
         log_error("  [FAIL] Data mismatch after block_read!");
         all_ok = false;
     } else {
@@ -4122,21 +4278,32 @@ static void command_blocktest(const char *arguments) {
     }
 
     /* 5. Bounds checking */
-    if (block_read(ram_dev, 2047, 2, read_buf)) {
+    if (block_read(ram_dev, ram_dev->total_blocks, 1, read_buf) ||
+        block_read(ram_dev, ram_dev->total_blocks - 1, 2, read_buf)) {
         log_error("  [FAIL] Out-of-bounds read was allowed!");
         all_ok = false;
     } else {
         log_info("  [OK] Out-of-bounds LBA read correctly rejected");
     }
 
-    if (block_write(ram_dev, 10, 0, write_buf)) {
-        log_error("  [FAIL] Zero-count write was allowed!");
+    if (block_write(ram_dev, ram_dev->total_blocks - 1, 2, write_buf) ||
+        block_write(ram_dev, 10, 0, write_buf)) {
+        log_error("  [FAIL] Invalid write was allowed!");
         all_ok = false;
     } else {
         log_info("  [OK] Zero-count write correctly rejected");
     }
 
-    /* 6. Test Flush */
+    /* 6. Parent removal must also remove all child partition devices. */
+    struct block_device *test_part = block_partition_register(ram_dev, 1, 128, 128, MBR_TYPE_FAT32_LBA, NULL);
+    if (test_part == NULL || block_device_find_by_name("test_ram0p1") != test_part) {
+        log_error("  [FAIL] Test partition registration failed");
+        all_ok = false;
+    } else {
+        log_info("  [OK] Test partition registered for lifecycle verification");
+    }
+
+    /* 7. Test Flush */
     if (!block_flush(ram_dev)) {
         log_error("  [FAIL] block_flush returned false");
         all_ok = false;
@@ -4144,7 +4311,7 @@ static void command_blocktest(const char *arguments) {
         log_info("  [OK] block_flush succeeded");
     }
 
-    /* 7. Test Universal DMA Page Allocation */
+    /* 8. Test Universal DMA Page Allocation */
     void *dma_virt = NULL;
     uint64_t dma_phys = 0;
     if (!block_alloc_dma_pages(2, &dma_virt, &dma_phys) || dma_virt == NULL || dma_phys == 0) {
@@ -4159,12 +4326,14 @@ static void command_blocktest(const char *arguments) {
         block_free_dma_pages(dma_virt, dma_phys, 2);
     }
 
-    /* 8. Destroy test device */
+    /* 9. Destroy the parent and verify no RAM disk or partition slot remains. */
     if (!ramdisk_destroy(ram_dev)) {
         log_error("  [FAIL] ramdisk_destroy returned false");
         all_ok = false;
-    } else if (block_device_find_by_name("test_ram0") != NULL) {
-        log_error("  [FAIL] Device still present after destroy");
+    } else if (block_device_find_by_name("test_ram0") != NULL ||
+               block_device_find_by_name("test_ram0p1") != NULL ||
+               block_device_count() != device_count_before) {
+        log_error("  [FAIL] Parent or child block device remained after destroy");
         all_ok = false;
     } else {
         log_info("  [OK] ramdisk_destroy and unregistration clean");
@@ -4254,7 +4423,11 @@ static void command_mbrtest(const char *arguments) {
         }
     }
 
-    ramdisk_destroy(disk);
+    if (!ramdisk_destroy(disk) || block_device_find_by_name("mbr_disk") != NULL ||
+        block_device_find_by_name("mbr_diskp1") != NULL || block_device_find_by_name("mbr_diskp2") != NULL) {
+        log_error("  [FAIL] MBR disk lifecycle cleanup left a registered device");
+        all_ok = false;
+    }
 
     log_info("--------------------------------------------------");
     if (all_ok) {
@@ -4350,7 +4523,11 @@ static void command_gpttest(const char *arguments) {
                   (unsigned long long)gpt_part->total_blocks, gpt_part->has_guid ? "YES" : "NO");
     }
 
-    ramdisk_destroy(disk);
+    if (!ramdisk_destroy(disk) || block_device_find_by_name("gpt_disk") != NULL ||
+        block_device_find_by_name("gpt_diskp1") != NULL) {
+        log_error("  [FAIL] GPT disk lifecycle cleanup left a registered device");
+        all_ok = false;
+    }
 
     log_info("--------------------------------------------------");
     if (all_ok) {
@@ -4808,6 +4985,119 @@ static void command_sectest(const char *arguments) {
     }
 }
 
+static void command_filetest(const char *arguments) {
+    (void)arguments;
+    enum { USER_BASE = 0x40000000ULL };
+    const char file_path[] = "D:/qa-file-syscall.txt";
+    const char renamed_file_path[] = "D:/qa-file-syscall-renamed.txt";
+    const char directory_path[] = "D:/qa-file-syscall-dir";
+    const char payload[] = "KOS user file syscall QA";
+    uint64_t frame = pmm_allocate_frame();
+    bool mapped = false;
+    int32_t file_fd = -1;
+    int32_t closed_file_fd = -1;
+    int32_t directory_fd = -1;
+    bool ok = false;
+
+    log_info("==================================================");
+    log_info("       KOS User-Space File Syscall Test          ");
+    log_info("==================================================");
+
+    if (frame == 0 || vmm_is_mapped(USER_BASE)
+        || !vmm_map_page(USER_BASE, frame,
+            VMM_PAGE_WRITABLE | VMM_PAGE_USER | VMM_PAGE_NO_EXECUTE)) {
+        log_error("[filetest] Failed to map a temporary user page.");
+        goto cleanup;
+    }
+    mapped = true;
+    stac();
+    kmemset((void *)(uintptr_t)USER_BASE, 0, KOS_PAGE_SIZE);
+    kmemcpy((void *)(uintptr_t)(USER_BASE + 0), file_path, sizeof(file_path));
+    kmemcpy((void *)(uintptr_t)(USER_BASE + 256), directory_path, sizeof(directory_path));
+    kmemcpy((void *)(uintptr_t)(USER_BASE + 512), payload, sizeof(payload));
+    kmemcpy((void *)(uintptr_t)(USER_BASE + 2048), renamed_file_path, sizeof(renamed_file_path));
+    clac();
+
+    file_fd = (int32_t)(int64_t)kos_syscall_dispatch(SYS_open,
+        USER_BASE, KOS_O_CREAT | KOS_O_RDWR | KOS_O_TRUNC, 0644, 0, 0, 0);
+    if (file_fd < 0) goto cleanup;
+    if ((int64_t)kos_syscall_dispatch(SYS_write, (uint32_t)file_fd, USER_BASE + 512,
+            sizeof(payload) - 1, 0, 0, 0) != (int64_t)(sizeof(payload) - 1)) goto cleanup;
+    if ((int64_t)kos_syscall_dispatch(SYS_close, (uint32_t)file_fd, 0, 0, 0, 0, 0) != 0) goto cleanup;
+    closed_file_fd = file_fd;
+    file_fd = -1;
+
+    file_fd = (int32_t)(int64_t)kos_syscall_dispatch(SYS_open,
+        USER_BASE, KOS_O_RDONLY, 0, 0, 0, 0);
+    if (file_fd < 0) goto cleanup;
+    if ((int64_t)kos_syscall_dispatch(SYS_read, (uint32_t)closed_file_fd, USER_BASE + 768,
+            1, 0, 0, 0) != -EBADF) goto cleanup;
+    if ((int64_t)kos_syscall_dispatch(SYS_read, (uint32_t)file_fd, USER_BASE + 768,
+            sizeof(payload) - 1, 0, 0, 0) != (int64_t)(sizeof(payload) - 1)) {
+        goto cleanup;
+    }
+
+    if ((int64_t)kos_syscall_dispatch(SYS_lseek, (uint32_t)file_fd, 0, KOS_SEEK_SET, 0, 0, 0) != 0
+        || (int64_t)kos_syscall_dispatch(SYS_read, (uint32_t)file_fd, USER_BASE + 1280,
+            sizeof(payload) - 1, 0, 0, 0) != (int64_t)(sizeof(payload) - 1)
+        || (int64_t)kos_syscall_dispatch(SYS_lseek, (uint32_t)file_fd, 0, KOS_SEEK_END, 0, 0, 0)
+            != (int64_t)(sizeof(payload) - 1)) {
+        goto cleanup;
+    }
+
+    struct kos_stat *user_stat = (struct kos_stat *)(uintptr_t)(USER_BASE + 1024);
+    stac();
+    bool payload_ok = kmemcmp((const void *)(uintptr_t)(USER_BASE + 768), payload,
+                              sizeof(payload) - 1) == 0;
+    clac();
+    if (!payload_ok || (int64_t)kos_syscall_dispatch(SYS_stat, USER_BASE, (uint64_t)user_stat,
+            0, 0, 0, 0) != 0) goto cleanup;
+    stac();
+    bool stat_ok = user_stat->size == sizeof(payload) - 1 && user_stat->type == KOS_STAT_FILE;
+    clac();
+    if (!stat_ok) goto cleanup;
+
+    if ((int64_t)kos_syscall_dispatch(SYS_rename, USER_BASE, USER_BASE + 2048,
+            0, 0, 0, 0) != 0) goto cleanup;
+    stac();
+    kmemset((void *)(uintptr_t)(USER_BASE + 2304), 0, 64);
+    clac();
+    if ((int64_t)kos_syscall_dispatch(SYS_stat, USER_BASE + 2048, USER_BASE + 2304,
+            0, 0, 0, 0) != 0) goto cleanup;
+
+    if ((int64_t)kos_syscall_dispatch(SYS_close, (uint32_t)file_fd, 0, 0, 0, 0, 0) != 0) goto cleanup;
+    file_fd = -1;
+    if ((int64_t)kos_syscall_dispatch(SYS_mkdir, USER_BASE + 256, 0755, 0, 0, 0, 0) != 0) goto cleanup;
+
+    directory_fd = (int32_t)(int64_t)kos_syscall_dispatch(SYS_open,
+        USER_BASE + 256, KOS_O_RDONLY | KOS_O_DIRECTORY, 0, 0, 0, 0);
+    if (directory_fd < 0) goto cleanup;
+    if ((int64_t)kos_syscall_dispatch(SYS_getdents, (uint32_t)directory_fd,
+            USER_BASE + 1536, KOS_PAGE_SIZE - 1536, 0, 0, 0) < 0) goto cleanup;
+    if ((int64_t)kos_syscall_dispatch(SYS_close, (uint32_t)directory_fd, 0, 0, 0, 0, 0) != 0) goto cleanup;
+    directory_fd = -1;
+    ok = true;
+
+cleanup:
+    if (directory_fd >= 0) (void)kos_syscall_dispatch(SYS_close, (uint32_t)directory_fd, 0, 0, 0, 0, 0);
+    if (file_fd >= 0) (void)kos_syscall_dispatch(SYS_close, (uint32_t)file_fd, 0, 0, 0, 0, 0);
+    (void)vfs_unlink_file(file_path);
+    (void)vfs_unlink_file(renamed_file_path);
+    (void)vfs_unlink_file(directory_path);
+    if (mapped) {
+        uint64_t unmapped = vmm_unmap_page(USER_BASE);
+        (void)pmm_free_frame(unmapped != 0 ? unmapped : frame);
+    } else if (frame != 0) {
+        (void)pmm_free_frame(frame);
+    }
+    if (ok) {
+        log_info(">>> [PASS] USER-SPACE FILE SYSCALL TEST PASSED <<<");
+        log_info("[filetest] lseek/rename/stale-fd checks passed.");
+    }
+    else log_error(">>> [FAIL] USER-SPACE FILE SYSCALL TEST FAILED <<<");
+    log_info("==================================================");
+}
+
 static void command_syscalltest(const char *arguments) {
     (void)arguments;
     log_info("==================================================");
@@ -4982,6 +5272,7 @@ static const struct command_entry command_registry[] = {
     { "usbinfo", command_usbinfo },
     { "nvmeinfo", command_nvmeinfo },
     { "sectest", command_sectest },
+    { "filetest", command_filetest },
     { "syscalltest", command_syscalltest },
     { "udptest", command_udptest },
     { "tcptest", command_tcptest },
@@ -5016,6 +5307,7 @@ static const struct command_entry command_registry[] = {
     { "rm", command_rm },
     { "mv", command_mv },
     { "blocktest", command_blocktest },
+    { "storagetest", command_storagetest },
     { "mbrtest", command_mbrtest },
     { "gpttest", command_gpttest },
     { "cachetest", command_cachetest },

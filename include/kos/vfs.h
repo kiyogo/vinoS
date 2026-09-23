@@ -4,18 +4,47 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define VFS_MAX_PATH 256
+
+enum vfs_node_type {
+    VFS_NODE_FILE = 1,
+    VFS_NODE_DIRECTORY = 2,
+};
+
+struct vfs_metadata {
+    enum vfs_node_type type;
+    uint64_t size;
+    uint32_t attributes;
+};
+
 struct vfs_file {
     const char *path;
     const uint8_t *data;
     uint64_t size;
+    enum vfs_node_type type;
+    uint32_t attributes;
 };
 
+struct vfs_dir_entry {
+    char name[VFS_MAX_PATH];
+    uint64_t size;
+    enum vfs_node_type type;
+    uint32_t attributes;
+};
+
+typedef void (*vfs_readdir_callback)(const struct vfs_dir_entry *entry, void *user_arg);
+
 struct vfs_backend {
-    bool (*read_file)(const char *path, const uint8_t **data, uint64_t *size);
-    bool (*write_file)(const char *path, const uint8_t *data, uint64_t size);
-    uint64_t (*file_count)(void);
-    const struct vfs_file *(*file_at)(uint64_t index);
-    bool (*unlink_file)(const char *path);
+    void *context;
+    bool (*read_file)(void *context, const char *path, const uint8_t **data, uint64_t *size);
+    bool (*write_file)(void *context, const char *path, const uint8_t *data, uint64_t size);
+    uint64_t (*file_count)(void *context);
+    const struct vfs_file *(*file_at)(void *context, uint64_t index);
+    bool (*unlink_file)(void *context, const char *path);
+    bool (*mkdir)(void *context, const char *path);
+    bool (*readdir)(void *context, const char *path, vfs_readdir_callback callback, void *user_arg);
+    bool (*rename)(void *context, const char *old_path, const char *new_path);
+    bool (*stat)(void *context, const char *path, struct vfs_metadata *metadata);
 };
 
 struct vfs_volume_info {
@@ -32,6 +61,10 @@ bool vfs_is_initialized(void);
 bool vfs_read_file(const char *path, const uint8_t **data, uint64_t *size);
 bool vfs_write_file(const char *path, const uint8_t *data, uint64_t size);
 bool vfs_unlink_file(const char *path);
+bool vfs_mkdir(const char *path);
+bool vfs_readdir(const char *path, vfs_readdir_callback callback, void *user_arg);
+bool vfs_rename(const char *old_path, const char *new_path);
+bool vfs_stat(const char *path, struct vfs_metadata *metadata);
 uint64_t vfs_file_count(void);
 const struct vfs_file *vfs_file_at(uint64_t index);
 uint64_t vfs_volume_count(void);

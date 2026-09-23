@@ -23,10 +23,13 @@ static bool ramdisk_read_blocks(struct block_device *dev, uint64_t lba, uint32_t
         return false;
     }
     struct ramdisk_data *data = (struct ramdisk_data *)dev->private_data;
+    if (count == 0 || lba >= dev->total_blocks || count > dev->total_blocks - lba) {
+        return false;
+    }
     uint64_t offset = lba * dev->block_size;
     uint64_t byte_count = (uint64_t)count * dev->block_size;
 
-    if (offset + byte_count > data->size_bytes) {
+    if (offset > data->size_bytes || byte_count > data->size_bytes - offset) {
         log_errorf("[ramdisk] Read beyond buffer size (%llu + %llu > %llu)",
                    (unsigned long long)offset, (unsigned long long)byte_count,
                    (unsigned long long)data->size_bytes);
@@ -42,10 +45,13 @@ static bool ramdisk_write_blocks(struct block_device *dev, uint64_t lba, uint32_
         return false;
     }
     struct ramdisk_data *data = (struct ramdisk_data *)dev->private_data;
+    if (count == 0 || lba >= dev->total_blocks || count > dev->total_blocks - lba) {
+        return false;
+    }
     uint64_t offset = lba * dev->block_size;
     uint64_t byte_count = (uint64_t)count * dev->block_size;
 
-    if (offset + byte_count > data->size_bytes) {
+    if (offset > data->size_bytes || byte_count > data->size_bytes - offset) {
         log_errorf("[ramdisk] Write beyond buffer size (%llu + %llu > %llu)",
                    (unsigned long long)offset, (unsigned long long)byte_count,
                    (unsigned long long)data->size_bytes);

@@ -261,6 +261,7 @@ void net_ipv4_receive(const uint8_t source_mac[NET_ETHERNET_ADDRESS_SIZE], const
         || interface.dhcp_state == NET_DHCP_REQUESTING);
     if (!interface.available
         || (destination != interface.ipv4_address && destination != 0xffffffffu
+            && !(in_dhcp_negotiation && destination == 0)
             && (destination >> 24) != 127
             && !(in_dhcp_negotiation && protocol == 17))) {
         ++interface.ipv4_packets_dropped;
@@ -332,7 +333,9 @@ bool net_ipv4_send_from(uint8_t protocol, uint32_t source, uint32_t destination,
         }
     }
 
-    uint32_t src_ip = source != 0 ? source : interface.ipv4_address;
+    /* Keep 0.0.0.0 for DHCP broadcasts; ordinary UDP callers select the
+       configured address before reaching this layer. */
+    uint32_t src_ip = source;
     uint16_t ident = next_identification++;
 
     /* Unfragmented path */

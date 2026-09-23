@@ -26,6 +26,8 @@ const struct volume_entry *volume_manager_get_at(uint32_t index);
 const struct volume_entry *volume_manager_find_by_letter(char letter);
 bool volume_manager_mount_device(struct block_device *dev, char requested_letter, const char *label);
 bool volume_manager_unmount_letter(char letter);
+/* Unmount every filesystem backed by a block device before it is removed. */
+bool volume_manager_unmount_device(struct block_device *dev);
 bool volume_manager_sync_all(void);
 
 #endif /* KOS_VOLUME_H */

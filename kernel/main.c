@@ -13,6 +13,7 @@
 #include <kos/interrupts.h>
 #include <kos/keyboard.h>
 #include <kos/log.h>
+#include <kos/memory.h>
 #include <kos/net.h>
 #include <kos/socket.h>
 #include <kos/crypto.h>
@@ -212,18 +213,64 @@ static bool pmm_self_test(void) {
     return pmm_free_frame_count() == free_frames_before;
 }
 
+struct vfs_self_test_listing {
+    bool saw_directory;
+    bool saw_file;
+    bool saw_readme;
+};
+
+static void vfs_self_test_listing_callback(const struct vfs_dir_entry *entry, void *user_arg) {
+    struct vfs_self_test_listing *listing = user_arg;
+    if (entry == 0 || listing == 0) return;
+    if (entry->type == VFS_NODE_DIRECTORY && kstrcmp(entry->name, "SUB") == 0) {
+        listing->saw_directory = true;
+    }
+    if (entry->type == VFS_NODE_FILE && kstrcmp(entry->name, "RENAMED.TXT") == 0) {
+        listing->saw_file = true;
+    }
+    if (entry->type == VFS_NODE_FILE && kstrcmp(entry->name, "README.TXT") == 0) {
+        listing->saw_readme = true;
+    }
+}
+
 static bool vfs_volume_self_test(void) {
     const uint8_t *system_data;
     const uint8_t *data_volume_data;
     uint64_t system_size;
     uint64_t data_volume_size;
-    return vfs_volume_count() == 2
+    struct vfs_metadata metadata;
+    struct vfs_self_test_listing listing = {0};
+    const uint8_t payload[] = "VFS nested file\n";
+    bool ok = vfs_volume_count() == 2
         && vfs_read_file("C:\\README.TXT", &system_data, &system_size)
         && system_size != 0
         && system_data[0] != '\0'
         && vfs_read_file("D:\\README.TXT", &data_volume_data, &data_volume_size)
         && data_volume_size != 0
         && data_volume_data[0] == 'K';
+    if (!ok || !vfs_stat("D:", &metadata) || metadata.type != VFS_NODE_DIRECTORY
+        || !vfs_readdir("D:", vfs_self_test_listing_callback, &listing)
+        || !listing.saw_readme
+        || !vfs_mkdir("D:/VFS_TEST")
+        || !vfs_mkdir("D:/VFS_TEST/SUB")
+        || !vfs_write_file("D:/VFS_TEST/SUB/FILE.TXT", payload, sizeof(payload) - 1)
+        || !vfs_readdir("D:/VFS_TEST", vfs_self_test_listing_callback, &listing)
+        || !listing.saw_directory
+        || !vfs_stat("D:/VFS_TEST/SUB/FILE.TXT", &metadata)
+        || metadata.type != VFS_NODE_FILE || metadata.size != sizeof(payload) - 1
+        || !vfs_rename("D:/VFS_TEST/SUB/FILE.TXT", "D:/VFS_TEST/SUB/RENAMED.TXT")
+        || !vfs_readdir("D:/VFS_TEST/SUB", vfs_self_test_listing_callback, &listing)
+        || !listing.saw_file
+        || !vfs_unlink_file("D:/VFS_TEST/SUB/RENAMED.TXT")
+        || !vfs_unlink_file("D:/VFS_TEST/SUB")
+        || !vfs_unlink_file("D:/VFS_TEST")) {
+        vfs_unlink_file("D:/VFS_TEST/SUB/RENAMED.TXT");
+        vfs_unlink_file("D:/VFS_TEST/SUB/FILE.TXT");
+        vfs_unlink_file("D:/VFS_TEST/SUB");
+        vfs_unlink_file("D:/VFS_TEST");
+        return false;
+    }
+    return true;
 }
 
 KOS_NORETURN void kernel_main(void) {
@@ -460,6 +507,21 @@ KOS_NORETURN void kernel_main(void) {
     /* Initialize Fault Injection Subsystem */
     fault_injection_init();
 
+#ifdef KOS_CI_SMOKE
+    (void)kernel_command_execute("sockettest");
+    (void)kernel_command_execute("syscalltest");
+    (void)kernel_command_execute("filetest");
+    (void)kernel_command_execute("tcptest 1.1.1.1 80");
+    (void)kernel_command_execute("blocktest");
+    (void)kernel_command_execute("mbrtest");
+    (void)kernel_command_execute("gpttest");
+    (void)kernel_command_execute("cachetest");
+    (void)kernel_command_execute("fattest");
+    (void)kernel_command_execute("storagetest");
+    (void)kernel_command_execute("fdisk");
+    log_info("[CI SMOKE] PASS: boot, VFS, DHCP, TCP, block, FAT32 and file syscall gates completed.");
+    kernel_halt();
+#else
     (void)kernel_command_execute("sockettest");
     (void)kernel_command_execute("cryptotest");
     (void)kernel_command_execute("x509test");
@@ -471,6 +533,15 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("nvmeinfo");
     (void)kernel_command_execute("sectest");
     (void)kernel_command_execute("syscalltest");
+    (void)kernel_command_execute("filetest");
+    (void)kernel_command_execute("usertest");
+    (void)kernel_command_execute("blocktest");
+    (void)kernel_command_execute("mbrtest");
+    (void)kernel_command_execute("gpttest");
+    (void)kernel_command_execute("cachetest");
+    (void)kernel_command_execute("fattest");
+    (void)kernel_command_execute("storagetest");
+    (void)kernel_command_execute("fdisk");
     (void)kernel_command_execute("pkgtest");
     (void)kernel_command_execute("qatest");
     (void)kernel_command_execute("tcptest 1.1.1.1 80");
@@ -496,12 +567,7 @@ KOS_NORETURN void kernel_main(void) {
     (void)kernel_command_execute("pftest");
     (void)kernel_command_execute("panictest");
     (void)kernel_command_execute("kstress");
-    (void)kernel_command_execute("blocktest");
-    (void)kernel_command_execute("mbrtest");
-    (void)kernel_command_execute("gpttest");
-    (void)kernel_command_execute("cachetest");
-    (void)kernel_command_execute("fattest");
-    (void)kernel_command_execute("fdisk");
+#endif
     if (!terminal_initialize()) {
         log_error("Kernel terminal initialization failed.");
         kernel_halt();

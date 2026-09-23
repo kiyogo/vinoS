@@ -210,6 +210,8 @@ bool smp_initialize(void) {
     bsp->lapic_id = lapic_get_id();
     bsp->state = CPU_ONLINE;
     bsp->self = bsp;
+    bsp->current_task = 0;
+    bsp->idle_task = 0;
 
     bsp->tss.rsp0 = (uint64_t)(bsp->kernel_stack + KOS_TASK_KERNEL_STACK_SIZE);
     bsp->tss.ist1 = (uint64_t)(bsp->double_fault_stack + sizeof(bsp->double_fault_stack));
@@ -249,6 +251,9 @@ bool smp_initialize(void) {
             ap->lapic_id = info->lapic_id;
             ap->state = CPU_STARTING;
             ap->self = ap;
+            /* APs remain interrupt/IPI participants until per-CPU run queues exist. */
+            ap->current_task = 0;
+            ap->idle_task = 0;
 
             ap->tss.rsp0 = (uint64_t)(ap->kernel_stack + KOS_TASK_KERNEL_STACK_SIZE);
             ap->tss.ist1 = (uint64_t)(ap->double_fault_stack + sizeof(ap->double_fault_stack));

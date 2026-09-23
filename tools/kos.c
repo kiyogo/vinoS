@@ -29,7 +29,7 @@ static const char *const c_sources[] = {
     "drivers/virtio_blk.c", "drivers/usb/xhci.c", "drivers/usb/usb_hid.c",
     "fs/block_cache.c", "fs/elf.c", "fs/fat32.c", "fs/initramfs.c", "fs/partition.c", "fs/ramfs.c", "fs/vfs.c", "fs/volume.c",
     "kernel/command.c", "kernel/console.c", "kernel/log.c", "kernel/main.c", "kernel/mutex.c",
-    "kernel/panic.c", "kernel/spinlock.c", "kernel/symbol.c", "kernel/syscall.c", "kernel/system.c",
+    "kernel/panic.c", "kernel/spinlock.c", "kernel/symbol.c", "kernel/syscall.c", "kernel/file.c", "kernel/system.c",
     "kernel/process.c", "kernel/task.c", "kernel/object.c", "kernel/handle.c", "kernel/uaccess.c", "kernel/wait.c",
     "lib/asn1.c", "lib/crypto.c", "lib/kpkg.c", "lib/memory.c", "lib/x509.c",
     "kernel/pkg_db.c", "kernel/installer.c",
@@ -347,13 +347,14 @@ static int generate_symbol_table(const char *elf_path, const char *c_output_path
     return 0;
 }
 
-static int build_kernel(bool kernel_only, bool panic_test) {
+static int build_kernel(bool kernel_only, bool panic_test, bool ci_smoke) {
     char object[PATH_CAPACITY];
     char link[COMMAND_CAPACITY];
     size_t index;
     int written;
     size_t symbol_count = 0;
     const char *panic_define = panic_test ? " -DKOS_PANIC_TEST" : "";
+    const char *ci_smoke_define = ci_smoke ? " -DKOS_CI_SMOKE" : "";
     const char *const flags =
         "--target=x86_64-unknown-none-elf -std=c17 -ffreestanding -fno-stack-protector "
         "-fno-pic -fno-pie -mno-red-zone -mcmodel=kernel -mno-mmx -mno-sse -mno-80387 "
@@ -374,8 +375,8 @@ static int build_kernel(bool kernel_only, bool panic_test) {
     /* Compile all C sources */
     for (index = 0; index < ARRAY_COUNT(c_sources); ++index) {
         object_path(c_sources[index], object, sizeof(object));
-        if (object[0] == '\0' || execute_format("call \"%s\" %s%s -c \"%s\" -o \"%s\"",
-             clang_command(), flags, panic_define, c_sources[index], object) != 0) {
+        if (object[0] == '\0' || execute_format("call \"%s\" %s%s%s -c \"%s\" -o \"%s\"",
+             clang_command(), flags, panic_define, ci_smoke_define, c_sources[index], object) != 0) {
             return 1;
         }
     }
@@ -530,13 +531,14 @@ static int run_qemu(int memory_mb, int host_port, bool display, bool gdb_wait) {
 static void print_usage(void) {
     puts("KOS C development tool");
     puts("Usage: kos-tool <check|bootstrap-limine|bootstrap-assets|bootstrap-nasm|build|run> [options]");
-    puts("build options: --kernel-only, --panic-test");
+    puts("build options: --kernel-only, --panic-test, --ci-smoke");
     puts("run options: --display, --gdb-wait, --memory-mb <128..4096>, --host-port <1024..65535>");
 }
 
 int main(int argc, char **argv) {
     bool kernel_only = false;
     bool panic_test = false;
+    bool ci_smoke = false;
     bool display = false;
     bool gdb_wait = false;
     bool skip_binary = false;
@@ -550,6 +552,7 @@ int main(int argc, char **argv) {
     for (index = 2; index < argc; ++index) {
         if (strcmp(argv[index], "--kernel-only") == 0) kernel_only = true;
         else if (strcmp(argv[index], "--panic-test") == 0) panic_test = true;
+        else if (strcmp(argv[index], "--ci-smoke") == 0) ci_smoke = true;
         else if (strcmp(argv[index], "--display") == 0) display = true;
         else if (strcmp(argv[index], "--gdb-wait") == 0) gdb_wait = true;
         else if (strcmp(argv[index], "--skip-binary") == 0) skip_binary = true;
@@ -561,7 +564,7 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "bootstrap-limine") == 0) return bootstrap_limine(skip_binary);
     if (strcmp(argv[1], "bootstrap-assets") == 0) return bootstrap_assets();
     if (strcmp(argv[1], "bootstrap-nasm") == 0) return bootstrap_nasm();
-    if (strcmp(argv[1], "build") == 0) return build_kernel(kernel_only, panic_test);
+    if (strcmp(argv[1], "build") == 0) return build_kernel(kernel_only, panic_test, ci_smoke);
     if (strcmp(argv[1], "run") == 0) {
         if (memory_mb < 128 || memory_mb > 4096) return fail("memory must be between 128 and 4096 MB");
         if (host_port < 1024 || host_port > 65535) return fail("host port must be between 1024 and 65535");

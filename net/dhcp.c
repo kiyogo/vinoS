@@ -231,7 +231,7 @@ static uint64_t build_dhcp_request(uint8_t *packet, uint64_t capacity, uint32_t 
     return offset > DHCP_PACKET_MIN_SIZE ? offset : DHCP_PACKET_MIN_SIZE;
 }
 
-bool net_dhcp_acquire(uint64_t timeout_ticks) {
+static bool net_dhcp_acquire_once(uint64_t timeout_ticks) {
     struct net_interface_info info;
     if (!net_interface_info(&info) || !info.available) {
         return false;
@@ -374,6 +374,29 @@ bool net_dhcp_acquire(uint64_t timeout_ticks) {
 
 bool net_dhcp_renew(uint64_t timeout_ticks) {
     return net_dhcp_acquire(timeout_ticks);
+}
+
+bool net_dhcp_acquire(uint64_t timeout_ticks) {
+    if (timeout_ticks == 0) {
+        timeout_ticks = timer_frequency_hz() * 5;
+    }
+
+    /* A lost broadcast is common during link bring-up; retry the full exchange. */
+    for (uint32_t attempt = 0; attempt < 3; ++attempt) {
+        if (net_dhcp_acquire_once(timeout_ticks)) {
+            return true;
+        }
+        if (attempt + 1 < 3) {
+            net_ipv4_set_dhcp_state(NET_DHCP_DISCOVERING);
+            if (task_is_multitasking_active()) {
+                task_sleep(1);
+            } else {
+                cpu_wait_for_interrupt();
+            }
+        }
+    }
+    net_ipv4_set_dhcp_state(NET_DHCP_FAILED);
+    return false;
 }
 
 enum net_dhcp_state net_dhcp_current_state(void) {
