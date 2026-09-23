@@ -229,7 +229,7 @@ If selected Default cannot be started, including a missing executable, Plus
 boot and explicit `gui start/restart default` attempts try MVP first and retain
 the CLI as the final fallback. MVP can request a one-shot retry of Default
 after repair. The file browser is intentionally read-only. Remote install is
-visible but fail-closed: no repository/catalog URL, pinned package signing
+visible but fail-closed: no remote repository/provider, pinned package signing
 key, or configured TLS CA root currently exists, so the kernel rejects remote
 executables. Shutdown currently syncs storage and halts CPUs; ACPI firmware
 power-off is not implemented. Package integrity uses detached SHA-256, not a
@@ -253,9 +253,26 @@ rejects overlapping GUI install namespaces/package IDs so one GUI package
 cannot claim or remove another GUI's files. Runtime fallback is one-shot and
 never reboots the machine, so a failing GUI cannot cause a GUI reboot loop.
 
+### Phase 10 — Remote GUI interfaces
+
+`include/kos/gui_repository.h` defines the `gui_repository`,
+`remote_package_provider`, and `package_verifier` callback contracts.
+Repositories use stable IDs; transport endpoints are deliberately not embedded
+in manifests or pending state. A provider returns a package artifact and must
+provide its matching release callback. There is no progress callback until a
+provider can report measured transfer progress.
+
+`pending_gui_install` carries the GUI/repository IDs and expected version,
+checksum, signature metadata, and terminal error. The contract can represent a
+future MVP/network handoff, but no repository or remote provider is registered.
+Unavailable callbacks return `NOT_CONFIGURED`; they do not fabricate a URL,
+download, signature success, or progress. The shared verifier interface has a
+real SHA-256 implementation for integrity checking; signature verification
+remains unconfigured and remote executable installation remains fail-closed.
+
 ## Deliberate follow-up work
 
-Remaining work beyond the Phase 9 GUI manager:
+Remaining work beyond the Phase 10 remote interfaces:
 
 1. Add a release signing key and signature verification policy; current package
    payloads are unsigned and carry SHA-256 integrity metadata only.
@@ -265,9 +282,9 @@ Remaining work beyond the Phase 9 GUI manager:
 4. Persist package ownership records across reboot; until that is implemented,
    local repair reinstalls a verified ISO package when the runtime registry is
    empty.
-5. Add remote package transport only after a trusted catalog, TLS CA roots,
-   pinned signing key, signature policy, and offline/recovery behavior are
-   configured. Remote installs currently fail closed.
+5. Configure and audit a trusted catalog, TLS CA roots, pinned signing key,
+   signature policy, and offline/recovery behavior before registering a real
+   remote provider. Remote installs currently fail closed.
 6. Add ACPI S5 power-off after validating hardware/QEMU support.
 
 ## Verification

@@ -1,8 +1,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <kos/block_cache.h>
-#include <kos/crypto.h>
 #include <kos/gui_manager.h>
+#include <kos/gui_repository.h>
 #include <kos/heap.h>
 #include <kos/installer.h>
 #include <kos/log.h>
@@ -46,6 +46,13 @@ static const struct gui_manifest gui_registry[] = {
         .min_os_version = "0.1",
         .signature = "unsigned; detached SHA-256 verified",
     },
+};
+
+static const struct package_verifier_ops local_package_verifier_ops = {
+    .verify_checksum = package_verifier_sha256_hex,
+};
+static const struct package_verifier local_package_verifier = {
+    .ops = &local_package_verifier_ops,
 };
 
 static bool manager_initialized;
@@ -240,11 +247,6 @@ static uint64_t gui_memory_size(void *context) {
     return reader == NULL ? 0 : reader->size;
 }
 
-static char checksum_hex_digit(uint8_t value) {
-    static const char digits[] = "0123456789abcdef";
-    return digits[value & 0x0Fu];
-}
-
 static bool package_checksum_matches(const struct gui_manifest *manifest,
                                      const uint8_t *package_data,
                                      uint64_t package_size) {
@@ -257,23 +259,25 @@ static bool package_checksum_matches(const struct gui_manifest *manifest,
     const uint8_t *checksum_file = NULL;
     uint64_t checksum_file_size = 0;
     if (!vfs_read_file(checksum_path, &checksum_file, &checksum_file_size)
-        || checksum_file == NULL || checksum_file_size < 64) {
+        || checksum_file == NULL) {
         return false;
     }
-    for (uint64_t index = 64; index < checksum_file_size; ++index) {
-        if (checksum_file[index] != '\r' && checksum_file[index] != '\n') return false;
-    }
 
-    uint8_t digest[32];
-    kos_sha256(package_data, package_size, digest);
-    for (uint32_t index = 0; index < 32; ++index) {
-        if (checksum_file[index * 2] != (uint8_t)checksum_hex_digit(digest[index] >> 4)
-            || checksum_file[index * 2 + 1]
-                != (uint8_t)checksum_hex_digit(digest[index])) {
-            return false;
+    bool valid_checksum_file = checksum_file_size >= 64;
+    for (uint64_t index = 64;
+         valid_checksum_file && index < checksum_file_size; ++index) {
+        if (checksum_file[index] != '\r' && checksum_file[index] != '\n') {
+            valid_checksum_file = false;
         }
     }
-    return true;
+    char expected_checksum[GUI_MAX_CHECKSUM_LENGTH] = {0};
+    if (valid_checksum_file) kmemcpy(expected_checksum, checksum_file, 64);
+    if (checksum_file_size != 0) kfree((void *)checksum_file);
+    return valid_checksum_file
+        && package_verifier_verify_checksum(&local_package_verifier,
+                                             expected_checksum, package_data,
+                                             package_size)
+            == PACKAGE_VERIFICATION_OK;
 }
 
 static bool find_installed_vino_volume(char *letter_out) {

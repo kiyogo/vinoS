@@ -14,21 +14,20 @@
 #define GUI_MAX_NAME_LENGTH 64
 #define GUI_MAX_VERSION_LENGTH 32
 #define GUI_MAX_PATH_LENGTH 128
-#define GUI_MAX_URL_LENGTH 256
+#define GUI_MAX_REPOSITORY_ID_LENGTH 48
 #define GUI_MAX_ARCH_LENGTH 16
 #define GUI_MAX_CHECKSUM_LENGTH 65
 #define GUI_MAX_SIGNATURE_LENGTH 512
 
 #define INSTALLER_FLOW_ERROR_LENGTH 128
 #define INSTALLER_MAX_PARTITION_OPERATIONS 16
-#define INSTALLER_MAX_REPOSITORY_LENGTH GUI_MAX_URL_LENGTH
-
 enum gui_package_source {
     GUI_PACKAGE_SOURCE_LOCAL_ISO = 0,
     GUI_PACKAGE_SOURCE_REMOTE = 1,
 };
 
-/* Installer-visible GUI metadata and future repository compatibility fields. */
+/* Installer-visible GUI metadata. Remote packages are repository-ID based;
+   transport endpoints are resolved by a configured provider, never embedded. */
 struct gui_manifest {
     char id[GUI_MAX_ID_LENGTH];
     char name[GUI_MAX_NAME_LENGTH];
@@ -43,7 +42,7 @@ struct gui_manifest {
     char entry_point[GUI_MAX_PATH_LENGTH];
     char architecture[GUI_MAX_ARCH_LENGTH];
     char min_os_version[GUI_MAX_VERSION_LENGTH];
-    char download_url[GUI_MAX_URL_LENGTH];
+    char repository_id[GUI_MAX_REPOSITORY_ID_LENGTH];
     char checksum_sha256[GUI_MAX_CHECKSUM_LENGTH];
     char signature[GUI_MAX_SIGNATURE_LENGTH];
 };
@@ -182,7 +181,7 @@ enum pending_gui_install_state {
 struct pending_gui_install {
     enum pending_gui_install_state state;
     char gui_id[GUI_MAX_ID_LENGTH];
-    char repository[INSTALLER_MAX_REPOSITORY_LENGTH];
+    char repository_id[GUI_MAX_REPOSITORY_ID_LENGTH];
     char version[GUI_MAX_VERSION_LENGTH];
     char checksum_sha256[GUI_MAX_CHECKSUM_LENGTH];
     char signature[GUI_MAX_SIGNATURE_LENGTH];

@@ -557,7 +557,7 @@ static void draw_remote_page(void) {
     draw_text(38, y, selected_gui == 0 ? "Target package: Default (D)" : "Target package: MVP (M)",
               color_cyan, color_panel);
     draw_text(38, y + 18, "Remote installation is pending configuration.", color_text, color_panel);
-    draw_text(38, y + 34, "No repository URL or pinned KPKG signing key is configured.",
+    draw_text(38, y + 34, "No remote GUI repository, transport, or signing key is configured.",
               color_text, color_panel);
     draw_text(38, y + 50, "The TLS verifier has no CA trust root configured.",
               color_muted, color_panel);

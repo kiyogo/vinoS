@@ -1,11 +1,37 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include <kos/gui_repository.h>
 #include <kos/installer_contracts.h>
 #include <kos/memory.h>
 
 static bool has_text(const char *value) {
     return value != NULL && value[0] != '\0';
+}
+
+static bool is_repository_id(const char *value) {
+    if (!has_text(value)) return false;
+    for (uint64_t index = 0; value[index] != '\0'; ++index) {
+        char character = value[index];
+        if (!((character >= 'a' && character <= 'z')
+              || (character >= 'A' && character <= 'Z')
+              || (character >= '0' && character <= '9')
+              || character == '-' || character == '_' || character == '.')) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool is_sha256_hex(const char *value) {
+    if (value == NULL) return false;
+    for (uint32_t index = 0; index < 64; ++index) {
+        char character = value[index];
+        if (!((character >= '0' && character <= '9')
+              || (character >= 'a' && character <= 'f')
+              || (character >= 'A' && character <= 'F'))) return false;
+    }
+    return value[64] == '\0';
 }
 
 static void copy_text(char *destination, uint64_t capacity, const char *source) {
@@ -41,10 +67,14 @@ bool gui_manifest_is_valid(const struct gui_manifest *manifest) {
         return false;
     }
     if (manifest->source == GUI_PACKAGE_SOURCE_LOCAL_ISO) {
-        return has_text(manifest->package_path) && !manifest->requires_network;
+        return has_text(manifest->package_path) && !manifest->requires_network
+            && manifest->repository_id[0] == '\0';
     }
     if (manifest->source == GUI_PACKAGE_SOURCE_REMOTE) {
-        return manifest->requires_network && has_text(manifest->download_url);
+        return manifest->requires_network && manifest->package_path[0] == '\0'
+            && is_repository_id(manifest->repository_id)
+            && is_sha256_hex(manifest->checksum_sha256)
+            && has_text(manifest->signature);
     }
     return false;
 }
@@ -152,8 +182,17 @@ void pending_gui_install_init(struct pending_gui_install *pending) {
 bool pending_gui_install_is_valid(const struct pending_gui_install *pending) {
     if (pending == NULL || pending->state < PENDING_GUI_NONE
         || pending->state > PENDING_GUI_CANCELLED) return false;
-    if (pending->state == PENDING_GUI_NONE) return pending->gui_id[0] == '\0';
-    return has_text(pending->gui_id);
+    if (pending->state == PENDING_GUI_NONE) {
+        return pending->gui_id[0] == '\0' && pending->repository_id[0] == '\0';
+    }
+    if (!has_text(pending->gui_id)
+        || (pending->repository_id[0] != '\0'
+            && !is_repository_id(pending->repository_id))) return false;
+    if (pending->state >= PENDING_GUI_REQUESTED
+        && pending->state <= PENDING_GUI_COMPLETED) {
+        return is_repository_id(pending->repository_id);
+    }
+    return true;
 }
 
 void installer_state_init(struct installer_state *state) {
@@ -207,11 +246,18 @@ bool installer_contract_self_test(void) {
         .source = GUI_PACKAGE_SOURCE_REMOTE,
         .requires_network = true,
         .package_app_id = "com.vino.gui.future",
-        .install_root = "D:/Apps/com.vino.gui.future",
+        .install_root = "system/gui/future",
         .entry_point = "bin/gui-future.elf",
         .architecture = "x86_64",
-        .download_url = "https://example.invalid/gui-future.pkg",
     };
+    if (gui_manifest_is_valid(&remote_gui)) return false;
+    kstrncpy(remote_gui.repository_id, "test-repository",
+             sizeof(remote_gui.repository_id) - 1);
+    kstrncpy(remote_gui.checksum_sha256,
+             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+             sizeof(remote_gui.checksum_sha256) - 1);
+    kstrncpy(remote_gui.signature, "test-fixture",
+             sizeof(remote_gui.signature) - 1);
     if (!gui_manifest_is_valid(&remote_gui)) return false;
 
     struct partition_plan plan;
@@ -246,9 +292,12 @@ bool installer_contract_self_test(void) {
     if (!pending_gui_install_is_valid(&pending)) return false;
     pending.state = PENDING_GUI_REQUESTED;
     kstrncpy(pending.gui_id, "future", sizeof(pending.gui_id) - 1);
+    if (pending_gui_install_is_valid(&pending)) return false;
+    kstrncpy(pending.repository_id, "test-repository",
+             sizeof(pending.repository_id) - 1);
     if (!pending_gui_install_is_valid(&pending)) return false;
 
     struct installer_state state;
     installer_state_init(&state);
-    return installer_state_is_valid(&state);
+    return installer_state_is_valid(&state) && gui_remote_interfaces_self_test();
 }

@@ -630,7 +630,8 @@ static void set_pending_gui(struct installer_flow *flow, const struct gui_manife
     struct pending_gui_install *pending = &flow->state.pending_gui;
     pending->state = state;
     copy_text(pending->gui_id, sizeof(pending->gui_id), gui->id);
-    copy_text(pending->repository, sizeof(pending->repository), gui->download_url);
+    copy_text(pending->repository_id, sizeof(pending->repository_id),
+              gui->repository_id);
     copy_text(pending->version, sizeof(pending->version), gui->version);
     copy_text(pending->checksum_sha256, sizeof(pending->checksum_sha256),
               gui->checksum_sha256);
