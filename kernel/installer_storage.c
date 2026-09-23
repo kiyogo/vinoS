@@ -3,6 +3,7 @@
 
 #include <kos/block_cache.h>
 #include <kos/fat32.h>
+#include <kos/installer_flow.h>
 #include <kos/installer_storage.h>
 #include <kos/log.h>
 #include <kos/memory.h>
@@ -158,6 +159,13 @@ bool installer_storage_format_partition(struct block_device *partition,
     return fat32_format(partition, "VINO_OS");
 }
 
+static int installer_storage_test_install_step(struct installer_flow *flow, void *context) {
+    (void)flow;
+    if (context == NULL) return -1;
+    ++*(uint32_t *)context;
+    return 0;
+}
+
 static bool installer_storage_check_partition(struct block_device *disk,
                                               enum partition_table_type table_type,
                                               uint64_t start_lba,
@@ -180,6 +188,37 @@ static bool installer_storage_check_partition(struct block_device *disk,
     }
     struct fat32_volume *volume = fat32_mount(partition);
     if (volume == NULL || !fat32_unmount(volume)) return false;
+
+    struct installer_flow flow;
+    uint32_t install_calls = 0;
+    struct installer_engine engine = {
+        .install_base_os = installer_storage_test_install_step,
+        .install_bootloader = installer_storage_test_install_step,
+        .context = &install_calls,
+    };
+    if (!installer_flow_init(&flow)
+        || installer_flow_select_profile(&flow, "cli") != INSTALLER_FLOW_OK
+        || installer_flow_select_disk(&flow, disk->name) != INSTALLER_FLOW_OK
+        || installer_flow_select_partition(&flow, partition->name) != INSTALLER_FLOW_OK) {
+        return false;
+    }
+    uint64_t original_start = partition->start_lba;
+    partition->start_lba = UINT64_MAX;
+    bool overflow_rejected = !installer_flow_is_valid(&flow);
+    partition->start_lba = original_start;
+    struct block_device *original_parent = partition->parent;
+    partition->parent = NULL;
+    bool invalid_parent_rejected = !installer_flow_is_valid(&flow);
+    partition->parent = original_parent;
+    if (!overflow_rejected || !invalid_parent_rejected
+        || installer_flow_execute(&flow, &engine) != INSTALLER_FLOW_ERR_INVALID_STATE
+        || install_calls != 0
+        || installer_flow_format_selected_partition(&flow, true) != INSTALLER_FLOW_OK
+        || installer_flow_execute(&flow, &engine) != INSTALLER_FLOW_OK
+        || install_calls != 2) {
+        return false;
+    }
+
     if (installer_storage_delete_partition(partition, false)) return false;
     return installer_storage_delete_partition(partition, true)
         && installer_storage_partition_count(disk) == 0;

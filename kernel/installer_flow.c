@@ -309,7 +309,13 @@ bool installer_flow_is_valid(const struct installer_flow *flow) {
             || !gui_manifest_is_valid(flow->selected_gui))) {
         return false;
     }
-    if (flow->selected_disk->parent != NULL
+    if (flow->selected_disk->state != BLOCK_DEVICE_ONLINE
+        || flow->selected_disk->type == BLOCK_TYPE_PARTITION
+        || flow->selected_disk->parent != NULL
+        || flow->selected_disk->block_size != BLOCK_DEFAULT_SECTOR_SIZE
+        || flow->selected_disk->total_blocks == 0
+        || block_device_find_by_name(flow->state.partition_plan.disk_name)
+            != flow->selected_disk
         || kstrcmp(flow->state.partition_plan.disk_name, flow->selected_disk->name) != 0
         || flow->state.partition_plan.disk_block_size != flow->selected_disk->block_size
         || flow->state.partition_plan.disk_total_blocks != flow->selected_disk->total_blocks) {
@@ -320,9 +326,22 @@ bool installer_flow_is_valid(const struct installer_flow *flow) {
             && flow->state.partition_plan.operation_count == 1
             && flow->state.partition_plan.operations[0].type == PARTITION_PLAN_CREATE;
     }
-    return flow->selected_partition->parent == flow->selected_disk
-        && flow->selected_partition->total_blocks != 0
-        && kstrcmp(flow->state.partition_plan.disk_name, flow->selected_disk->name) == 0
+    if (block_device_find_by_name(flow->state.partition_plan.selected_partition_name)
+            != flow->selected_partition
+        || flow->selected_partition->state != BLOCK_DEVICE_ONLINE
+        || flow->selected_partition->type != BLOCK_TYPE_PARTITION
+        || flow->selected_partition->parent != flow->selected_disk
+        || flow->selected_partition->block_size != flow->selected_disk->block_size
+        || flow->selected_partition->start_lba == 0
+        || flow->selected_partition->total_blocks == 0
+        || flow->selected_partition->start_lba
+            > UINT64_MAX - flow->selected_partition->total_blocks
+        || flow->selected_partition->start_lba + flow->selected_partition->total_blocks
+            > flow->selected_disk->total_blocks) {
+        return false;
+    }
+    return flow->state.partition_plan.selected_start_lba == flow->selected_partition->start_lba
+        && flow->state.partition_plan.selected_block_count == flow->selected_partition->total_blocks
         && kstrcmp(flow->state.partition_plan.selected_partition_name,
                    flow->selected_partition->name) == 0;
 }
@@ -387,6 +406,10 @@ int installer_flow_back(struct installer_flow *flow) {
 
 int installer_flow_execute(struct installer_flow *flow, const struct installer_engine *engine) {
     if (flow == NULL || engine == NULL || !installer_flow_is_valid(flow)
+        || flow->state.phase != INSTALLER_FLOW_CONFIRMATION
+        || !flow->state.partition_plan.confirmed
+        || flow->selected_partition == NULL
+        || flow->state.partition_plan.selected_filesystem != PARTITION_PLAN_FILESYSTEM_FAT32
         || engine->install_base_os == NULL || engine->install_bootloader == NULL) {
         return INSTALLER_FLOW_ERR_INVALID_STATE;
     }
