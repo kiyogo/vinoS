@@ -141,8 +141,16 @@ installer ui
 ```
 
 The normal build remains the existing CLI/test boot path. The installer build
-defines `KOS_INSTALLER` and enters the native installer UI after hardware and
-VFS initialization.
+defines `KOS_INSTALLER`, boots to the CLI without running the full regression
+suite, and exposes the native installer through `installer ui`. After a
+successful install, the Finish screen syncs storage and reboots into the CLI.
+
+Before writing Limine files, `install_bootloader()` checks the committed OS
+metadata and verifies that both the installed kernel and initramfs match the
+base OS SHA-256 manifest. Any missing or altered boot payload aborts bootloader
+installation; the UI reports the failure and does not reboot. Successful CLI
+installs show Finish for five seconds (Enter reboots immediately; Esc returns
+to the live CLI).
 
 ### Package uninstall ownership
 

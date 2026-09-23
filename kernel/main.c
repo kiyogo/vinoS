@@ -48,9 +48,6 @@
 #include <kos/installer_contracts.h>
 #include <kos/installer_storage.h>
 #include <kos/gui_manager.h>
-#ifdef KOS_INSTALLER
-#include <kos/installer_ui.h>
-#endif
 #include <kos/qa.h>
 #include <kos/fault_injection.h>
 #include <limine.h>
@@ -247,7 +244,8 @@ static bool vfs_volume_self_test(void) {
     struct vfs_metadata metadata;
     struct vfs_self_test_listing listing = {0};
     const uint8_t payload[] = "VFS nested file\n";
-    bool ok = vfs_volume_count() == 2
+    /* Physical FAT32 volumes may already be mounted by volume_manager_init(). */
+    bool ok = vfs_volume_count() >= 2
         && vfs_read_file("C:\\README.TXT", &system_data, &system_size)
         && system_size != 0
         && system_data[0] != '\0'
@@ -513,13 +511,6 @@ KOS_NORETURN void kernel_main(void) {
         kernel_halt();
     }
     log_info("Kernel task scheduler initialized in cooperative mode.");
-#ifdef KOS_INSTALLER
-    if (!installer_ui_run()) {
-        log_error("Installer UI initialization failed.");
-        kernel_halt();
-    }
-    kernel_halt();
-#endif
     log_info("Running bootstrap commands.");
     if (!kernel_command_execute("sysinfo") || !kernel_command_execute("dhcp")
         || !kernel_command_execute("netinfo")) {
@@ -529,7 +520,9 @@ KOS_NORETURN void kernel_main(void) {
     /* Initialize Fault Injection Subsystem */
     fault_injection_init();
 
-#ifdef KOS_CI_SMOKE
+#ifdef KOS_INSTALLER
+    log_info("Vino CLI ready; open the disk installer with `installer ui`.");
+#elif defined(KOS_CI_SMOKE)
     (void)kernel_command_execute("sockettest");
     (void)kernel_command_execute("syscalltest");
     (void)kernel_command_execute("filetest");

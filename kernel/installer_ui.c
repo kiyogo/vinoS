@@ -2,13 +2,17 @@
 #include <stdint.h>
 
 #include <kos/block.h>
+#include <kos/block_cache.h>
+#include <kos/cpu.h>
 #include <kos/gui_canvas.h>
 #include <kos/installer_engine.h>
 #include <kos/installer_flow.h>
 #include <kos/installer_ui.h>
 #include <kos/keyboard.h>
 #include <kos/log.h>
+#include <kos/memory.h>
 #include <kos/task.h>
+#include <kos/timer.h>
 
 enum {
     UI_MARGIN = 48,
@@ -44,8 +48,15 @@ static void draw_shell(const struct installer_flow *flow) {
     gui_canvas_border(panel, 2, color_border);
     text(panel.x + 32, panel.y + 28, "Vino OS Installer", color_text);
     text(panel.x + 32, panel.y + 62, "System: Vino OS   Edition: default", color_muted);
+    const char *footer = "Tab/J/K: select   Enter: continue   C: create   F: format   Esc: quit";
+    if (flow != NULL && flow->state.phase == INSTALLER_FLOW_FINISHED) {
+        footer = "Enter/R: reboot now   Esc/Q: return to Vino CLI";
+    }
+    else if (flow != NULL && flow->state.phase == INSTALLER_FLOW_ERROR) {
+        footer = "Esc/Q: return to Vino CLI";
+    }
     text(panel.x + 32, panel.y + panel.height - 48,
-         "Tab/J/K: select   Enter: continue   C: create   F: format   Esc: quit", color_muted);
+         footer, color_muted);
     if (flow != NULL && flow->state.phase == INSTALLER_FLOW_ERROR) {
         text(panel.x + 32, panel.y + panel.height - 82, flow->state.error, color_error);
     }
@@ -211,6 +222,28 @@ static void draw_review_page(const struct installer_flow *flow, bool format_conf
     }
 }
 
+static void draw_finish_page(const struct installer_flow *flow) {
+    draw_shell(flow);
+    text(UI_MARGIN + 32, UI_MARGIN + 120, "Installation complete", color_text);
+    text(UI_MARGIN + 32, UI_MARGIN + 168, "Vino OS edition=default is installed.", color_muted);
+    text(UI_MARGIN + 32, UI_MARGIN + 208, "The disk is synced and Limine is ready to boot.", color_muted);
+    text(UI_MARGIN + 32, UI_MARGIN + 280, "Rebooting automatically in 5 seconds...", color_text);
+    text(UI_MARGIN + 32, UI_MARGIN + 328, "Enter: reboot now   Esc: return to Vino CLI", color_muted);
+}
+
+static bool wait_for_finish_reboot(void) {
+    uint64_t deadline = timer_get_ticks() + timer_ms_to_ticks(5000);
+    while (timer_get_ticks() < deadline) {
+        char key;
+        if (keyboard_read_char(&key)) {
+            if (key == '\n' || key == 'r') return true;
+            if (key == 27 || key == 'q') return false;
+        }
+        task_yield();
+    }
+    return true;
+}
+
 static int request_default_partition(struct installer_flow *flow) {
     if (flow == NULL || flow->selected_disk == NULL
         || partition_count(flow->selected_disk) != 0) {
@@ -219,11 +252,24 @@ static int request_default_partition(struct installer_flow *flow) {
     enum partition_table_type table_type = flow->state.partition_plan.table_type;
     if (table_type == PARTITION_TABLE_NONE) table_type = PARTITION_TABLE_GPT;
     uint64_t first = 2048;
-    uint64_t last = flow->selected_disk->total_blocks - 1;
+    uint64_t last = 0;
     struct partition_table_info table;
-    if (partition_table_inspect(flow->selected_disk, &table)
-        && table.type != PARTITION_TABLE_NONE) {
+    if (!partition_table_inspect(flow->selected_disk, &table)
+        || (table.type != PARTITION_TABLE_NONE && table.type != table_type)) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    if (table.type != PARTITION_TABLE_NONE) {
         last = table.last_usable_lba;
+    }
+    else if (table_type == PARTITION_TABLE_GPT) {
+        /* The built-in GPT writer reserves 33 sectors at the end of the disk. */
+        if (flow->selected_disk->total_blocks <= 34) {
+            return INSTALLER_FLOW_ERR_INVALID_STATE;
+        }
+        last = flow->selected_disk->total_blocks - 34;
+    }
+    else {
+        last = flow->selected_disk->total_blocks - 1;
     }
     if (last < first || last - first + 1 < 4096) {
         return INSTALLER_FLOW_ERR_INVALID_STATE;
@@ -315,6 +361,26 @@ bool installer_ui_run(void) {
                         .install_bootloader = install_bootloader,
                     };
                     result = installer_flow_execute(&flow, &engine);
+                }
+                if (result == INSTALLER_FLOW_OK
+                    && flow.state.phase == INSTALLER_FLOW_FINISHED) {
+                    if (!block_cache_sync()) {
+                        flow.state.transaction.state = INSTALL_TRANSACTION_FAILED;
+                        flow.state.transaction.last_error = INSTALLER_FLOW_ERR_INVALID_STATE;
+                        kstrncpy(flow.state.error,
+                                 "Final disk flush failed; reboot cancelled",
+                                 sizeof(flow.state.error) - 1);
+                        flow.state.error[sizeof(flow.state.error) - 1] = '\0';
+                        flow.state.phase = INSTALLER_FLOW_ERROR;
+                    }
+                    else {
+                        draw_finish_page(&flow);
+                        if (wait_for_finish_reboot()) {
+                            log_info("Installer finished; rebooting into the installed Vino CLI.");
+                            cpu_reboot();
+                        }
+                        return true;
+                    }
                 }
             }
             if (result != INSTALLER_FLOW_OK && flow.state.phase != INSTALLER_FLOW_ERROR) {

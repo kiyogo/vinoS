@@ -661,6 +661,7 @@ static bool partition_gpt_create(struct block_device *dev,
     uint32_t entries_bytes = 0;
     uint32_t entries_sectors = 0;
     bool new_table = existing->type == PARTITION_TABLE_NONE;
+    uint8_t protective_sector[BLOCK_DEFAULT_SECTOR_SIZE];
 
     if (new_table) {
         if (dev->total_blocks < 68) return false;
@@ -683,7 +684,6 @@ static bool partition_gpt_create(struct block_device *dev,
         if (entries == NULL) return false;
         kmemset(entries, 0, (uint64_t)entries_sectors * dev->block_size);
 
-        uint8_t protective_sector[BLOCK_DEFAULT_SECTOR_SIZE];
         kmemset(protective_sector, 0, sizeof(protective_sector));
         struct mbr_sector *protective = (struct mbr_sector *)protective_sector;
         protective->signature = MBR_BOOT_SIGNATURE;
@@ -691,10 +691,6 @@ static bool partition_gpt_create(struct block_device *dev,
         protective->partitions[0].start_lba = 1;
         protective->partitions[0].sector_count = dev->total_blocks - 1 > UINT32_MAX
             ? UINT32_MAX : (uint32_t)(dev->total_blocks - 1);
-        if (!block_write(dev, 0, 1, protective_sector)) {
-            kfree(entries);
-            return false;
-        }
     }
     else {
         if (!partition_gpt_read(dev, &header, &entries, &entries_bytes, &entries_sectors)) {
@@ -751,6 +747,9 @@ static bool partition_gpt_create(struct block_device *dev,
     entry->name[2] = 'N';
     entry->name[3] = 'O';
     bool result = partition_gpt_write(dev, &header, entries, entries_bytes, entries_sectors);
+    if (result && new_table) {
+        result = block_write(dev, 0, 1, protective_sector) && block_flush(dev);
+    }
     kfree(entries);
     return result;
 }

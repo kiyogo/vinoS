@@ -352,6 +352,113 @@ static void checksum_to_hex(const uint8_t checksum[32], char output[65]) {
     output[64] = '\0';
 }
 
+static bool buffer_has_line(const uint8_t *data, uint64_t size, const char *line) {
+    if (data == NULL || line == NULL) return false;
+    uint64_t line_size = kstrlen(line);
+    uint64_t line_start = 0;
+    for (uint64_t index = 0; index <= size; ++index) {
+        if (index != size && data[index] != '\n') continue;
+        if (index - line_start == line_size
+            && kmemcmp(data + line_start, line, line_size) == 0) {
+            return true;
+        }
+        line_start = index + 1;
+    }
+    return false;
+}
+
+static bool file_matches_checksum_manifest(char volume, const char *relative_path,
+                                           const uint8_t *manifest,
+                                           uint64_t manifest_size) {
+    char absolute[VFS_MAX_PATH];
+    const uint8_t *data = NULL;
+    uint64_t size = 0;
+    bool matches = false;
+    char installed_path[VFS_MAX_PATH];
+    int installed_path_size = relative_path == NULL ? -1
+        : snprintf(installed_path, sizeof(installed_path), "VINO/%s", relative_path);
+    if (!path_is_safe_relative(relative_path)
+        || installed_path_size <= 0
+        || (uint64_t)installed_path_size >= sizeof(installed_path)
+        || !make_absolute_path(absolute, sizeof(absolute), volume, installed_path)
+        || !vfs_read_file(absolute, &data, &size)
+        || data == NULL || size == 0 || size > UINT32_MAX) {
+        log_errorf("[installer] Could not read installed boot payload %s for verification.",
+                   relative_path != NULL ? relative_path : "(null)");
+        if (data != NULL && size != 0) kfree((void *)data);
+        return false;
+    }
+
+    uint8_t checksum[32];
+    char checksum_hex[65];
+    kos_sha256(data, size, checksum);
+    checksum_to_hex(checksum, checksum_hex);
+    uint64_t path_size = kstrlen(relative_path);
+    uint64_t expected_line_size = 64 + 2 + 6 + path_size;
+    uint64_t line_start = 0;
+    for (uint64_t index = 0; index <= manifest_size; ++index) {
+        if (index != manifest_size && manifest[index] != '\n') continue;
+        if (index - line_start == expected_line_size
+            && kmemcmp(manifest + line_start, checksum_hex, 64) == 0
+            && manifest[line_start + 64] == ' '
+            && manifest[line_start + 65] == ' '
+            && kmemcmp(manifest + line_start + 66, "/VINO/", 6) == 0
+            && kmemcmp(manifest + line_start + 72, relative_path, path_size) == 0) {
+            matches = true;
+            break;
+        }
+        line_start = index + 1;
+    }
+    kfree((void *)data);
+    if (!matches) {
+        log_errorf("[installer] SHA-256 manifest does not match installed payload %s.",
+                   relative_path);
+    }
+    return matches;
+}
+
+static bool installed_os_is_bootable(char volume) {
+    char metadata_path[VFS_MAX_PATH];
+    char manifest_path[VFS_MAX_PATH];
+    const uint8_t *metadata = NULL;
+    const uint8_t *manifest = NULL;
+    uint64_t metadata_size = 0;
+    uint64_t manifest_size = 0;
+    bool paths_valid = make_absolute_path(metadata_path, sizeof(metadata_path), volume,
+                                          "VINO/SYSTEM/OS.META")
+        && make_absolute_path(manifest_path, sizeof(manifest_path), volume,
+                              "VINO/SYSTEM/SHA256SUMS.TXT");
+    bool metadata_read = paths_valid
+        && vfs_read_file(metadata_path, &metadata, &metadata_size);
+    bool manifest_read = paths_valid
+        && vfs_read_file(manifest_path, &manifest, &manifest_size);
+    bool valid = metadata_read && metadata != NULL && metadata_size > 0
+        && metadata_size <= UINT32_MAX && manifest_read && manifest != NULL
+        && manifest_size > 0 && manifest_size <= UINT32_MAX;
+    if (!valid) {
+        log_errorf("[installer] Metadata/manifest read failed: paths=%u metadata=%u/%llu manifest=%u/%llu.",
+                   paths_valid ? 1u : 0u, metadata_read ? 1u : 0u,
+                   (unsigned long long)metadata_size, manifest_read ? 1u : 0u,
+                   (unsigned long long)manifest_size);
+    }
+    if (valid && (!buffer_has_line(metadata, metadata_size, "format=VINO_OS_INSTALL_V1")
+        || !buffer_has_line(metadata, metadata_size, "os_edition=default")
+        || !buffer_has_line(metadata, metadata_size, "kernel=/VINO/BOOT/KOS.ELF")
+        || !buffer_has_line(metadata, metadata_size,
+                            "initramfs=/VINO/BOOT/INITRAMFS.CPIO")
+        || !buffer_has_line(metadata, metadata_size, "install_state=committed"))) {
+        log_error("[installer] Installed OS metadata fields do not describe a committed CLI OS.");
+        valid = false;
+    }
+    if (valid && !file_matches_checksum_manifest(volume, "BOOT/KOS.ELF", manifest,
+                                                 manifest_size)) valid = false;
+    if (valid && !file_matches_checksum_manifest(volume, "BOOT/INITRAMFS.CPIO", manifest,
+                                                 manifest_size)) valid = false;
+    if (metadata != NULL && metadata_size != 0) kfree((void *)metadata);
+    if (manifest != NULL && manifest_size != 0) kfree((void *)manifest);
+    return valid;
+}
+
 static bool build_checksum_manifest(const struct installer_os_payload *payloads,
                                     uint32_t payload_count,
                                     char *manifest, uint64_t capacity,
@@ -419,27 +526,48 @@ int install_base_os(struct installer_flow *flow, void *context) {
     uint32_t verify_count = 0;
     uint32_t directory_count = 0;
     bool ok = build_os_payloads(payloads, &payload_count);
+    if (!ok) {
+        log_error("[installer] Could not collect the kernel, initramfs, and system payloads.");
+    }
     for (uint32_t index = 0; ok && index < payload_count; ++index) {
-        ok = write_verified(volume, payloads[index].path, payloads[index].data,
-                            payloads[index].size, verify_items, &verify_count,
-                            created_directories, &directory_count);
+        char installed_path[VFS_MAX_PATH];
+        int path_size = snprintf(installed_path, sizeof(installed_path),
+                                 "VINO/%s", payloads[index].path);
+        if (path_size <= 0 || (uint64_t)path_size >= sizeof(installed_path)
+            || !write_verified(volume, installed_path, payloads[index].data,
+                               payloads[index].size, verify_items, &verify_count,
+                               created_directories, &directory_count)) {
+            log_errorf("[installer] Failed to write or verify payload %s.",
+                       payloads[index].path);
+            ok = false;
+        }
     }
 
     uint64_t checksum_size = 0;
     if (ok) {
-        ok = build_checksum_manifest(payloads, payload_count, checksum_manifest,
+        if (!build_checksum_manifest(payloads, payload_count, checksum_manifest,
                                      checksum_capacity, &checksum_size)
-            && write_verified(volume, "SYSTEM/SHA256SUMS.TXT",
+            || !write_verified(volume, "VINO/SYSTEM/SHA256SUMS.TXT",
                 (const uint8_t *)checksum_manifest, checksum_size,
-                verify_items, &verify_count, created_directories, &directory_count);
+                verify_items, &verify_count, created_directories, &directory_count)) {
+            log_error("[installer] Failed to write or verify the OS checksum manifest.");
+            ok = false;
+        }
     }
 
     struct block_device *partition = flow->selected_partition;
-    if (ok) ok = block_cache_flush_device(partition);
+    if (ok && !block_cache_flush_device(partition)) {
+        log_error("[installer] Failed to flush the base OS payloads before verification.");
+        ok = false;
+    }
     if (ok) {
         block_cache_invalidate_device(partition);
         for (uint32_t index = 0; ok && index < verify_count; ++index) {
-            ok = verify_file(volume, &verify_items[index]);
+            if (!verify_file(volume, &verify_items[index])) {
+                log_errorf("[installer] Read-back checksum failed for %s.",
+                           verify_items[index].path);
+                ok = false;
+            }
         }
     }
 
@@ -460,14 +588,20 @@ int install_base_os(struct installer_flow *flow, void *context) {
             VINO_OS_EDITION_DEFAULT, flow->profile->id,
             (unsigned long long)transaction_id);
         ok = metadata_size > 0 && (uint64_t)metadata_size < sizeof(metadata)
-            && write_verified(volume, "SYSTEM/OS.META", (const uint8_t *)metadata,
+            && write_verified(volume, "VINO/SYSTEM/OS.META", (const uint8_t *)metadata,
                 (uint64_t)metadata_size, verify_items, &verify_count,
                 created_directories, &directory_count)
             && block_cache_flush_device(partition);
+        if (!ok) {
+            log_error("[installer] Failed to write, verify, or flush committed OS metadata.");
+        }
     }
     if (ok) {
         block_cache_invalidate_device(partition);
-        ok = verify_file(volume, &verify_items[verify_count - 1]);
+        if (!verify_file(volume, &verify_items[verify_count - 1])) {
+            log_error("[installer] Read-back checksum failed for VINO/SYSTEM/OS.META.");
+            ok = false;
+        }
     }
 
     if (!ok) {
@@ -615,6 +749,10 @@ int install_bootloader(struct installer_flow *flow, void *context) {
     if (flow == NULL || !flow->state.transaction.base_os_applied
         || !target_is_efi_system_partition(flow->selected_partition)
         || !transaction_target_volume(flow, &volume)) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    if (!installed_os_is_bootable(volume)) {
+        log_error("[installer] Installed OS failed metadata or boot-payload validation.");
         return INSTALLER_FLOW_ERR_INVALID_STATE;
     }
 
