@@ -5366,9 +5366,17 @@ static void command_gui(const char *arguments) {
     if (kstrcmp(operation, "install") == 0) status = gui_install(id);
     else if (kstrcmp(operation, "remove") == 0) status = gui_remove(id);
     else if (kstrcmp(operation, "reinstall") == 0) status = gui_reinstall(id);
-    else if (kstrcmp(operation, "start") == 0) status = gui_start(id);
+    else if (kstrcmp(operation, "start") == 0)
+        status = gui_start_with_fallback(id);
     else if (kstrcmp(operation, "stop") == 0) status = gui_stop(id);
-    else if (kstrcmp(operation, "restart") == 0) status = gui_restart(id);
+    else if (kstrcmp(operation, "restart") == 0) {
+        status = gui_restart(id);
+        if (status != GUI_MANAGER_OK && kstrcmp(id, "default") == 0
+            && gui_is_installed("mvp")) {
+            log_error("Default restart failed; launching MVP recovery.");
+            status = gui_start("mvp");
+        }
+    }
     else if (kstrcmp(operation, "set-default") == 0) status = gui_set_default(id);
     else if (kstrcmp(operation, "status") == 0) status = gui_status(id);
     else {

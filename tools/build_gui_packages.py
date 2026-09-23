@@ -264,9 +264,13 @@ def build_one(clang: str, linker: str, output_dir: Path,
         raise ValueError(f"entry point must be a safe bin/ path: {entry_path}")
     app_dir = output_dir / package_id
     elf_path = app_dir / Path(entry_path)
-    source_path = ROOT / "assets" / "gui" / (
-        "default_gui_app.c" if package_id == "default" else "gui_package_app.c"
-    )
+    source_names = {
+        "default": "default_gui_app.c",
+        "mvp": "mvp_gui_app.c",
+    }
+    if package_id not in source_names:
+        raise ValueError(f"no native GUI entry point registered for {package_id!r}")
+    source_path = ROOT / "assets" / "gui" / source_names[package_id]
     entry_data = compile_entry(
         clang,
         linker,

@@ -23,6 +23,7 @@ enum gui_manager_status {
 bool gui_manager_init(void);
 char gui_manager_system_volume_letter(void);
 bool gui_manager_default_should_autostart(void);
+int gui_manager_request_default_recovery(uint64_t requester_pid);
 uint32_t gui_manifest_count(void);
 const struct gui_manifest *gui_manifest_at(uint32_t index);
 const struct gui_manifest *gui_manifest_find(const char *id);
@@ -36,6 +37,7 @@ int gui_install(const char *id);
 int gui_remove(const char *id);
 int gui_reinstall(const char *id);
 int gui_start(const char *id);
+int gui_start_with_fallback(const char *id);
 int gui_stop(const char *id);
 int gui_restart(const char *id);
 int gui_set_default(const char *id);

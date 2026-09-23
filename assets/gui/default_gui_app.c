@@ -95,11 +95,15 @@ static long sys_sleep(uint32_t milliseconds) {
     return (long)result;
 }
 
-__attribute__((noreturn)) static void app_exit(void) {
+__attribute__((noreturn)) static void app_exit_with_status(uint64_t exit_status) {
     register uint64_t result __asm__("rax") = SYS_exit;
-    register uint64_t status __asm__("rdi") = 0;
+    register uint64_t status __asm__("rdi") = exit_status;
     __asm__ volatile("syscall" : "+a"(result) : "D"(status) : "rcx", "r11", "memory");
     __builtin_unreachable();
+}
+
+__attribute__((noreturn)) static void app_exit(void) {
+    app_exit_with_status(0);
 }
 
 static uint64_t sys_gettime(void) {
@@ -1308,7 +1312,7 @@ static void handle_key(char key) {
 __attribute__((noreturn)) void _start(void) {
     surface.abi_version = KOS_GUI_ABI_VERSION;
     if (vino_gui_surface_get(&surface) < 0 || surface.width < 320
-        || surface.height < 240) app_exit();
+        || surface.height < 240) app_exit_with_status(1);
     refresh_system_info();
     initialize_paths();
     terminal_init();

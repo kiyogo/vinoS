@@ -40,6 +40,8 @@
 #define SYS_gui_input   36
 #define SYS_installer   37
 #define SYS_system_info 38
+#define SYS_gui_control 39
+#define SYS_system_control 40
 
 #define KOS_MAX_SYSCALL_NR 64
 

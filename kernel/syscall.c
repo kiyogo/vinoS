@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 #include <kos/console.h>
+#include <kos/block_cache.h>
+#include <kos/cpu.h>
 #include <kos/file.h>
 #include <kos/gui_manager.h>
 #include <kos/gui_service.h>
@@ -22,7 +24,9 @@
 #include <kos/uaccess.h>
 #include <kos/vfs.h>
 #include <kos/vmm.h>
+#include <uapi/kos/gui_control.h>
 #include <uapi/kos/system_info.h>
+#include <uapi/kos/system_control.h>
 
 static long syscall_copy_path(char path[VFS_MAX_PATH], const char *user_path) {
     long result = strncpy_from_user(path, user_path, VFS_MAX_PATH);
@@ -30,6 +34,86 @@ static long syscall_copy_path(char path[VFS_MAX_PATH], const char *user_path) {
     if (result == VFS_MAX_PATH && path[VFS_MAX_PATH - 1] != '\0') return -ENAMETOOLONG;
     path[VFS_MAX_PATH - 1] = '\0';
     return 0;
+}
+
+static bool syscall_text_is_terminated(const char *text, uint64_t capacity) {
+    if (text == NULL) return false;
+    for (uint64_t index = 0; index < capacity; ++index) {
+        if (text[index] == '\0') return true;
+    }
+    return false;
+}
+
+static uint64_t syscall_gui_control(uint64_t user_request) {
+    struct kos_gui_control_request request;
+    if (!access_ok((const void *)user_request, sizeof(request))
+        || copy_from_user(&request, (const void *)user_request, sizeof(request)) != 0
+        || request.abi_version != KOS_GUI_CONTROL_ABI_VERSION
+        || !syscall_text_is_terminated(request.gui_id, sizeof(request.gui_id))) {
+        return (uint64_t)-EFAULT;
+    }
+
+    int result = GUI_MANAGER_ERR_INVALID_ARGUMENT;
+    const char *message = NULL;
+    switch (request.action) {
+        case KOS_GUI_CONTROL_QUERY:
+            result = GUI_MANAGER_OK;
+            break;
+        case KOS_GUI_CONTROL_INSTALL_LOCAL:
+            result = gui_install(request.gui_id);
+            break;
+        case KOS_GUI_CONTROL_REINSTALL_LOCAL:
+            result = gui_reinstall(request.gui_id);
+            break;
+        case KOS_GUI_CONTROL_SET_DEFAULT:
+            result = gui_set_default(request.gui_id);
+            break;
+        case KOS_GUI_CONTROL_INSTALL_REMOTE:
+            result = GUI_MANAGER_ERR_NOT_IMPLEMENTED;
+            message = "No trusted remote catalog or pinned KPKG key is configured.";
+            break;
+        case KOS_GUI_CONTROL_RECOVER_DEFAULT: {
+            struct process *caller = process_get_current();
+            result = gui_manager_request_default_recovery(
+                caller == NULL ? 0 : caller->pid);
+            if (result == GUI_MANAGER_OK)
+                message = "Default selected; closing MVP and retrying Default.";
+            break;
+        }
+        default:
+            result = GUI_MANAGER_ERR_INVALID_ARGUMENT;
+            break;
+    }
+
+    request.result = result;
+    request.installed_mask = 0;
+    if (gui_is_installed("default"))
+        request.installed_mask |= KOS_GUI_INSTALLED_DEFAULT;
+    if (gui_is_installed("mvp"))
+        request.installed_mask |= KOS_GUI_INSTALLED_MVP;
+    const char *default_id = gui_default_id();
+    kstrncpy(request.default_gui_id, default_id == NULL ? "" : default_id,
+             sizeof(request.default_gui_id) - 1);
+    request.default_gui_id[sizeof(request.default_gui_id) - 1] = '\0';
+    if (message == NULL) message = gui_manager_status_string(result);
+    kstrncpy(request.message, message, sizeof(request.message) - 1);
+    request.message[sizeof(request.message) - 1] = '\0';
+    if (copy_to_user((void *)user_request, &request, sizeof(request)) != 0)
+        return (uint64_t)-EFAULT;
+    return (uint64_t)(int64_t)result;
+}
+
+static uint64_t syscall_system_control(uint64_t action, uint64_t confirmation) {
+    if (action == KOS_SYSTEM_CONTROL_CONNECT_NETWORK) {
+        return net_dhcp_acquire((uint64_t)timer_frequency_hz() * 5)
+            ? 0 : (uint64_t)-ETIMEDOUT;
+    }
+    if (action != KOS_SYSTEM_CONTROL_RESTART
+        && action != KOS_SYSTEM_CONTROL_SHUTDOWN) return (uint64_t)-EINVAL;
+    if (confirmation != KOS_SYSTEM_CONTROL_CONFIRM_TOKEN) return (uint64_t)-EPERM;
+    if (!block_cache_sync()) return (uint64_t)-EIO;
+    if (action == KOS_SYSTEM_CONTROL_RESTART) cpu_reboot();
+    cpu_halt();
 }
 
 static uint64_t syscall_console_write(uint64_t user_address, uint64_t length) {
@@ -215,6 +299,12 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
             return copy_to_user((void *)arg0, &info, sizeof(info)) == 0
                 ? 0 : (uint64_t)-EFAULT;
         }
+
+        case SYS_gui_control:
+            return syscall_gui_control(arg0);
+
+        case SYS_system_control:
+            return syscall_system_control(arg0, arg1);
 
         case SYS_write: {
             uint64_t fd = arg0;
@@ -599,6 +689,8 @@ const char *kos_syscall_name(uint64_t number) {
         case SYS_gettime:  return "gettime";
         case SYS_sysinfo:  return "sysinfo";
         case SYS_system_info: return "system_info";
+        case SYS_gui_control: return "gui_control";
+        case SYS_system_control: return "system_control";
         case SYS_gui_display: return "gui_display";
         case SYS_gui_input: return "gui_input";
         case SYS_installer: return "installer";

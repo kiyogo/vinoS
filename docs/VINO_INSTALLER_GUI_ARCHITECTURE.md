@@ -187,22 +187,24 @@ native Vino GUI implementation.
 
 ### Phase 7 — Native Default desktop
 
-`assets/gui/default_gui_app.c` is the `DEFAULT.KPKG` ELF entry point; the MVP
-package retains its small package-demo entry point. The Default process draws
-the desktop, status bar, dock, start/context menus, and Terminal, Files,
-Settings, and Network windows through the user-space GUI display service. Its
-VFS-backed file browser is read-only and supports directory navigation and
-text preview. The terminal runs a small built-in shell and does not forward
+`assets/gui/default_gui_app.c` is the `DEFAULT.KPKG` ELF entry point. The
+standalone `assets/gui/mvp_gui_app.c` is compiled separately as the
+`MVP.KPKG` ELF entry point; MVP does not load Default or hide its features.
+The Default process draws the desktop, status bar, dock, start/context menus,
+and Terminal, Files, Settings, and Network windows through the user-space GUI
+display service. Its VFS-backed file browser is read-only and supports
+directory navigation and text preview. The terminal runs a small built-in shell and does not forward
 keystrokes to the kernel console. Network details come from a read-only
 `SYS_system_info` snapshot.
 
 The package builder still emits the manifest, ownership list, per-file hashes,
 ELF entry point, and detached package SHA-256. On boot, the manager reads the
 committed OS profile and `VINO/SYSTEM/GUI/SELECTED.TXT`; only
-`installer_profile=plus` with `gui_id=default` starts Default automatically.
-Vino CLI continues to boot to the CLI. If the executable or display service
-fails, startup logs the failure and returns to the CLI. No browser, WebView,
-HTML, CSS, JavaScript, or remote asset is used by the desktop.
+`installer_profile=plus` with `gui_id=default` requests Default at startup.
+Vino CLI continues to boot to the CLI. If Default cannot start, the manager
+tries the separately installed MVP recovery GUI, then leaves the CLI as the
+final fallback. No browser, WebView, HTML, CSS, JavaScript, or remote asset is
+used by the desktop.
 
 Input is currently keyboard-only: number shortcuts launch apps; `S` opens the
 start menu; `C` opens the context menu; `Tab` cycles focus; `M` minimizes; `Z`
@@ -211,20 +213,44 @@ focus to the desktop. Selection highlight serves as focus/hover feedback until
 the kernel input service grows pointer events. Settings are currently
 session-only, the file browser is read-only, and Network is a status view.
 
+### Phase 8 — Standalone MVP recovery desktop
+
+MVP is a separately built, smaller native application with its own KPKG,
+manifest, ownership list, ELF, and SHA-256 metadata. It has a lightweight
+launcher, DHCP connect/status, a read-only VFS file browser with text preview,
+local Default/MVP install or repair, selection of Default for the next boot,
+recovery retry, and confirmed restart/shutdown actions. Selecting CLI exits
+MVP back to the kernel terminal. Its source and package are independent of
+Default; the installer also puts the recovery package in the installed
+system's separate `system/gui/mvp` namespace before committing Default as the
+selected GUI.
+
+If selected Default cannot be started, including a missing executable, Plus
+boot and explicit `gui start/restart default` attempts try MVP first and retain
+the CLI as the final fallback. MVP can request a one-shot retry of Default
+after repair. The file browser is intentionally read-only. Remote install is
+visible but fail-closed: no repository/catalog URL, pinned package signing
+key, or configured TLS CA root currently exists, so the kernel rejects remote
+executables. Shutdown currently syncs storage and halts CPUs; ACPI firmware
+power-off is not implemented. Package integrity uses detached SHA-256, not a
+release signature.
+
 ## Deliberate follow-up work
 
-Remaining work beyond the Phase 7 native desktop:
+Remaining work beyond the Phase 8 MVP:
 
 1. Add a release signing key and signature verification policy; current package
    payloads are unsigned and carry SHA-256 integrity metadata only.
 2. Add pointer events and real pointer hover/click/drag; this build intentionally
    uses keyboard focus and window-move controls because the input ABI is key-only.
 3. Persist user settings and add safe, writable file-manager operations.
-4. Add GUI crash/restart recovery and rebuild package ownership records from
-   installed metadata after reboot (the current package registry is volatile).
-5. Add remote package transport only after TLS, checksum/signature policy, and
-   offline/recovery behavior are defined. The current registry is local-ISO
-   only and intentionally does not pretend to download anything.
+4. Persist package ownership records across reboot; until that is implemented,
+   local repair reinstalls a verified ISO package when the runtime registry is
+   empty.
+5. Add remote package transport only after a trusted catalog, TLS CA roots,
+   pinned signing key, signature policy, and offline/recovery behavior are
+   configured. Remote installs currently fail closed.
+6. Add ACPI S5 power-off after validating hardware/QEMU support.
 
 ## Verification
 

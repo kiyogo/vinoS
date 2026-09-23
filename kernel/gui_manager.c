@@ -1,5 +1,6 @@
 #include <stdbool.h>
 #include <stdint.h>
+#include <kos/block_cache.h>
 #include <kos/crypto.h>
 #include <kos/gui_manager.h>
 #include <kos/heap.h>
@@ -54,6 +55,7 @@ static struct process *active_gui_process;
 static char active_gui_entry_path[GUI_MAX_PATH_LENGTH];
 static uint32_t next_gui_session_id = 1;
 static char persistent_volume_letter;
+static bool recovery_default_requested;
 
 static bool find_installed_vino_volume(char *letter_out);
 
@@ -318,6 +320,7 @@ bool gui_manager_init(void) {
     (void)find_installed_vino_volume(&persistent_volume_letter);
     default_gui_id[0] = '\0';
     active_gui_process = 0;
+    recovery_default_requested = false;
     gui_session_init(&active_gui_session, "");
     const struct gui_manifest *selected = NULL;
     for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
@@ -351,15 +354,9 @@ char gui_manager_system_volume_letter(void) {
 }
 
 bool gui_manager_default_should_autostart(void) {
-    const struct gui_manifest *manifest = find_manifest("default");
-    if (manifest == NULL || !volume_metadata_has("SYSTEM/OS.META",
-                                                  "installer_profile=plus")
-        || !selected_gui_is("default")) return false;
-    char entry_path[GUI_MAX_PATH_LENGTH];
-    struct vfs_metadata entry_metadata;
-    return resolve_gui_entry_path(manifest, entry_path, sizeof(entry_path))
-        && vfs_stat(entry_path, &entry_metadata)
-        && entry_metadata.type == VFS_NODE_FILE;
+    return manager_initialized
+        && volume_metadata_has("SYSTEM/OS.META", "installer_profile=plus")
+        && selected_gui_is("default");
 }
 
 uint32_t gui_manifest_count(void) {
@@ -417,9 +414,11 @@ int gui_install(const char *id) {
     if (manifest->source == GUI_PACKAGE_SOURCE_REMOTE) {
         return GUI_MANAGER_ERR_NOT_IMPLEMENTED;
     }
-    if (gui_is_installed(id)) {
+    if (pkg_db_find(manifest->package_app_id) != NULL) {
         return GUI_MANAGER_ERR_ALREADY_INSTALLED;
     }
+    /* The registry is volatile; an on-disk package can be safely refreshed from
+       its verified local KPKG when no ownership record survived reboot. */
     log_infof("GUI Manager: installing '%s' from %s", manifest->id, manifest->package_path);
     return install_manifest(manifest, false);
 }
@@ -451,7 +450,7 @@ int gui_reinstall(const char *id) {
     if (manifest->source == GUI_PACKAGE_SOURCE_REMOTE) {
         return GUI_MANAGER_ERR_NOT_IMPLEMENTED;
     }
-    if (!gui_is_installed(id)) {
+    if (!gui_is_installed(id) || pkg_db_find(manifest->package_app_id) == NULL) {
         return gui_install(id);
     }
     return install_manifest(manifest, true);
@@ -505,12 +504,27 @@ int gui_start(const char *id) {
     active_gui_process = 0;
     active_gui_session.state = exit_code == 0 ? GUI_SESSION_STOPPED : GUI_SESSION_CRASHED;
     active_gui_session.last_error = exit_code;
+    bool retry_default = recovery_default_requested && kstrcmp(id, "mvp") == 0;
+    if (retry_default) recovery_default_requested = false;
     if (exit_code != 0) {
         log_errorf("GUI session '%s' exited with %d", id, exit_code);
+        if (retry_default) return gui_start("default");
         return GUI_MANAGER_ERR_IO;
     }
     log_infof("GUI session '%s' stopped; CLI remains available", id);
+    if (retry_default) return gui_start("default");
     return GUI_MANAGER_OK;
+}
+
+int gui_start_with_fallback(const char *id) {
+    int result = gui_start(id);
+    if (id == NULL || kstrcmp(id, "default") != 0
+        || result == GUI_MANAGER_OK || !gui_is_installed("mvp")) {
+        return result;
+    }
+    log_errorf("Default GUI failed to start (%s); launching MVP recovery.",
+               gui_manager_status_string(result));
+    return gui_start("mvp");
 }
 
 int gui_stop(const char *id) {
@@ -560,12 +574,27 @@ int gui_set_default(const char *id) {
         if (path_size <= 0 || (uint64_t)path_size >= sizeof(path)
             || selection_size <= 0 || (uint64_t)selection_size >= sizeof(selection)
             || !vfs_write_file(path, (const uint8_t *)selection,
-                               (uint64_t)selection_size)) {
+                               (uint64_t)selection_size)
+            || !block_cache_sync()) {
             return GUI_MANAGER_ERR_IO;
         }
     }
     kstrncpy(default_gui_id, id, sizeof(default_gui_id) - 1);
     default_gui_id[sizeof(default_gui_id) - 1] = '\0';
+    return GUI_MANAGER_OK;
+}
+
+int gui_manager_request_default_recovery(uint64_t requester_pid) {
+    if (!manager_initialized || requester_pid == 0 || active_gui_process == NULL
+        || active_gui_process->pid != requester_pid
+        || active_gui_process->state != PROCESS_STATE_ACTIVE
+        || kstrcmp(active_gui_session.gui_id, "mvp") != 0) {
+        return GUI_MANAGER_ERR_BUSY;
+    }
+    if (!gui_is_installed("default")) return GUI_MANAGER_ERR_NOT_INSTALLED;
+    int result = gui_set_default("default");
+    if (result != GUI_MANAGER_OK) return result;
+    recovery_default_requested = true;
     return GUI_MANAGER_OK;
 }
 

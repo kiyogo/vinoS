@@ -131,3 +131,14 @@ long vino_system_info_get(struct kos_system_info *info) {
     info->abi_version = KOS_SYSTEM_INFO_ABI_VERSION;
     return vino_syscall2(SYS_system_info, (uint64_t)info, 0);
 }
+
+long vino_gui_control(struct kos_gui_control_request *request) {
+    if (request == NULL) return -1;
+    request->abi_version = KOS_GUI_CONTROL_ABI_VERSION;
+    return vino_syscall2(SYS_gui_control, (uint64_t)request, 0);
+}
+
+long vino_system_control(uint32_t action, bool confirmed) {
+    return vino_syscall2(SYS_system_control, action,
+        confirmed ? KOS_SYSTEM_CONTROL_CONFIRM_TOKEN : 0);
+}

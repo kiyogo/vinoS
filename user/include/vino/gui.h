@@ -5,7 +5,9 @@
 #include <stdint.h>
 
 #include <uapi/kos/gui.h>
+#include <uapi/kos/gui_control.h>
 #include <uapi/kos/system_info.h>
+#include <uapi/kos/system_control.h>
 #include <uapi/kos/syscall_numbers.h>
 
 struct vino_gui_button {
@@ -58,6 +60,8 @@ long vino_fs_write(long descriptor, const void *buffer, uint64_t length);
 long vino_fs_stat(const char *path, struct kos_stat *stat);
 long vino_fs_getdents(long descriptor, struct kos_dirent *entries, uint64_t capacity);
 long vino_system_info_get(struct kos_system_info *info);
+long vino_gui_control(struct kos_gui_control_request *request);
+long vino_system_control(uint32_t action, bool confirmed);
 
 void vino_gui_window_draw(struct kos_gui_rect bounds, const char *title,
                           struct kos_gui_color background,

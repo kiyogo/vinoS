@@ -659,6 +659,58 @@ static uint64_t gui_package_size(void *context) {
     return reader == NULL ? 0 : reader->size;
 }
 
+static int install_recovery_gui_package(char volume) {
+    const struct gui_manifest *recovery = gui_manifest_find("mvp");
+    if (recovery == NULL || !recovery->recovery_gui
+        || recovery->source != GUI_PACKAGE_SOURCE_LOCAL_ISO
+        || !gui_manifest_package_available(recovery)) {
+        log_error("[installer] The local MVP recovery package is missing or invalid.");
+        return INSTALLER_ERR_INTEGRITY_FAIL;
+    }
+
+    const uint8_t *package_data = NULL;
+    uint64_t package_size = 0;
+    if (!vfs_read_file(recovery->package_path, &package_data, &package_size)
+        || package_data == NULL || package_size == 0) {
+        return INSTALLER_ERR_IO;
+    }
+    struct gui_package_reader memory_reader = {
+        .data = package_data,
+        .size = package_size,
+    };
+    struct kpkg_reader reader = {
+        .context = &memory_reader,
+        .read = gui_package_read,
+        .get_size = gui_package_size,
+    };
+    char install_path[VFS_MAX_PATH];
+    char data_root[VFS_MAX_PATH];
+    char data_path[VFS_MAX_PATH];
+    if (!make_volume_root(install_path, sizeof(install_path), volume,
+                          recovery->install_root)
+        || !make_volume_root(data_root, sizeof(data_root), volume,
+                             "VINO/SYSTEM/GUI/DATA")) {
+        return INSTALLER_ERR_IO;
+    }
+    int data_path_size = snprintf(data_path, sizeof(data_path), "%s/%s",
+                                  data_root, recovery->id);
+    if (data_path_size <= 0 || (uint64_t)data_path_size >= sizeof(data_path))
+        return INSTALLER_ERR_IO;
+
+    struct installer_options options = {
+        .target_install_path = install_path,
+        .target_data_path = data_path,
+    };
+    int result = installer_install(reader, &options);
+    if (result != INSTALLER_OK) {
+        log_errorf("[installer] MVP recovery package install failed: %s",
+                   installer_status_string(result));
+        return result;
+    }
+    log_info("[installer] MVP recovery GUI installed in its separate namespace.");
+    return INSTALLER_OK;
+}
+
 int install_gui(struct installer_flow *flow, const struct gui_manifest *gui,
                 void *context) {
     (void)context;
@@ -730,6 +782,16 @@ int install_gui(struct installer_flow *flow, const struct gui_manifest *gui,
         log_errorf("[installer] GUI package install failed for %s: %s",
                    gui->id, installer_status_string(result));
         return result;
+    }
+
+    if (kstrcmp(gui->id, "default") == 0) {
+        result = install_recovery_gui_package(volume);
+        if (result != INSTALLER_OK) {
+            set_pending_gui(flow, gui, PENDING_GUI_FAILED,
+                "Default installed, but the required MVP recovery package failed.",
+                result);
+            return result;
+        }
     }
 
     char selected_gui_path[VFS_MAX_PATH];
