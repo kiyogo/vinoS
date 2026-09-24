@@ -443,6 +443,9 @@ __attribute__((noreturn)) void _start(void) {
             else if (key == 8 || key == 127) (void)send_action(KOS_INSTALLER_BACK, false, 0);
         }
         else if (key == '\n' || key == '\r' || key == ' ') handle_enter();
+        else if ((key == 'r' || key == 'R')
+                 && installer.phase == KOS_INSTALLER_PHASE_FINISHED)
+            (void)send_action(KOS_INSTALLER_REBOOT, true, 0);
         else if ((key == 'c' || key == 'C') && installer.phase == KOS_INSTALLER_PHASE_PARTITION_SETUP)
             (void)request_partition();
         else if ((key == 'c' || key == 'C') && installer.phase == KOS_INSTALLER_PHASE_CONFIRMATION)

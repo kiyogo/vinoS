@@ -4,14 +4,26 @@
 
 #include <kos/acpi.h>
 #include <kos/boot_protocol.h>
+#include <kos/io.h>
 #include <kos/log.h>
 #include <kos/vmm.h>
+
+struct acpi_generic_address {
+    uint8_t address_space_id;
+    uint8_t bit_width;
+    uint8_t bit_offset;
+    uint8_t access_size;
+    uint64_t address;
+} __attribute__((packed));
 
 static const struct acpi_sdt_header *acpi_tables[64];
 static uint32_t acpi_table_count = 0;
 
 static uint64_t g_lapic_phys_address = 0xFEE00000;
 static bool g_pcat_dual_pic = true;
+static struct acpi_generic_address g_reset_register;
+static uint8_t g_reset_value;
+static bool g_reset_register_valid;
 
 static struct acpi_cpu_entry g_cpus[ACPI_MAX_CPUS];
 static uint32_t g_cpu_count = 0;
@@ -228,6 +240,30 @@ bool acpi_initialize(void) {
 
     log_infof("ACPI: Discovered %u verified system description tables.", (unsigned)acpi_table_count);
 
+    /* ACPI FADT ResetReg/ResetValue are at byte offsets 116/128. */
+    const struct acpi_sdt_header *fadt = acpi_find_table("FACP");
+    if (fadt != 0 && fadt->length >= 129) {
+        const uint8_t *bytes = (const uint8_t *)fadt;
+        const struct acpi_generic_address *reset_register =
+            (const struct acpi_generic_address *)(bytes + 116);
+        g_reset_register = *reset_register;
+        g_reset_value = bytes[128];
+        g_reset_register_valid = g_reset_register.address != 0
+            && g_reset_register.bit_width == 8
+            && g_reset_register.bit_offset == 0
+            && (g_reset_register.access_size == 0
+                || g_reset_register.access_size == 1)
+            && (g_reset_register.address_space_id == 0
+                || g_reset_register.address_space_id == 1)
+            && (g_reset_register.address_space_id != 1
+                || g_reset_register.address <= UINT16_MAX);
+        if (g_reset_register_valid) {
+            log_infof("ACPI: Reset register available in %s space at 0x%llX.",
+                g_reset_register.address_space_id == 1 ? "I/O" : "memory",
+                (unsigned long long)g_reset_register.address);
+        }
+    }
+
     /* Parse Multiple APIC Description Table (MADT / "APIC") */
     const struct acpi_madt *madt = (const struct acpi_madt *)acpi_find_table("APIC");
     if (madt != 0) {
@@ -250,6 +286,19 @@ const struct acpi_sdt_header *acpi_find_table(const char *signature) {
         }
     }
     return 0;
+}
+
+bool acpi_try_reset(void) {
+    if (!g_reset_register_valid) return false;
+    if (g_reset_register.address_space_id == 1) {
+        io_out8((uint16_t)g_reset_register.address, g_reset_value);
+        return true;
+    }
+    volatile uint8_t *reset_register =
+        vmm_map_mmio(g_reset_register.address, sizeof(*reset_register));
+    if (reset_register == 0) return false;
+    *reset_register = g_reset_value;
+    return true;
 }
 
 uint64_t acpi_get_lapic_address(void) { return g_lapic_phys_address; }

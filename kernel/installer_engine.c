@@ -925,11 +925,17 @@ int install_bootloader(struct installer_flow *flow, void *context) {
     return ok ? 0 : INSTALLER_FLOW_ERR_INVALID_STATE;
 }
 
-static int installer_engine_test_bootloader(struct installer_flow *flow, void *context) {
+static int installer_engine_test_base_os(struct installer_flow *flow, void *context) {
+    (void)flow;
     (void)context;
-    char volume = 0;
-    return transaction_target_volume(flow, &volume) && installed_os_is_bootable(volume)
-        ? 0 : INSTALLER_FLOW_ERR_INVALID_STATE;
+    return 0;
+}
+
+static int installer_engine_test_bootloader_failure(struct installer_flow *flow,
+                                                     void *context) {
+    (void)flow;
+    (void)context;
+    return INSTALLER_FLOW_ERR_INVALID_STATE;
 }
 
 bool installer_engine_self_test(void) {
@@ -967,7 +973,7 @@ bool installer_engine_self_test(void) {
         flow.state.partition_plan.confirmed = true;
         struct installer_engine engine = {
             .install_base_os = install_base_os,
-            .install_bootloader = installer_engine_test_bootloader,
+            .install_bootloader = install_bootloader,
         };
         ok = installer_flow_execute(&flow, &engine) == INSTALLER_FLOW_OK
             && flow.state.phase == INSTALLER_FLOW_FINISHED
@@ -982,10 +988,15 @@ bool installer_engine_self_test(void) {
         char metadata_path[VFS_MAX_PATH];
         char kernel_path[VFS_MAX_PATH];
         char initramfs_path[VFS_MAX_PATH];
+        char bootloader_path[VFS_MAX_PATH];
+        char boot_config_path[VFS_MAX_PATH];
         const uint8_t *metadata = NULL;
+        const uint8_t *boot_config = NULL;
         uint64_t metadata_size = 0;
+        uint64_t boot_config_size = 0;
         struct vfs_metadata kernel_info;
         struct vfs_metadata initramfs_info;
+        struct vfs_metadata bootloader_info;
         ok = transaction_target_volume(&flow, &volume)
             && installed_os_is_bootable(volume)
             && make_absolute_path(metadata_path, sizeof(metadata_path), volume,
@@ -994,14 +1005,50 @@ bool installer_engine_self_test(void) {
                                   "VINO/BOOT/KOS.ELF")
             && make_absolute_path(initramfs_path, sizeof(initramfs_path), volume,
                                   "VINO/BOOT/INITRAMFS.CPIO")
+            && make_absolute_path(bootloader_path, sizeof(bootloader_path), volume,
+                                  "EFI/BOOT/BOOTX64.EFI")
+            && make_absolute_path(boot_config_path, sizeof(boot_config_path), volume,
+                                  "EFI/BOOT/limine.conf")
             && vfs_read_file(metadata_path, &metadata, &metadata_size)
             && buffer_has_line(metadata, metadata_size, "os_edition=default")
             && !buffer_has_line(metadata, metadata_size, "os_edition=plus")
             && vfs_stat(kernel_path, &kernel_info)
             && kernel_info.type == VFS_NODE_FILE && kernel_info.size != 0
             && vfs_stat(initramfs_path, &initramfs_info)
-            && initramfs_info.type == VFS_NODE_FILE && initramfs_info.size != 0;
+            && initramfs_info.type == VFS_NODE_FILE && initramfs_info.size != 0
+            && vfs_stat(bootloader_path, &bootloader_info)
+            && bootloader_info.type == VFS_NODE_FILE && bootloader_info.size != 0
+            && vfs_read_file(boot_config_path, &boot_config, &boot_config_size)
+            && buffer_has_line(boot_config, boot_config_size, "protocol: limine")
+            && buffer_has_line(boot_config, boot_config_size,
+                               "path: boot():/VINO/BOOT/KOS.ELF")
+            && buffer_has_line(boot_config, boot_config_size,
+                               "module_path: boot():/VINO/BOOT/INITRAMFS.CPIO");
         if (metadata != NULL) kfree((void *)metadata);
+        if (boot_config != NULL) kfree((void *)boot_config);
+    }
+
+    if (ok) {
+        struct installer_flow failure_flow;
+        ok = installer_flow_init(&failure_flow)
+            && installer_flow_select_profile(&failure_flow, "cli") == INSTALLER_FLOW_OK
+            && installer_flow_select_disk(&failure_flow, disk->name) == INSTALLER_FLOW_OK
+            && installer_flow_select_partition(&failure_flow, partition->name)
+                == INSTALLER_FLOW_OK;
+        if (ok) {
+            failure_flow.state.partition_plan.confirmed = true;
+            struct installer_engine failing_engine = {
+                .install_base_os = installer_engine_test_base_os,
+                .install_bootloader = installer_engine_test_bootloader_failure,
+            };
+            int result = installer_flow_execute(&failure_flow, &failing_engine);
+            ok = result == INSTALLER_FLOW_ERR_INVALID_STATE
+                && failure_flow.state.phase == INSTALLER_FLOW_ERROR
+                && failure_flow.state.transaction.state == INSTALL_TRANSACTION_FAILED
+                && failure_flow.state.transaction.base_os_applied
+                && !failure_flow.state.transaction.bootloader_applied
+                && !failure_flow.state.transaction.cli_fallback_ready;
+        }
     }
 
     if (partition != NULL) (void)volume_manager_unmount_device(partition);

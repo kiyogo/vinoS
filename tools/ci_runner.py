@@ -169,8 +169,23 @@ def run_mode(label):
 
 
 def run_storage():
+    if not build_image(True):
+        return False
     script = ROOT / "tools" / "storage_ci.py"
     print("[CI] Starting storage integration gate...")
+    result = subprocess.run([sys.executable, str(script)], cwd=ROOT)
+    return result.returncode == 0
+
+
+def run_boot_reboot():
+    if not ensure_host_tool():
+        return False
+    print("[CI] Building installer media for the Limine reboot acceptance test...")
+    built = subprocess.run([str(KOS_TOOL), "build", "--installer"], cwd=ROOT)
+    if built.returncode != 0:
+        print(f"[FAIL] installer media build returned {built.returncode}")
+        return False
+    script = ROOT / "tools" / "boot_reboot_ci.py"
     result = subprocess.run([sys.executable, str(script)], cwd=ROOT)
     return result.returncode == 0
 
@@ -184,7 +199,8 @@ def main():
         smoke_ok = run_mode("smoke")
         full_ok = run_mode("full")
         storage_ok = full_ok and run_storage()
-        ok = smoke_ok and full_ok and storage_ok
+        reboot_ok = full_ok and storage_ok and run_boot_reboot()
+        ok = smoke_ok and full_ok and storage_ok and reboot_ok
         print("\n[CI RESULT] ALL KOS QA GATES PASSED" if ok else "\n[CI RESULT] KOS QA GATES FAILED")
         return 0 if ok else 1
     return 0 if run_mode(args.mode) else 1

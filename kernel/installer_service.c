@@ -6,6 +6,7 @@
 #include <kos/gui_manager.h>
 #include <kos/installer_engine.h>
 #include <kos/installer_flow.h>
+#include <kos/log.h>
 #include <kos/installer_service.h>
 #include <kos/installer_storage.h>
 #include <kos/memory.h>
@@ -192,6 +193,7 @@ static int dispatch_action(const struct kos_installer_action_request *request,
         case KOS_INSTALLER_REBOOT:
             if (request->confirm == 0 || service_flow.state.phase != INSTALLER_FLOW_FINISHED)
                 return -EPERM;
+            log_info("[installer] Rebooting into the installed Vino OS.");
             cpu_reboot();
         default:
             return -EINVAL;

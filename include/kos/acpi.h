@@ -131,6 +131,7 @@ struct acpi_iso_entry {
 bool acpi_initialize(void);
 const struct acpi_sdt_header *acpi_find_table(const char *signature);
 bool acpi_verify_table_checksum(const struct acpi_sdt_header *header);
+bool acpi_try_reset(void);
 
 uint64_t acpi_get_lapic_address(void);
 bool acpi_has_pcat_dual_pic(void);

@@ -6,12 +6,14 @@ import struct
 import subprocess
 import sys
 import zlib
+from pathlib import Path
 
 QEMU = r"C:/Program Files/qemu/qemu-system-x86_64.exe"
 OVMF_CODE = r"C:/Program Files/qemu/share/edk2-x86_64-code.fd"
 OVMF_VARS_TEMPLATE = r"C:/Program Files/qemu/share/edk2-i386-vars.fd"
 SECTOR_SIZE = 512
 SECTOR_COUNT = 32768
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def write_sector(image, lba, data):
@@ -57,7 +59,7 @@ def require(path, description):
         raise RuntimeError(f"Missing {description}: {path}")
 
 
-def run_case(kind, image_path):
+def run_case(kind, image_path, esp_dir):
     vars_path = "build/storage-ci-vars.fd"
     log_path = f"build/storage-ci-{kind}.log"
     shutil.copyfile(OVMF_VARS_TEMPLATE, vars_path)
@@ -65,7 +67,7 @@ def run_case(kind, image_path):
         QEMU, "-machine", "q35", "-cpu", "max", "-m", "512",
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
         "-drive", f"if=pflash,format=raw,file={vars_path}",
-        "-drive", "format=raw,file=fat:rw:build/esp",
+        "-drive", f"format=raw,file=fat:rw:{esp_dir}",
         "-drive", f"if=none,format=raw,snapshot=on,file={image_path},id=ahci_data",
         "-device", "ich9-ahci,id=ahci_ci",
         "-device", "ide-hd,drive=ahci_data,bus=ahci_ci.0",
@@ -113,11 +115,18 @@ def run_case(kind, image_path):
 
 
 def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--esp-dir", type=Path, default=ROOT / "build" / "esp",
+                        help="smoke-test UEFI ESP staged by kos-tool")
+    args = parser.parse_args()
+
     try:
         require(QEMU, "QEMU")
         require(OVMF_CODE, "OVMF code firmware")
         require(OVMF_VARS_TEMPLATE, "OVMF variables firmware")
-        require("build/esp/boot/kos.elf", "built KOS ESP")
+        require(str(args.esp_dir / "boot" / "kos.elf"), "built KOS ESP")
     except RuntimeError as error:
         print(error)
         return 1
@@ -128,8 +137,8 @@ def main():
     write_mbr(mbr_image)
     write_gpt(gpt_image)
 
-    ok = run_case("mbr", mbr_image)
-    ok = run_case("gpt", gpt_image) and ok
+    ok = run_case("mbr", mbr_image, args.esp_dir.resolve())
+    ok = run_case("gpt", gpt_image, args.esp_dir.resolve()) and ok
     print("[CI RESULT] Storage backend integration passed" if ok else "[CI RESULT] Storage backend integration failed")
     return 0 if ok else 1
 

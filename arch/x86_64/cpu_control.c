@@ -1,6 +1,7 @@
 #include <stdint.h>
 
 #include <kos/cpu.h>
+#include <kos/acpi.h>
 #include <kos/io.h>
 
 enum {
@@ -24,12 +25,27 @@ KOS_NORETURN void cpu_idle(void) {
 }
 
 KOS_NORETURN void cpu_reboot(void) {
+    __asm__ volatile ("cli" : : : "memory");
+    /* Prefer the firmware-declared reset register when ACPI provides one. */
+    if (acpi_try_reset()) {
+        for (uint64_t spin = 0; spin < PS2_RESET_SPIN_LIMIT; ++spin) cpu_pause();
+    }
+
+    /* Legacy 8042 reset remains a fallback for systems without ACPI reset support. */
     for (uint64_t spin = 0; spin < PS2_RESET_SPIN_LIMIT; ++spin) {
         if ((io_in8(PS2_CONTROLLER_STATUS) & PS2_CONTROLLER_INPUT_BUFFER_FULL) == 0) {
             io_out8(PS2_CONTROLLER_STATUS, PS2_CONTROLLER_RESET);
             break;
         }
     }
+    for (uint64_t spin = 0; spin < PS2_RESET_SPIN_LIMIT; ++spin) cpu_pause();
+
+    /* Last resort: force the processor through a triple fault to request platform reset. */
+    struct {
+        uint16_t limit;
+        uint64_t base;
+    } __attribute__((packed)) empty_idt = { 0, 0 };
+    __asm__ volatile ("lidt %0; int3" : : "m"(empty_idt) : "memory");
     cpu_halt();
 }
 
