@@ -27,9 +27,17 @@ void gui_canvas_fill(struct gui_rect rect, struct gui_color color);
 void gui_canvas_border(struct gui_rect rect, uint64_t thickness, struct gui_color color);
 void gui_canvas_glass(struct gui_rect rect, uint64_t radius, uint64_t blur_radius,
                       struct gui_color fill, struct gui_color border);
+void gui_canvas_blit_rgb24_row(uint64_t x, uint64_t y, uint64_t destination_width,
+                               uint32_t source_width, const uint8_t *pixels);
 void gui_canvas_text(uint64_t x, uint64_t y, const char *text, uint64_t scale,
                      struct gui_color foreground, struct gui_color background);
+void gui_canvas_text_font(uint64_t x, uint64_t y, const char *text, uint64_t scale,
+                          uint32_t font_id, struct gui_color foreground,
+                          struct gui_color background);
 void gui_canvas_text_transparent(uint64_t x, uint64_t y, const char *text, uint64_t scale,
                                  struct gui_color foreground);
+void gui_canvas_text_transparent_font(uint64_t x, uint64_t y, const char *text,
+                                      uint64_t scale, uint32_t font_id,
+                                      struct gui_color foreground);
 
 #endif /* KOS_GUI_CANVAS_H */

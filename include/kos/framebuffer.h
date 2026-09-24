@@ -26,6 +26,8 @@ uint64_t framebuffer_pitch(void);
 uint64_t framebuffer_virtual_address(void);
 void framebuffer_fill(uint32_t color);
 void framebuffer_fill_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t height, uint32_t color);
+void framebuffer_blit_rgb24_row(uint64_t x, uint64_t y, uint64_t destination_width,
+                                uint32_t source_width, const uint8_t *pixels);
 void framebuffer_glass_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t height,
                             uint64_t radius, uint64_t blur_radius,
                             uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha,

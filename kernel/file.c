@@ -9,7 +9,9 @@
 
 static void kos_file_destroy(void *object) {
     if (object != 0) {
-        kfree(object);
+        struct kos_file *file = (struct kos_file *)object;
+        vfs_file_data_release(&file->read_data);
+        kfree(file);
     }
 }
 
@@ -69,6 +71,8 @@ struct kos_file *kos_file_open(const char *path, uint32_t flags, int *error_out)
     file->can_write = access == KOS_O_WRONLY || access == KOS_O_RDWR;
     file->type = metadata.type;
     file->offset = 0;
+    file->read_data = (struct vfs_file_data){0};
+    file->read_data_loaded = false;
     return file;
 
 fail:
@@ -83,16 +87,22 @@ int kos_file_read(struct kos_file *file, void *buffer, uint64_t length, uint64_t
     if (file->type == VFS_NODE_DIRECTORY) return -EISDIR;
 
     uint64_t flags = spinlock_lock_irqsave(&file->header.lock);
-    const uint8_t *data = 0;
-    uint64_t size = 0;
-    if (!vfs_read_file(file->path, &data, &size)) {
-        spinlock_unlock_irqrestore(&file->header.lock, flags);
-        return -EIO;
+    uint64_t revision = vfs_content_revision();
+    if (file->read_data_loaded && file->read_data.revision != revision) {
+        vfs_file_data_release(&file->read_data);
+        file->read_data_loaded = false;
     }
-    if (file->offset < size) {
-        uint64_t available = size - file->offset;
+    if (!file->read_data_loaded) {
+        if (!vfs_read_file_acquire(file->path, &file->read_data)) {
+            spinlock_unlock_irqrestore(&file->header.lock, flags);
+            return -EIO;
+        }
+        file->read_data_loaded = true;
+    }
+    if (file->offset < file->read_data.size) {
+        uint64_t available = file->read_data.size - file->offset;
         uint64_t count = length < available ? length : available;
-        kmemcpy(buffer, data + file->offset, count);
+        kmemcpy(buffer, file->read_data.data + file->offset, count);
         file->offset += count;
         *read_out = count;
     }
@@ -107,14 +117,16 @@ int kos_file_write(struct kos_file *file, const void *buffer, uint64_t length, u
     if (file->type == VFS_NODE_DIRECTORY) return -EISDIR;
 
     uint64_t flags = spinlock_lock_irqsave(&file->header.lock);
-    const uint8_t *old_data = 0;
-    uint64_t old_size = 0;
-    if (!vfs_read_file(file->path, &old_data, &old_size)) {
+    struct vfs_file_data old_file_data;
+    if (!vfs_read_file_acquire(file->path, &old_file_data)) {
         spinlock_unlock_irqrestore(&file->header.lock, flags);
         return -EIO;
     }
+    const uint8_t *old_data = old_file_data.data;
+    uint64_t old_size = old_file_data.size;
     if ((file->flags & KOS_O_APPEND) != 0) file->offset = old_size;
     if (file->offset > UINT64_MAX - length) {
+        vfs_file_data_release(&old_file_data);
         spinlock_unlock_irqrestore(&file->header.lock, flags);
         return -EOVERFLOW;
     }
@@ -122,18 +134,24 @@ int kos_file_write(struct kos_file *file, const void *buffer, uint64_t length, u
     uint64_t new_size = old_size > end ? old_size : end;
     uint8_t *new_data = new_size == 0 ? 0 : kmalloc(new_size);
     if (new_size != 0 && new_data == 0) {
+        vfs_file_data_release(&old_file_data);
         spinlock_unlock_irqrestore(&file->header.lock, flags);
         return -ENOMEM;
     }
     if (old_size != 0) kmemcpy(new_data, old_data, old_size);
     if (end > old_size) kmemset(new_data + old_size, 0, end - old_size);
     if (length != 0) kmemcpy(new_data + file->offset, buffer, length);
+    vfs_file_data_release(&old_file_data);
 
     bool ok = vfs_write_file(file->path, new_data, new_size);
     if (new_data != 0) kfree(new_data);
     if (!ok) {
         spinlock_unlock_irqrestore(&file->header.lock, flags);
         return -EIO;
+    }
+    if (file->read_data_loaded) {
+        vfs_file_data_release(&file->read_data);
+        file->read_data_loaded = false;
     }
     file->offset = end;
     *written_out = length;

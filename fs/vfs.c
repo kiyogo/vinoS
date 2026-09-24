@@ -14,7 +14,12 @@ struct vfs_volume {
 
 static struct vfs_volume volumes[VFS_MAX_VOLUMES];
 static uint64_t mounted_volume_count;
+static uint64_t content_revision = 1;
 static struct kos_spinlock vfs_lock = KOS_SPINLOCK_INITIALIZER;
+
+static void advance_content_revision_locked(void) {
+    content_revision = content_revision == UINT64_MAX ? 1 : content_revision + 1;
+}
 
 static bool backend_is_valid(const struct vfs_backend *backend) {
     return backend != 0 && backend->read_file != 0 && backend->file_count != 0 && backend->file_at != 0;
@@ -53,6 +58,7 @@ bool vfs_mount_volume(char letter, const char *label, const struct vfs_backend *
         .label = label,
         .backend = backend,
     };
+    advance_content_revision_locked();
     spinlock_unlock_irqrestore(&vfs_lock, flags);
     return true;
 }
@@ -70,6 +76,7 @@ bool vfs_unmount_volume(char letter) {
     }
     --mounted_volume_count;
     volumes[mounted_volume_count] = (struct vfs_volume){0};
+    advance_content_revision_locked();
     spinlock_unlock_irqrestore(&vfs_lock, flags);
     return true;
 }
@@ -145,6 +152,52 @@ bool vfs_read_file(const char *path, const uint8_t **data, uint64_t *size) {
     return backend->read_file(context, relative_path, data, size);
 }
 
+bool vfs_read_file_acquire(const char *path, struct vfs_file_data *file_data) {
+    if (path == 0 || file_data == 0) return false;
+    *file_data = (struct vfs_file_data){0};
+    const struct vfs_backend *backend = 0;
+    void *context = 0;
+    char relative_path[VFS_MAX_PATH];
+    uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
+    bool valid = parse_path_locked(path, &backend, &context, relative_path, false)
+        && backend != 0 && backend->read_file != 0;
+    uint64_t revision = content_revision;
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    if (!valid) {
+        *file_data = (struct vfs_file_data){0};
+        return false;
+    }
+    file_data->release_context = context;
+    file_data->release = backend->release_file_data;
+    if (!backend->read_file(context, relative_path,
+                            &file_data->data, &file_data->size)) {
+        vfs_file_data_release(file_data);
+        return false;
+    }
+    if (file_data->data == 0 && file_data->size != 0) {
+        vfs_file_data_release(file_data);
+        return false;
+    }
+    file_data->revision = revision;
+    return true;
+}
+
+void vfs_file_data_release(struct vfs_file_data *file_data) {
+    if (file_data == 0) return;
+    if (file_data->release != 0 && file_data->data != 0) {
+        file_data->release(file_data->release_context, file_data->data,
+                           file_data->size);
+    }
+    *file_data = (struct vfs_file_data){0};
+}
+
+uint64_t vfs_content_revision(void) {
+    uint64_t flags = spinlock_lock_irqsave(&vfs_lock);
+    uint64_t revision = content_revision;
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return revision;
+}
+
 bool vfs_write_file(const char *path, const uint8_t *data, uint64_t size) {
     if (data == 0 && size != 0) {
         return false;
@@ -158,7 +211,11 @@ bool vfs_write_file(const char *path, const uint8_t *data, uint64_t size) {
         return false;
     }
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return backend->write_file(context, relative_path, data, size);
+    if (!backend->write_file(context, relative_path, data, size)) return false;
+    flags = spinlock_lock_irqsave(&vfs_lock);
+    advance_content_revision_locked();
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return true;
 }
 
 bool vfs_unlink_file(const char *path) {
@@ -171,7 +228,11 @@ bool vfs_unlink_file(const char *path) {
         return false;
     }
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return backend->unlink_file(context, relative_path);
+    if (!backend->unlink_file(context, relative_path)) return false;
+    flags = spinlock_lock_irqsave(&vfs_lock);
+    advance_content_revision_locked();
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return true;
 }
 
 bool vfs_mkdir(const char *path) {
@@ -215,7 +276,11 @@ bool vfs_rename(const char *old_path, const char *new_path) {
         return false;
     }
     spinlock_unlock_irqrestore(&vfs_lock, flags);
-    return old_backend->rename(old_context, old_relative, new_relative);
+    if (!old_backend->rename(old_context, old_relative, new_relative)) return false;
+    flags = spinlock_lock_irqsave(&vfs_lock);
+    advance_content_revision_locked();
+    spinlock_unlock_irqrestore(&vfs_lock, flags);
+    return true;
 }
 
 bool vfs_stat(const char *path, struct vfs_metadata *metadata) {

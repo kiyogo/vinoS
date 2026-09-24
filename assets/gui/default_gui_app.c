@@ -12,35 +12,39 @@ enum {
     APP_FILES,
     APP_SETTINGS,
     APP_NETWORK,
+    APP_CONTROL_CENTER,
+    APP_NOTIFICATIONS,
     APP_COUNT,
-    WINDOW_TITLE_HEIGHT = 38,
+    DESKTOP_ICON_COUNT = 4,
+    WINDOW_TITLE_HEIGHT = 40,
     TERMINAL_LINE_COUNT = 13,
     TERMINAL_LINE_LENGTH = 96,
     FILE_ENTRY_COUNT = 32,
     FILE_PATH_LENGTH = 256,
     PREVIEW_SIZE = 768,
+    WALLPAPER_MAX_BYTES = 8 * 1024 * 1024,
+    WALLPAPER_HEADER_SIZE = 20,
 };
 
 static const char *const app_names[APP_COUNT] = {
-    "Terminal", "Files", "Settings", "Network",
-};
-static const char *const app_symbols[APP_COUNT] = {
-    ">_", "<>", "*", "~",
+    "Terminal", "Files", "Settings", "Network", "Control Center", "Notifications",
 };
 
 static struct kos_gui_surface surface;
 static struct kos_system_info system_info;
-static struct kos_gui_color color_wallpaper = { 10, 18, 36, 0 };
-static struct kos_gui_color color_wallpaper_light = { 20, 48, 78, 0 };
-static struct kos_gui_color color_panel = { 17, 31, 53, 0 };
-static struct kos_gui_color color_panel_high = { 24, 42, 68, 0 };
-static struct kos_gui_color color_panel_low = { 12, 24, 43, 0 };
-static struct kos_gui_color color_accent = { 91, 194, 255, 0 };
-static struct kos_gui_color color_cyan = { 135, 226, 245, 0 };
-static struct kos_gui_color color_text = { 240, 247, 255, 0 };
-static struct kos_gui_color color_muted = { 157, 178, 204, 0 };
-static struct kos_gui_color color_dim = { 91, 110, 139, 0 };
-static struct kos_gui_color color_shadow = { 5, 10, 22, 0 };
+static struct kos_gui_color color_wallpaper = { 12, 19, 34, 0 };
+static struct kos_gui_color color_panel = { 15, 22, 40, 0 };
+static struct kos_gui_color color_panel_high = { 37, 48, 67, 0 };
+static struct kos_gui_color color_panel_low = { 10, 16, 29, 0 };
+static struct kos_gui_color color_accent = { 102, 200, 255, 0 };
+static struct kos_gui_color color_cyan = { 102, 200, 255, 0 };
+static struct kos_gui_color color_text = { 255, 255, 255, 0 };
+static struct kos_gui_color color_muted = { 139, 155, 180, 0 };
+static struct kos_gui_color color_dim = { 196, 208, 224, 0 };
+static const struct kos_gui_color app_icon_colors[APP_COUNT] = {
+    { 51, 65, 85, 0 }, { 59, 130, 246, 0 }, { 100, 116, 139, 0 },
+    { 6, 182, 212, 0 }, { 139, 92, 246, 0 }, { 249, 115, 22, 0 },
+};
 
 struct vino_window {
     bool open;
@@ -63,6 +67,7 @@ static uint32_t file_entry_count;
 static uint32_t file_selected;
 static uint32_t file_scroll;
 static char file_directory[FILE_PATH_LENGTH];
+static char file_home_directory[FILE_PATH_LENGTH];
 static char file_error[96];
 static char file_preview[PREVIEW_SIZE];
 static uint32_t file_preview_size;
@@ -74,6 +79,7 @@ static uint32_t terminal_input_size;
 static char terminal_directory[FILE_PATH_LENGTH];
 static int32_t active_app = -1;
 static bool start_menu_open;
+static char menu_search[32];
 static bool context_menu_open;
 static bool about_dialog_open;
 static bool move_window_mode;
@@ -98,6 +104,16 @@ static uint64_t file_last_click_ms;
 static uint64_t last_state_poll_second;
 static uint64_t displayed_uptime_minute;
 static bool wallpaper_cache_valid;
+static bool wallpaper_loaded;
+static uint8_t wallpaper_asset[WALLPAPER_MAX_BYTES];
+static uint32_t wallpaper_asset_size;
+static uint32_t wallpaper_width;
+static uint32_t wallpaper_height;
+static uint32_t wallpaper_pitch;
+static uint32_t recent_apps[2];
+static uint32_t recent_app_count;
+static uint32_t settings_page;
+static bool notifications_cleared;
 static bool handler_rendered_current_input;
 static uint32_t animation_frame;
 static char text_scratch[KOS_GUI_TEXT_MAX];
@@ -204,7 +220,8 @@ static void draw_text(int32_t x, int32_t y, const char *text,
             text_scratch[index] = '?';
     }
     (void)background;
-    (void)vino_gui_text_transparent(x, y, text_scratch, 1, foreground);
+    (void)vino_gui_text_transparent_font(x, y, text_scratch, 1,
+        KOS_GUI_FONT_INTER_8X14, foreground);
 }
 
 static void draw_text_scale(int32_t x, int32_t y, const char *text, uint32_t scale,
@@ -216,7 +233,8 @@ static void draw_text_scale(int32_t x, int32_t y, const char *text, uint32_t sca
             text_scratch[index] = '?';
     }
     (void)background;
-    (void)vino_gui_text_transparent(x, y, text_scratch, scale, foreground);
+    (void)vino_gui_text_transparent_font(x, y, text_scratch, scale,
+        KOS_GUI_FONT_INTER_8X14, foreground);
 }
 
 static void draw_glass(struct kos_gui_rect rect, struct kos_gui_color fill,
@@ -242,6 +260,126 @@ static bool pointer_inside(struct kos_gui_rect rect) {
 static void draw_dot(int32_t x, int32_t y, uint32_t size,
                      struct kos_gui_color color) {
     (void)vino_gui_fill((struct kos_gui_rect){ x, y, size, size }, color);
+}
+
+static void draw_round_dot(int32_t x, int32_t y, uint32_t size,
+                           struct kos_gui_color color) {
+    struct kos_gui_color border = color;
+    color.alpha = 255;
+    border.alpha = 255;
+    (void)vino_gui_glass((struct kos_gui_rect){ x, y, size, size }, color,
+                         border, size / 2, 0);
+}
+
+static void draw_hline(int32_t x, int32_t y, uint32_t width, uint32_t thickness,
+                       struct kos_gui_color color) {
+    (void)vino_gui_fill((struct kos_gui_rect){ x, y, width, thickness }, color);
+}
+
+static void draw_vline(int32_t x, int32_t y, uint32_t height, uint32_t thickness,
+                       struct kos_gui_color color) {
+    (void)vino_gui_fill((struct kos_gui_rect){ x, y, thickness, height }, color);
+}
+
+static void draw_vino_mark(int32_t x, int32_t y, uint32_t size) {
+    uint32_t unit = size / 5;
+    if (unit == 0) unit = 1;
+    struct kos_gui_color light = { 102, 200, 255, 0 };
+    struct kos_gui_color blue = { 29, 94, 183, 0 };
+    draw_hline(x, y, unit * 2, unit, light);
+    draw_hline(x + unit * 2, y, unit * 2, unit, blue);
+    draw_hline(x, y + unit * 2, unit * 2, unit, light);
+    draw_hline(x + unit * 2, y + unit * 2, unit * 2, unit, blue);
+    draw_hline(x, y + unit * 4, unit * 2, unit, light);
+    draw_hline(x + unit * 2, y + unit * 4, unit * 2, unit, blue);
+}
+
+static void draw_app_icon(uint32_t app, int32_t x, int32_t y, uint32_t size,
+                          bool tile_enabled) {
+    if (app >= APP_COUNT || size < 32) return;
+    if (tile_enabled) {
+        struct kos_gui_rect tile = { x, y, size, size };
+        struct kos_gui_color tile_border = { 255, 255, 255, 32 };
+        draw_glass(tile, app_icon_colors[app], tile_border, 10, 0);
+    }
+    struct kos_gui_color glyph = tile_enabled
+        ? (struct kos_gui_color){ 255, 255, 255, 0 } : app_icon_colors[app];
+    int32_t left = x + (int32_t)size / 4;
+    int32_t top = y + (int32_t)size / 4;
+    uint32_t inner = size / 2;
+    if (app == APP_TERMINAL) {
+        struct kos_gui_rect screen = { left, top, inner, inner - 2 };
+        (void)vino_gui_border(screen, glyph);
+        draw_hline(left + 4, top + 5, 3, 2, glyph);
+        draw_vline(left + 6, top + 7, 3, 2, glyph);
+        draw_hline(left + 4, top + 10, 5, 2, glyph);
+    }
+    else if (app == APP_FILES) {
+        draw_hline(left + 1, top + 3, inner / 2, 4, glyph);
+        draw_hline(left + 1, top + 7, inner - 1, 3, glyph);
+        draw_hline(left + 3, top + 10, inner - 5, 2, glyph);
+        draw_vline(left + 1, top + 7, inner / 2 - 1, 2, glyph);
+        draw_vline(left + (int32_t)inner - 2, top + 8, inner / 2 - 2, 2, glyph);
+    }
+    else if (app == APP_SETTINGS) {
+        uint32_t track_width = inner - 2;
+        for (uint32_t row = 0; row < 3; ++row) {
+            int32_t track_y = top + 4 + (int32_t)row * 6;
+            draw_hline(left + 1, track_y, track_width, 2, glyph);
+        }
+        draw_vline(left + 6, top + 2, 5, 3, app_icon_colors[app]);
+        draw_vline(left + 11, top + 8, 5, 3, app_icon_colors[app]);
+        draw_vline(left + 15, top + 14, 4, 3, app_icon_colors[app]);
+    }
+    else if (app == APP_NETWORK) {
+        draw_hline(left + 3, top + 4, inner - 6, 2, glyph);
+        draw_hline(left + 6, top + 8, inner - 12, 2, glyph);
+        draw_hline(left + 8, top + 12, inner - 16, 2, glyph);
+        draw_dot(left + (int32_t)inner / 2 - 1, top + 16, 3, glyph);
+    }
+    else if (app == APP_CONTROL_CENTER) {
+        for (uint32_t row = 0; row < 3; ++row) {
+            int32_t track_y = top + 4 + (int32_t)row * 6;
+            draw_hline(left + 1, track_y, inner - 2, 2, glyph);
+        }
+        draw_dot(left + 5, top + 2, 4, glyph);
+        draw_dot(left + 12, top + 8, 4, glyph);
+        draw_dot(left + 8, top + 14, 4, glyph);
+    }
+    else {
+        draw_hline(left + 7, top + 3, inner - 14, 2, glyph);
+        draw_vline(left + 6, top + 5, 8, 2, glyph);
+        draw_vline(left + (int32_t)inner - 8, top + 5, 8, 2, glyph);
+        draw_hline(left + 6, top + 13, inner - 12, 2, glyph);
+        draw_hline(left + 8, top + 16, inner - 16, 2, glyph);
+        draw_dot(left + (int32_t)inner / 2 - 1, top + 1, 3, glyph);
+    }
+}
+
+static void draw_file_glyph(int32_t x, int32_t y, bool directory) {
+    if (directory) {
+        struct kos_gui_color folder = { 96, 165, 250, 0 };
+        draw_hline(x + 1, y + 2, 11, 3, folder);
+        draw_hline(x, y + 5, 16, 9, folder);
+        draw_hline(x + 2, y + 7, 12, 1,
+                   (struct kos_gui_color){ 191, 219, 254, 0 });
+    }
+    else {
+        struct kos_gui_color paper = { 196, 208, 224, 0 };
+        draw_vline(x + 3, y + 1, 15, 11, paper);
+        draw_hline(x + 5, y + 5, 7, 1, color_panel_high);
+        draw_hline(x + 5, y + 8, 7, 1, color_panel_high);
+        draw_hline(x + 5, y + 11, 5, 1, color_panel_high);
+    }
+}
+
+static uint32_t files_quick_directory(uint32_t ordinal) {
+    for (uint32_t index = 0; index < file_entry_count; ++index) {
+        if (file_entries[index].type != KOS_STAT_DIRECTORY) continue;
+        if (ordinal == 0) return index;
+        --ordinal;
+    }
+    return FILE_ENTRY_COUNT;
 }
 
 static void append_uptime(char *line, uint32_t capacity, uint64_t seconds) {
@@ -403,6 +541,7 @@ static void initialize_paths(void) {
         string_copy(terminal_directory, sizeof(terminal_directory), candidate);
     }
     string_copy(file_directory, sizeof(file_directory), terminal_directory);
+    string_copy(file_home_directory, sizeof(file_home_directory), terminal_directory);
 }
 
 static bool list_directory(const char *path, struct kos_dirent *entries,
@@ -461,6 +600,21 @@ static bool files_enter_selected(void) {
     file_preview[file_preview_size] = '\0';
     file_preview_open = true;
     return true;
+}
+
+static void files_select_or_open(uint32_t index, uint64_t timestamp_ms) {
+    if (index >= file_entry_count) return;
+    if (index == file_last_clicked && timestamp_ms >= file_last_click_ms
+        && timestamp_ms - file_last_click_ms <= 500) {
+        file_selected = index;
+        (void)files_enter_selected();
+        file_last_clicked = UINT32_MAX;
+    }
+    else {
+        file_selected = index;
+        file_last_clicked = index;
+        file_last_click_ms = timestamp_ms;
+    }
 }
 
 static void terminal_list_path(const char *path) {
@@ -611,22 +765,56 @@ static void terminal_execute(void) {
 
 static void window_set_geometry(uint32_t app) {
     struct vino_window *window = &windows[app];
-    uint32_t margin_x = surface.width > 80 ? 40 : 8;
-    uint32_t margin_y = surface.height > 150 ? 54 : 8;
-    window->width = surface.width > 900 ? 760 : surface.width - margin_x * 2;
-    window->height = surface.height > 680 ? 500 : surface.height - 142;
-    if (window->width < 360) window->width = surface.width > 32 ? surface.width - 32 : surface.width;
-    if (window->height < 260) window->height = surface.height > 98 ? surface.height - 98 : surface.height;
-    window->x = (int32_t)((surface.width - window->width) / 2) + (int32_t)(app * 22);
-    window->y = (int32_t)margin_y + (int32_t)(app * 18);
-    if ((uint64_t)window->x + window->width > surface.width - 8) {
-        window->x = (int32_t)(surface.width - window->width - 8);
+    uint32_t desired_width = 740;
+    uint32_t desired_height = 480;
+    if (app == APP_FILES) {
+        desired_width = 820;
+        desired_height = 520;
     }
-    uint32_t work_bottom = surface.height > 64 ? surface.height - 60 : surface.height;
-    if ((uint64_t)window->y + window->height > work_bottom) {
+    else if (app == APP_SETTINGS) {
+        desired_width = 740;
+        desired_height = 500;
+    }
+    else if (app == APP_NETWORK) {
+        desired_width = 560;
+        desired_height = 440;
+    }
+    else if (app == APP_CONTROL_CENTER) {
+        desired_width = 340;
+        desired_height = 360;
+    }
+    else if (app == APP_NOTIFICATIONS) {
+        desired_width = 380;
+        desired_height = 320;
+    }
+
+    uint32_t max_width = surface.width > 32 ? surface.width - 32 : surface.width;
+    uint32_t max_height = surface.height > 72 ? surface.height - 72 : surface.height;
+    window->width = desired_width < max_width ? desired_width : max_width;
+    window->height = desired_height < max_height ? desired_height : max_height;
+    if (window->width < 280) window->width = max_width;
+    if (window->height < 220) window->height = max_height;
+
+    if (app == APP_CONTROL_CENTER || app == APP_NOTIFICATIONS) {
+        window->x = (int32_t)surface.width - (int32_t)window->width - 16;
+        window->y = (int32_t)surface.height - (int32_t)window->height - 56;
+    }
+    else {
+        window->x = (int32_t)((surface.width - window->width) / 2);
+        if (app == APP_FILES)
+            window->y = (int32_t)surface.height / 2 - 280;
+        else if (app == APP_SETTINGS)
+            window->y = (int32_t)surface.height / 2 - 270;
+        else
+            window->y = (int32_t)surface.height / 2 - 260;
+    }
+    if (window->x < 8) window->x = 8;
+    if (window->y < 8) window->y = 8;
+    uint32_t work_bottom = surface.height > 56 ? surface.height - 56 : surface.height;
+    if ((uint64_t)window->y + window->height > work_bottom)
         window->y = (int32_t)(work_bottom - window->height);
-    }
-    if (window->y < 38) window->y = 38;
+    if ((uint64_t)window->x + window->width > surface.width - 8)
+        window->x = (int32_t)(surface.width - window->width - 8);
 }
 
 static void compact_window_order(void) {
@@ -666,6 +854,11 @@ static void open_app(uint32_t app) {
     window->minimized = false;
     raise_window(app);
     active_app = (int32_t)app;
+    if (recent_app_count == 0 || recent_apps[0] != app) {
+        if (recent_app_count != 0) recent_apps[1] = recent_apps[0];
+        recent_apps[0] = app;
+        if (recent_app_count < 2) ++recent_app_count;
+    }
     start_menu_open = false;
     context_menu_open = false;
     move_window_mode = false;
@@ -694,10 +887,10 @@ static void toggle_maximize(void) {
         window->restore_y = window->y;
         window->restore_width = window->width;
         window->restore_height = window->height;
-        window->x = 12;
-        window->y = 42;
-        window->width = surface.width - 24;
-        window->height = surface.height - 110;
+        window->x = 0;
+        window->y = 0;
+        window->width = surface.width;
+        window->height = surface.height > 48 ? surface.height - 48 : surface.height;
         window->maximized = true;
     }
     else {
@@ -724,160 +917,179 @@ static void cycle_focus(int direction) {
     active_app = -1;
 }
 
+static uint32_t wallpaper_u32(uint32_t offset) {
+    return (uint32_t)wallpaper_asset[offset]
+        | ((uint32_t)wallpaper_asset[offset + 1] << 8)
+        | ((uint32_t)wallpaper_asset[offset + 2] << 16)
+        | ((uint32_t)wallpaper_asset[offset + 3] << 24);
+}
+
+static bool wallpaper_try_path(char *path) {
+    long descriptor = vino_fs_open(path, KOS_O_RDONLY);
+    if (descriptor < 0) return false;
+    uint32_t total = 0;
+    while (total < sizeof(wallpaper_asset)) {
+        long bytes = vino_fs_read(descriptor, wallpaper_asset + total,
+                                  sizeof(wallpaper_asset) - total);
+        if (bytes < 0) {
+            (void)vino_fs_close(descriptor);
+            return false;
+        }
+        if (bytes == 0) break;
+        total += (uint32_t)bytes;
+    }
+    (void)vino_fs_close(descriptor);
+    if (total < WALLPAPER_HEADER_SIZE) return false;
+    static const uint8_t expected_magic[8] = { 'K', 'O', 'S', 'R', 'G', 'B', '2', '4' };
+    for (uint32_t index = 0; index < sizeof(expected_magic); ++index) {
+        if (wallpaper_asset[index] != expected_magic[index]) return false;
+    }
+    uint32_t width = wallpaper_u32(8);
+    uint32_t height = wallpaper_u32(12);
+    uint32_t pitch = wallpaper_u32(16);
+    if (width == 0 || height == 0 || width > 4096 || height > 4096
+        || pitch < width * 3u || (uint64_t)pitch * height != total - WALLPAPER_HEADER_SIZE)
+        return false;
+    wallpaper_asset_size = total;
+    wallpaper_width = width;
+    wallpaper_height = height;
+    wallpaper_pitch = pitch;
+    return true;
+}
+
+static void wallpaper_load(void) {
+    char installed_path[] = "C:/VINO/system/gui/default/share/wallpaper.kosrgb";
+    char live_path[] = "D:/system/gui/default/share/wallpaper.kosrgb";
+    char system_path[] = "C:/system/gui/default/share/wallpaper.kosrgb";
+    char volume = system_info.system_volume_letter;
+    if (volume >= 'a' && volume <= 'z') volume = (char)(volume - 'a' + 'A');
+    if (volume >= 'A' && volume <= 'Z') installed_path[0] = volume;
+    wallpaper_loaded = wallpaper_try_path(installed_path)
+        || wallpaper_try_path(live_path) || wallpaper_try_path(system_path);
+}
+
 static void draw_wallpaper(void) {
     (void)vino_gui_clear(color_wallpaper);
-    uint32_t top_height = surface.height * 2 / 3;
-    uint32_t band_height = top_height / 16;
-    for (uint32_t band = 0; band < 16; ++band) {
-        struct kos_gui_color band_color = {
-            (uint8_t)(color_wallpaper.red + (color_wallpaper_light.red - color_wallpaper.red) * band / 16),
-            (uint8_t)(color_wallpaper.green + (color_wallpaper_light.green - color_wallpaper.green) * band / 16),
-            (uint8_t)(color_wallpaper.blue + (color_wallpaper_light.blue - color_wallpaper.blue) * band / 16),
-            0,
-        };
-        uint32_t y = band * band_height;
-        uint32_t height = band == 15 ? top_height - y : band_height;
-        if (height != 0) {
-            (void)vino_gui_fill((struct kos_gui_rect){ 0, (int32_t)y,
-                surface.width, height }, band_color);
-        }
+    if (!wallpaper_loaded || surface.width == 0 || surface.height == 0) return;
+
+    uint32_t crop_x = 0;
+    uint32_t crop_y = 0;
+    uint32_t crop_width = wallpaper_width;
+    uint32_t crop_height = wallpaper_height;
+    uint64_t image_scaled_width = (uint64_t)wallpaper_width * surface.height;
+    uint64_t image_scaled_height = (uint64_t)wallpaper_height * surface.width;
+    if (image_scaled_width > image_scaled_height) {
+        crop_width = (uint32_t)((uint64_t)wallpaper_height * surface.width
+                                / surface.height);
+        crop_x = (wallpaper_width - crop_width) / 2;
     }
-    uint32_t glow_width = surface.width / 3;
-    if (glow_width > 0 && surface.height > 110) {
-        struct kos_gui_color glow = theme_variant == 1
-            ? (struct kos_gui_color){ 18, 65, 72, 0 }
-            : theme_variant == 2 ? (struct kos_gui_color){ 47, 40, 83, 0 }
-                                 : (struct kos_gui_color){ 22, 59, 91, 0 };
-        (void)vino_gui_fill((struct kos_gui_rect){
-            (int32_t)(surface.width - glow_width), 42, glow_width,
-            surface.height - 112 }, glow);
+    else if (image_scaled_width < image_scaled_height) {
+        crop_height = (uint32_t)((uint64_t)wallpaper_width * surface.height
+                                 / surface.width);
+        crop_y = (wallpaper_height - crop_height) / 2;
+    }
+    if (vino_gui_blit_rgb24((struct kos_gui_rect){
+            0, 0, surface.width, surface.height },
+            wallpaper_asset + WALLPAPER_HEADER_SIZE,
+            wallpaper_asset_size - WALLPAPER_HEADER_SIZE,
+            wallpaper_width, wallpaper_height, wallpaper_pitch,
+            crop_x, crop_y, crop_width, crop_height) < 0) {
+        wallpaper_loaded = false;
+        (void)vino_gui_clear(color_wallpaper);
     }
 }
 
-static void draw_top_bar(void) {
-    struct kos_gui_rect top = { 0, 0, surface.width, 34 };
-    draw_glass(top, color_panel, color_text, 0, 30);
-    (void)vino_gui_fill((struct kos_gui_rect){ 0, 33, surface.width, 1 }, color_accent);
-    draw_dot(14, 10, 14, color_accent);
-    draw_text(19, 13, "V", color_wallpaper, color_accent);
-    draw_text_scale(40, 10, "Vino OS", 1, color_text, color_panel_low);
-    draw_text(100, 13, surface.width >= 520 ? "Default  /  Native desktop" : "Default",
-              color_muted, color_panel_low);
-    char status[96] = "up ";
-    append_uptime(status, sizeof(status), sys_gettime());
-    if (system_info.network_available) string_append(status, sizeof(status), "   ");
-    int32_t status_x = (int32_t)surface.width - (int32_t)string_length(status) * 8 - 22;
-    if (status_x < 190) status_x = 190;
-    draw_text(status_x, 13, status, color_muted, color_panel_low);
-    if (system_info.network_available) {
-        draw_dot(status_x - 15, 13, 7, (system_info.ipv4_address != 0)
-            ? (struct kos_gui_color){ 104, 224, 169, 0 }
-            : (struct kos_gui_color){ 240, 190, 96, 0 });
-    }
-}
-
-static void draw_desktop_icons(void) {
-    if (surface.height < 440) {
-        draw_text(18, (int32_t)surface.height - 72,
-                  "1-4 launch   S start   C menu", color_muted, color_wallpaper);
-        return;
-    }
-    static const uint32_t icon_apps[4] = {
-        APP_TERMINAL, APP_FILES, APP_SETTINGS, APP_NETWORK,
-    };
-    for (uint32_t index = 0; index < 4; ++index) {
-        int32_t x = 26;
-        int32_t y = 64 + (int32_t)index * 84;
-        struct kos_gui_rect icon = { x, y, 144, 66 };
-        (void)vino_gui_fill(icon, color_panel);
-        (void)vino_gui_border(icon, color_dim);
-        draw_box((struct kos_gui_rect){ x + 9, y + 10, 42, 42 }, color_panel_high,
-                 color_accent);
-        draw_text(x + 18, y + 26, app_symbols[icon_apps[index]], color_accent,
-                  color_panel_high);
-        draw_text(x + 60, y + 17, app_names[icon_apps[index]], color_text, color_panel);
-        char shortcut[8] = { (char)('1' + index), '\0' };
-        draw_text(x + 60, y + 39, shortcut, color_muted, color_panel);
-    }
-    if (surface.width < 600) return;
-    struct kos_gui_rect info_card = {
-        (int32_t)surface.width - 270, 64, 238, 88,
-    };
-    draw_box(info_card, color_panel, color_dim);
-    draw_text(info_card.x + 16, info_card.y + 14, "WELCOME TO VINO OS",
-              color_cyan, color_panel);
-    draw_text(info_card.x + 16, info_card.y + 38, "A quiet space for your work.",
-              color_text, color_panel);
-    draw_text(info_card.x + 16, info_card.y + 62, "Choose an app from the dock below.",
-              color_muted, color_panel);
-}
-
-static void draw_dock(void) {
-    uint32_t bar_height = 58;
+static void draw_taskbar(void) {
+    const uint32_t bar_height = 48;
     int32_t bar_y = (int32_t)(surface.height - bar_height);
-    draw_glass((struct kos_gui_rect){ 0, bar_y, surface.width, bar_height },
-               color_panel, color_text, 0, 30);
-    (void)vino_gui_fill((struct kos_gui_rect){ 0, bar_y, surface.width, 1 }, color_dim);
+    struct kos_gui_color shadow = { 0, 0, 0, 60 };
+    struct kos_gui_color shadow_edge = { 0, 0, 0, 1 };
+    (void)vino_gui_glass((struct kos_gui_rect){ 0, bar_y - 5,
+        surface.width, 10 }, shadow, shadow_edge, 0, 12);
+    struct kos_gui_color taskbar = { 12, 19, 34, 204 };
+    struct kos_gui_color taskbar_edge = { 255, 255, 255, 23 };
+    (void)vino_gui_glass((struct kos_gui_rect){ 0, bar_y,
+        surface.width, bar_height }, taskbar, taskbar_edge, 0, 30);
 
-    uint32_t start_width = surface.width >= 520 ? 102 : 44;
-    struct kos_gui_rect start = { 10, bar_y + 7, start_width, 44 };
-    struct kos_gui_color start_fill = start_menu_open ? color_panel_high : color_panel_low;
-    draw_box(start, start_fill, start_menu_open ? color_accent : color_dim);
-    draw_dot(start.x + 8, start.y + 12, 18, color_accent);
-    draw_text(start.x + 14, start.y + 17, "V", color_wallpaper, color_accent);
-    if (start_width >= 90)
-        draw_text(start.x + 34, start.y + 18, "Start  S", color_text, start_fill);
+    struct kos_gui_rect start = { 16, bar_y + 7, 34, 34 };
+    if (pointer_inside(start)) {
+        struct kos_gui_color hover = { 255, 255, 255, 26 };
+        struct kos_gui_color no_border = { 255, 255, 255, 8 };
+        (void)vino_gui_glass(start, hover, no_border, 12, 0);
+    }
+    draw_vino_mark(start.x + 8, start.y + 8, 18);
 
-    uint32_t left_reserve = surface.width >= 520 ? 124 : 60;
-    uint32_t right_reserve = surface.width >= 520 ? 104 : 10;
-    uint32_t available_width = surface.width > left_reserve + right_reserve + 20
-        ? surface.width - left_reserve - right_reserve - 20 : surface.width - 36;
-    uint32_t dock_width = available_width < 486 ? available_width : 486;
-    if (dock_width < 40) dock_width = 40;
-    uint32_t dock_height = 46;
-    int32_t dock_x = (int32_t)left_reserve
-        + (int32_t)(available_width - dock_width) / 2;
-    int32_t dock_y = bar_y + 6;
-    draw_box((struct kos_gui_rect){ dock_x, dock_y, dock_width, dock_height },
-             color_panel_low, color_dim);
-    uint32_t button_width = (dock_width - 24) / APP_COUNT;
+    uint32_t search_width = surface.width >= 620 ? 210 : surface.width / 3;
+    if (search_width < 112) search_width = 112;
+    struct kos_gui_rect search = { 60, bar_y + 8, search_width, 32 };
+    struct kos_gui_color search_fill = { 255, 255, 255, 18 };
+    struct kos_gui_color search_edge = { 255, 255, 255, 23 };
+    (void)vino_gui_glass(search, search_fill, search_edge, 18, 0);
+    struct kos_gui_color search_color = { 196, 208, 224, 0 };
+    draw_dot(search.x + 13, search.y + 10, 9, search_color);
+    struct kos_gui_color search_cut = { 12, 19, 34, 0 };
+    draw_dot(search.x + 15, search.y + 12, 5, search_cut);
+    draw_hline(search.x + 22, search.y + 20, 5, 2, search_color);
+    draw_text(search.x + 34, search.y + 9, "Search everything...",
+              color_muted, color_panel);
+
+    uint32_t icon_size = surface.width >= 720 ? 38 : 32;
+    uint32_t icon_gap = surface.width >= 720 ? 6 : 2;
+    uint32_t dock_width = APP_COUNT * icon_size + (APP_COUNT - 1) * icon_gap;
+    int32_t dock_x = (int32_t)(surface.width - dock_width) / 2;
+    int32_t dock_y = bar_y + (int32_t)(bar_height - 38) / 2;
     for (uint32_t app = 0; app < APP_COUNT; ++app) {
-        int32_t x = dock_x + 6 + (int32_t)(app * button_width);
-        struct kos_gui_color fill = active_app == (int32_t)app
-            ? color_panel_high : color_panel_low;
-        struct kos_gui_rect app_button = { x, dock_y + 5, button_width - 3, 36 };
-        if (pointer_inside(app_button)) fill = color_panel_high;
-        draw_glass(app_button, fill,
-            active_app == (int32_t)app ? color_accent : color_dim, 8, 30);
-        if (active_app == (int32_t)app) {
-            uint32_t pulse = !reduced_motion && ((sys_gettime() / 2) & 1) ? 2 : 1;
-            (void)vino_gui_fill((struct kos_gui_rect){ x + 3, dock_y + 5,
-                button_width - 9, pulse }, color_accent);
+        int32_t x = dock_x + (int32_t)(app * (icon_size + icon_gap));
+        struct kos_gui_rect button = { x, dock_y, icon_size, 38 };
+        bool active = active_app == (int32_t)app && windows[app].open
+            && !windows[app].minimized;
+        if (pointer_inside(button) || active) {
+            struct kos_gui_color fill = { 255, 255, 255, active ? 30 : 20 };
+            struct kos_gui_color edge = { 255, 255, 255, active ? 38 : 10 };
+            (void)vino_gui_glass(button, fill, edge, 8, 0);
         }
-        draw_text(x + 9, dock_y + 18, app_symbols[app], color_accent, fill);
-        if (button_width >= 95) {
-            draw_text(x + 34, dock_y + 18, app_names[app], color_text, fill);
+        uint32_t glyph_size = icon_size - 2;
+        draw_app_icon(app, x + 1, dock_y + 1, glyph_size, false);
+        if (windows[app].open) {
+            int32_t marker_x = x + (int32_t)icon_size / 2 - (active ? 7 : 3);
+            draw_dot(marker_x, dock_y + 34, active ? 14 : 6, active ? color_accent : color_dim);
         }
-        else {
-            char shortcut[2] = { (char)('1' + app), '\0' };
-            draw_text(x + 34, dock_y + 18, shortcut, color_text, fill);
-        }
-        if (windows[app].open) draw_dot(x + (int32_t)button_width - 12,
-                                        dock_y + 19, 4, color_cyan);
     }
-    if (surface.width >= 520) {
-        struct kos_gui_rect status = { (int32_t)surface.width - 92, bar_y + 7, 82, 44 };
-        draw_box(status, color_panel, color_dim);
-        struct kos_gui_color status_color = system_info.network_available
-            ? (system_info.ipv4_address != 0
-                ? (struct kos_gui_color){ 104, 224, 169, 0 }
-                : (struct kos_gui_color){ 240, 190, 96, 0 })
-            : color_dim;
-        draw_dot(status.x + 10, status.y + 17, 8, status_color);
-        draw_text(status.x + 24, status.y + 18,
-                  system_info.network_available ? "Online" : "Offline",
-                  color_muted, color_panel);
+
+    struct kos_gui_rect notification = {
+        (int32_t)surface.width - 210, bar_y + 7, 30, 34,
+    };
+    draw_app_icon(APP_NOTIFICATIONS, notification.x, notification.y + 1, 32, false);
+    struct kos_gui_rect network = {
+        (int32_t)surface.width - 174, bar_y + 7, 30, 34,
+    };
+    draw_app_icon(APP_NETWORK, network.x, network.y + 1, 32, false);
+    struct kos_gui_color state_color = system_info.network_available
+        ? (system_info.ipv4_address != 0
+            ? (struct kos_gui_color){ 74, 222, 128, 0 }
+            : (struct kos_gui_color){ 251, 191, 36, 0 })
+        : color_muted;
+    draw_dot(network.x + 24, network.y + 8, 5, state_color);
+    struct kos_gui_rect control = {
+        (int32_t)surface.width - 138, bar_y + 7, 34, 34,
+    };
+    if (pointer_inside(control)) {
+        struct kos_gui_color fill = { 255, 255, 255, 24 };
+        struct kos_gui_color edge = { 255, 255, 255, 10 };
+        (void)vino_gui_glass(control, fill, edge, 8, 0);
     }
+    draw_app_icon(APP_CONTROL_CENTER, control.x + 1, control.y + 1, 32, false);
+
+    char uptime[24];
+    append_uptime(uptime, sizeof(uptime), sys_gettime());
+    struct kos_gui_rect clock = { (int32_t)surface.width - 96, bar_y + 6, 80, 36 };
+    if (pointer_inside(clock)) {
+        struct kos_gui_color fill = { 255, 255, 255, 24 };
+        struct kos_gui_color edge = { 255, 255, 255, 10 };
+        (void)vino_gui_glass(clock, fill, edge, 8, 0);
+    }
+    draw_text(clock.x + 6, clock.y + 3, "Vino OS", color_text, taskbar);
+    draw_text(clock.x + 6, clock.y + 19, uptime, color_muted, taskbar);
 }
 
 static void draw_terminal_content(struct vino_window *window) {
@@ -905,99 +1117,329 @@ static void draw_terminal_content(struct vino_window *window) {
 }
 
 static void draw_files_content(struct vino_window *window) {
-    int32_t left = window->x + 18;
-    bool compact = window->height < 300;
-    int32_t top = window->y + WINDOW_TITLE_HEIGHT + (compact ? 8 : 14);
-    int32_t list_y;
-    if (compact) {
-        draw_text(left + 2, top, file_directory, color_cyan, color_panel_low);
-        list_y = top + 20;
+    int32_t body_y = window->y + WINDOW_TITLE_HEIGHT;
+    uint32_t side_width = 156;
+    uint32_t body_height = window->height - WINDOW_TITLE_HEIGHT;
+    struct kos_gui_color side_fill = { 0, 0, 0, 38 };
+    struct kos_gui_color side_edge = { 255, 255, 255, 10 };
+    (void)vino_gui_glass((struct kos_gui_rect){ window->x + 1, body_y,
+        side_width, body_height }, side_fill, side_edge, 0, 0);
+    draw_text(window->x + 18, body_y + 13, "Favorites", color_muted, side_fill);
+    const char *nav[3] = { "Home", "This PC", "Network" };
+    for (uint32_t index = 0; index < 3; ++index) {
+        int32_t row_y = body_y + 36 + (int32_t)index * 34;
+        bool selected = index == 0 && string_equal(file_directory, file_home_directory);
+        struct kos_gui_rect row = { window->x + 9, row_y,
+            side_width - 18, 30 };
+        if (selected) {
+            struct kos_gui_color fill = { 255, 255, 255, 20 };
+            struct kos_gui_color edge = { 255, 255, 255, 8 };
+            (void)vino_gui_glass(row, fill, edge, 8, 0);
+        }
+        draw_text(row.x + 12, row.y + 8, nav[index],
+                  selected ? color_text : color_muted, side_fill);
     }
-    else {
-        struct kos_gui_rect address = {
-            left, top, window->width - 36, 30,
-        };
-        draw_box(address, color_panel_high, color_dim);
-        draw_text(address.x + 10, address.y + 10, file_directory,
-                  color_cyan, color_panel_high);
-        list_y = top + 42;
+    draw_hline(window->x + 16, body_y + 145, side_width - 32, 1,
+               (struct kos_gui_color){ 255, 255, 255, 18 });
+    draw_text(window->x + 18, body_y + 160, "Storage", color_muted, side_fill);
+    char volume[32] = "Vino volume";
+    if (system_info.system_volume_letter != 0) {
+        char letter[5] = { ' ', '(', system_info.system_volume_letter, ')', '\0' };
+        string_append(volume, sizeof(volume), letter);
     }
-    uint32_t row_height = 24;
-    uint32_t available_height = window->height > (compact ? 84u : 150u)
-        ? window->height - (compact ? 84u : 150u) : row_height;
+    draw_text(window->x + 18, body_y + 185, volume, color_text, side_fill);
+
+    int32_t content_x = window->x + (int32_t)side_width;
+    uint32_t content_width = window->width - side_width;
+    struct kos_gui_color toolbar_fill = { 255, 255, 255, 5 };
+    struct kos_gui_color toolbar_edge = { 255, 255, 255, 18 };
+    (void)vino_gui_glass((struct kos_gui_rect){ content_x, body_y,
+        content_width, 38 }, toolbar_fill, toolbar_edge, 0, 0);
+    struct kos_gui_color nav_color = file_scroll == 0 ? color_dim : color_text;
+    draw_hline(content_x + 15, body_y + 15, 7, 2, nav_color);
+    draw_hline(content_x + 15, body_y + 19, 7, 2, nav_color);
+    draw_hline(content_x + 15, body_y + 23, 7, 2, nav_color);
+    struct kos_gui_rect address = {
+        content_x + 42, body_y + 5, content_width - 54, 28,
+    };
+    draw_box(address, color_panel_low, color_dim);
+    draw_text(address.x + 10, address.y + 7, file_directory,
+              color_text, color_panel_low);
+
+    int32_t left = content_x + 18;
+    int32_t top = body_y + 52;
+    draw_text(left, top, "Quick access", color_text, color_panel_low);
+    uint32_t card_width = (content_width - 48) / 3;
+    for (uint32_t card_index = 0; card_index < 3; ++card_index) {
+        uint32_t index = files_quick_directory(card_index);
+        if (index >= file_entry_count) continue;
+        int32_t card_x = left + (int32_t)(card_index * (card_width + 6));
+        int32_t card_y = top + 23;
+        struct kos_gui_rect card = { card_x, card_y, card_width, 44 };
+        draw_box(card, color_panel_high, color_dim);
+        draw_file_glyph(card.x + 8, card.y + 13, true);
+        draw_text(card.x + 31, card.y + 15, file_entries[index].name,
+                  color_text, color_panel_high);
+    }
+
+    int32_t list_y = top + 82;
+    draw_text(left, list_y, "Name", color_muted, color_panel_low);
+    draw_text(left + (int32_t)content_width - 170, list_y, "Type", color_muted,
+              color_panel_low);
+    draw_text(left + (int32_t)content_width - 82, list_y, "Size", color_muted,
+              color_panel_low);
+    list_y += 22;
+    uint32_t row_height = 25;
+    uint32_t available_height = window->height > 185 ? window->height - 185 : 50;
     uint32_t visible = available_height / row_height;
-    if (visible > 10) visible = 10;
-    if (visible > file_entry_count) visible = file_entry_count;
+    if (visible > 12) visible = 12;
     for (uint32_t row = 0; row < visible; ++row) {
         uint32_t index = file_scroll + row;
         if (index >= file_entry_count) break;
         struct kos_gui_rect item = {
-            left, list_y + (int32_t)(row * row_height), window->width - 36, row_height,
+            left, list_y + (int32_t)(row * row_height), content_width - 30, row_height,
         };
         struct kos_gui_color fill = file_selected == index
-            ? color_panel_high : color_panel_low;
-        (void)vino_gui_fill(item, fill);
-        if (file_selected == index) {
-            (void)vino_gui_fill((struct kos_gui_rect){ item.x, item.y, 3, item.height },
-                                color_accent);
-        }
-        const char *type = file_entries[index].type == KOS_STAT_DIRECTORY ? "DIR  " : "FILE ";
-        draw_text(item.x + 10, item.y + 8, type,
-                  file_entries[index].type == KOS_STAT_DIRECTORY ? color_cyan : color_muted,
-                  fill);
-        draw_text(item.x + 58, item.y + 8, file_entries[index].name, color_text, fill);
+            ? (struct kos_gui_color){ 59, 130, 246, 40 }
+            : (struct kos_gui_color){ 0, 0, 0, 16 };
+        (void)vino_gui_glass(item, fill,
+            (struct kos_gui_color){ 255, 255, 255, 4 }, 5, 0);
+        draw_file_glyph(item.x + 5, item.y + 5,
+                        file_entries[index].type == KOS_STAT_DIRECTORY);
+        draw_text(item.x + 28, item.y + 7, file_entries[index].name,
+                  color_text, color_panel_low);
+        draw_text(left + (int32_t)content_width - 170, item.y + 7,
+            file_entries[index].type == KOS_STAT_DIRECTORY ? "Folder" : "File",
+            color_muted, color_panel_low);
         char size[24];
         number_text(file_entries[index].size, size);
-        draw_text(item.x + (int32_t)item.width - 78, item.y + 8, size, color_muted, fill);
+        draw_text(left + (int32_t)content_width - 82, item.y + 7, size,
+                  color_muted, color_panel_low);
     }
     if (file_error[0] != '\0') {
-        draw_text(left + 8, list_y + 14, file_error, color_cyan, color_panel_low);
+        draw_text(left + 8, list_y + 18, file_error, color_cyan, color_panel_low);
     }
     else if (file_entry_count == 0) {
-        draw_text(left + 8, list_y + 14, "This directory is empty.", color_muted,
+        draw_text(left + 8, list_y + 18, "This location is empty.", color_muted,
                   color_panel_low);
     }
-    draw_text(left, window->y + (int32_t)window->height - 24,
-              "J/K select   Enter open   Backspace up   R refresh   V Vino volume",
-              color_muted, color_panel_low);
+    draw_text(left, window->y + (int32_t)window->height - 22,
+        "Double-click to open   Backspace up   R refresh",
+        color_muted, color_panel_low);
 }
 
 static void draw_settings_content(struct vino_window *window) {
-    int32_t left = window->x + 22;
-    if (window->height < 360) {
-        int32_t y = window->y + WINDOW_TITLE_HEIGHT + 12;
-        draw_text(left, y, "1 Accent: Ocean / Teal / Violet", color_accent,
+    static const char *const pages[6] = {
+        "System", "Bluetooth", "Network", "Personalization", "Applications", "About",
+    };
+    int32_t top = window->y + WINDOW_TITLE_HEIGHT + 10;
+    int32_t side_x = window->x + 10;
+    uint32_t side_width = 152;
+    uint32_t side_height = window->height - WINDOW_TITLE_HEIGHT - 20;
+    struct kos_gui_color side_fill = { 0, 0, 0, 42 };
+    struct kos_gui_color side_edge = { 255, 255, 255, 10 };
+    (void)vino_gui_glass((struct kos_gui_rect){ side_x, top, side_width, side_height },
+                         side_fill, side_edge, 12, 0);
+    for (uint32_t page = 0; page < 6; ++page) {
+        int32_t row_y = top + 8 + (int32_t)page * 36;
+        struct kos_gui_rect row = { side_x + 7, row_y, side_width - 14, 31 };
+        bool selected = settings_page == page;
+        if (selected) {
+            struct kos_gui_color fill = { 255, 255, 255, 23 };
+            struct kos_gui_color edge = { 255, 255, 255, 9 };
+            (void)vino_gui_glass(row, fill, edge, 8, 0);
+        }
+        draw_text(row.x + 10, row.y + 9, pages[page],
+                  selected ? color_text : color_muted, color_panel_low);
+    }
+
+    int32_t left = window->x + (int32_t)side_width + 28;
+    int32_t right = window->x + (int32_t)window->width - 20;
+    uint32_t content_width = right > left ? (uint32_t)(right - left) : 1;
+    int32_t y = top + 8;
+    draw_text(left, y, pages[settings_page < 6 ? settings_page : 0],
+              color_text, color_panel_low);
+    y += 34;
+
+    if (settings_page == 0) {
+        struct kos_gui_rect card = { left, y, content_width, 72 };
+        draw_box(card, color_panel_high, color_dim);
+        draw_text(card.x + 14, card.y + 12, "Vino OS Default", color_text,
+                  color_panel_high);
+        draw_text(card.x + 14, card.y + 39, "Native desktop session",
+                  color_muted, color_panel_high);
+        card.y += 84;
+        draw_box(card, color_panel_high, color_dim);
+        char uptime[24] = "Uptime: ";
+        append_uptime(uptime, sizeof(uptime), sys_gettime());
+        draw_text(card.x + 14, card.y + 14, uptime, color_accent, color_panel_high);
+        char task_count[64] = "Active tasks: ";
+        char digits[24];
+        number_text(system_info.task_count, digits);
+        string_append(task_count, sizeof(task_count), digits);
+        draw_text(card.x + 14, card.y + 42, task_count, color_muted, color_panel_high);
+    }
+    else if (settings_page == 1) {
+        draw_text(left, y, "Bluetooth controller", color_text, color_panel_low);
+        draw_text(left, y + 30, "No Bluetooth adapter is exposed by the current kernel.",
+                  color_muted, color_panel_low);
+        draw_text(left, y + 58, "No radio state is being simulated.", color_muted,
                   color_panel_low);
-        draw_text(left, y + 25, reduced_motion ? "2 Motion: Reduced" : "2 Motion: Subtle",
-                  color_text, color_panel_low);
-        draw_text(left, y + 50, compact_panels ? "3 Panels: Compact" : "3 Panels: Comfortable",
-                  color_text, color_panel_low);
+    }
+    else if (settings_page == 2) {
+        refresh_system_info();
+        char ip[16];
+        format_ipv4(system_info.ipv4_address, ip);
+        struct kos_gui_rect card = { left, y, content_width, 74 };
+        draw_box(card, color_panel_high, color_dim);
+        draw_text(card.x + 14, card.y + 12,
+            system_info.network_available ? "Network interface ready" : "No network interface",
+            color_text, color_panel_high);
+        draw_text(card.x + 14, card.y + 40,
+            system_info.ipv4_address != 0 ? ip : "IPv4 address unavailable",
+            color_cyan, color_panel_high);
+        draw_text(left, y + 94, "Press N to open Network details.",
+                  color_muted, color_panel_low);
+    }
+    else if (settings_page == 3) {
+        struct kos_gui_rect card = { left, y, content_width, 62 };
+        draw_box(card, color_panel_high, color_dim);
+        draw_text(card.x + 14, card.y + 11, "Accent color", color_text, color_panel_high);
+        const char *theme = theme_variant == 0 ? "Ocean blue" : theme_variant == 1
+            ? "Lagoon teal" : "Evening violet";
+        draw_text(card.x + 14, card.y + 36, theme, color_accent, color_panel_high);
+        card.y += 72;
+        draw_box(card, color_panel_high, color_dim);
+        draw_text(card.x + 14, card.y + 11, "Motion", color_text, color_panel_high);
+        draw_text(card.x + 14, card.y + 36,
+            reduced_motion ? "Reduced motion" : "Subtle transitions",
+            color_accent, color_panel_high);
+        card.y += 72;
+        draw_box(card, color_panel_high, color_dim);
+        draw_text(card.x + 14, card.y + 11, "Taskbar density", color_text,
+                  color_panel_high);
+        draw_text(card.x + 14, card.y + 36,
+            compact_panels ? "Compact" : "Comfortable",
+            color_accent, color_panel_high);
+        draw_text(left, y + 238, "Wallpaper", color_text, color_panel_low);
+        draw_text(left, y + 262, wallpaper_loaded
+            ? "Demoweb local image  |  cover scaling" : "Local wallpaper asset unavailable",
+            wallpaper_loaded ? color_muted : (struct kos_gui_color){ 251, 146, 60, 0 },
+            color_panel_low);
+        draw_text(left, y + 294, "Use 1 / 2 / 3 to change the selected appearance option.",
+                  color_muted, color_panel_low);
+    }
+    else if (settings_page == 4) {
+        for (uint32_t app = 0; app < APP_COUNT; ++app) {
+            draw_app_icon(app, left, y + (int32_t)(app * 40), 32, true);
+            draw_text(left + 44, y + 9 + (int32_t)(app * 40), app_names[app],
+                      color_text, color_panel_low);
+        }
+    }
+    else {
+        draw_text(left, y, "Vino OS Default", color_text, color_panel_low);
+        draw_text(left, y + 30, "Native user-space GUI; no browser or WebView.",
+                  color_muted, color_panel_low);
+        draw_text(left, y + 58, "Display, input and file access use kernel services.",
+                  color_muted, color_panel_low);
+    }
+}
+
+static void draw_control_center_content(struct vino_window *window) {
+    refresh_system_info();
+    int32_t left = window->x + 18;
+    int32_t top = window->y + WINDOW_TITLE_HEIGHT + 14;
+    draw_text(left, top, "Quick settings", color_text, color_panel_low);
+    const char *titles[4] = { "Network", "Personalize", "Notifications", "Motion" };
+    const char *details[4] = {
+        system_info.ipv4_address != 0 ? "Connected" : "Unavailable",
+        theme_variant == 0 ? "Ocean blue" : theme_variant == 1 ? "Lagoon teal" : "Violet",
+        notifications_cleared ? "Caught up" : "System status",
+        reduced_motion ? "Reduced" : "Subtle",
+    };
+    const uint32_t icons[4] = {
+        APP_NETWORK, APP_SETTINGS, APP_NOTIFICATIONS, APP_CONTROL_CENTER,
+    };
+    uint32_t cell_width = (window->width - 48) / 2;
+    for (uint32_t index = 0; index < 4; ++index) {
+        int32_t x = left + (int32_t)(index % 2) * (int32_t)(cell_width + 10);
+        int32_t y = top + 30 + (int32_t)(index / 2) * 78;
+        struct kos_gui_rect tile = { x, y, cell_width, 68 };
+        struct kos_gui_color fill = index == 0 && system_info.network_available
+            ? (struct kos_gui_color){ 29, 94, 183, 0 } : color_panel_high;
+        draw_box(tile, fill, color_dim);
+        draw_app_icon(icons[index], x + 8, y + 17, 34, true);
+        draw_text(x + 49, y + 14, titles[index], color_text, fill);
+        draw_text(x + 49, y + 39, details[index], color_muted, fill);
+    }
+    int32_t status_y = top + 192;
+    draw_hline(left, status_y, window->width - 36, 1,
+               (struct kos_gui_color){ 255, 255, 255, 20 });
+    draw_text(left, status_y + 16, "System status", color_text, color_panel_low);
+    char uptime[24] = "Uptime: ";
+    append_uptime(uptime, sizeof(uptime), sys_gettime());
+    draw_text(left, status_y + 44, uptime, color_muted, color_panel_low);
+    char tasks[48] = "Tasks: ";
+    char digits[24];
+    number_text(system_info.task_count, digits);
+    string_append(tasks, sizeof(tasks), digits);
+    draw_text(left, status_y + 68, tasks, color_muted, color_panel_low);
+    draw_text(left, status_y + 98,
+        system_info.system_volume_letter != 0 ? "Installed system volume mounted"
+                                              : "Live / recovery session",
+        color_cyan, color_panel_low);
+}
+
+static void draw_notifications_content(struct vino_window *window) {
+    refresh_system_info();
+    int32_t left = window->x + 14;
+    int32_t top = window->y + WINDOW_TITLE_HEIGHT + 14;
+    uint32_t width = window->width - 28;
+    draw_text(left, top, "Today", color_muted, color_panel_low);
+    draw_text(window->x + (int32_t)window->width - 94, top, "Clear all",
+              color_accent, color_panel_low);
+    if (notifications_cleared) {
+        draw_text(left + 10, top + 58, "You're all caught up.", color_text,
+                  color_panel_low);
+        draw_text(left + 10, top + 84, "System notices will appear here.",
+                  color_muted, color_panel_low);
         return;
     }
-    int32_t y = window->y + WINDOW_TITLE_HEIGHT + 20;
-    draw_text(left, y, "PERSONALIZATION", color_cyan, color_panel_low);
-    y += 34;
-    struct kos_gui_rect card = { left, y, window->width - 44, 62 };
-    draw_box(card, color_panel_high, color_dim);
-    draw_text(card.x + 14, card.y + 12, "01   Accent color", color_text, color_panel_high);
-    const char *theme = theme_variant == 0 ? "Ocean blue" : theme_variant == 1
-        ? "Lagoon teal" : "Evening violet";
-    draw_text(card.x + 14, card.y + 36, theme, color_accent, color_panel_high);
-    y += 76;
-    card.y = y;
-    draw_box(card, color_panel_high, color_dim);
-    draw_text(card.x + 14, card.y + 12, "02   Motion", color_text, color_panel_high);
-    draw_text(card.x + 14, card.y + 36, reduced_motion ? "Reduced" : "Subtle transitions",
-              color_accent, color_panel_high);
-    y += 76;
-    card.y = y;
-    draw_box(card, color_panel_high, color_dim);
-    draw_text(card.x + 14, card.y + 12, "03   Panel density", color_text, color_panel_high);
-    draw_text(card.x + 14, card.y + 36, compact_panels ? "Compact" : "Comfortable",
-              color_accent, color_panel_high);
-    draw_text(left, window->y + (int32_t)window->height - 24,
-              "Press 1, 2, or 3 to adjust. Changes apply to this session.",
-              color_muted, color_panel_low);
+
+    const uint32_t card_height = 72;
+    for (uint32_t index = 0; index < 3; ++index) {
+        int32_t y = top + 26 + (int32_t)index * (card_height + 8);
+        struct kos_gui_rect card = { left, y, width, card_height };
+        struct kos_gui_color fill = { 0, 0, 0, 46 };
+        struct kos_gui_color edge = { 255, 255, 255, 10 };
+        (void)vino_gui_glass(card, fill, edge, 12, 0);
+        uint32_t icon = index == 0 ? APP_CONTROL_CENTER
+            : index == 1 ? APP_NETWORK : APP_FILES;
+        draw_app_icon(icon, card.x + 9, card.y + 20, 36, true);
+        if (index == 0) {
+            draw_text(card.x + 56, card.y + 13, "Desktop session", color_text, fill);
+            draw_text(card.x + 56, card.y + 39, "Vino OS Default is running.", color_muted, fill);
+            draw_text(card.x + 56, card.y + 55, "Current session", color_dim, fill);
+        }
+        else if (index == 1) {
+            draw_text(card.x + 56, card.y + 13,
+                system_info.network_available ? "Network interface" : "Network unavailable",
+                color_text, fill);
+            draw_text(card.x + 56, card.y + 39,
+                system_info.ipv4_address != 0 ? "Address configured" : "No address assigned",
+                color_muted, fill);
+            draw_text(card.x + 56, card.y + 55,
+                dhcp_state_name(system_info.dhcp_state), color_dim, fill);
+        }
+        else {
+            draw_text(card.x + 56, card.y + 13, "Storage", color_text, fill);
+            draw_text(card.x + 56, card.y + 39,
+                system_info.system_volume_letter != 0
+                    ? "Installed system volume is mounted" : "No installed system volume",
+                color_muted, fill);
+            draw_text(card.x + 56, card.y + 55, "VFS status", color_dim, fill);
+        }
+    }
 }
 
 static void draw_network_content(struct vino_window *window) {
@@ -1074,29 +1516,34 @@ static void draw_window(uint32_t app) {
         visual_window.x, visual_window.y, visual_window.width, visual_window.height,
     };
     struct kos_gui_color edge = (int32_t)app == active_app ? color_accent : color_dim;
-    if (compact_panels && bounds.width > 16 && bounds.height > 16) {
-        struct kos_gui_color shadow = { 0, 0, 0, 128 };
-        struct kos_gui_color shadow_border = { 0, 0, 0, 1 };
-        (void)vino_gui_glass((struct kos_gui_rect){ x + 6, y + 7,
-            bounds.width, bounds.height }, shadow, shadow_border, 20, 30);
-    }
+    struct kos_gui_color shadow = { 0, 0, 0, compact_panels ? 110 : 82 };
+    struct kos_gui_color shadow_border = { 0, 0, 0, 1 };
+    (void)vino_gui_glass((struct kos_gui_rect){ x + 8, y + 12,
+        bounds.width, bounds.height }, shadow, shadow_border, 20, 30);
     struct kos_gui_color window_fill = { 15, 22, 40, 179 };
     struct kos_gui_color window_border = edge;
     window_border.alpha = (int32_t)app == active_app ? 96 : 23;
     (void)vino_gui_glass(bounds, window_fill, window_border, 20, 30);
-    (void)vino_gui_fill((struct kos_gui_rect){ x + 1, y + WINDOW_TITLE_HEIGHT,
-        bounds.width - 2, 1 }, edge);
-    draw_text(x + 17, y + 15, app_names[app], color_text, color_panel_high);
-    draw_dot(x + (int32_t)bounds.width - 58, y + 13, 11,
-             (struct kos_gui_color){ 248, 113, 113, 0 });
-    draw_dot(x + (int32_t)bounds.width - 40, y + 13, 11,
-             (struct kos_gui_color){ 250, 204, 21, 0 });
-    draw_dot(x + (int32_t)bounds.width - 22, y + 13, 11,
-             (struct kos_gui_color){ 74, 222, 128, 0 });
+    struct kos_gui_color title_tint = { 255, 255, 255, 8 };
+    struct kos_gui_color title_border = { 255, 255, 255, 4 };
+    (void)vino_gui_glass((struct kos_gui_rect){ x + 1, y + 1,
+        bounds.width - 2, WINDOW_TITLE_HEIGHT }, title_tint, title_border, 18, 0);
+    draw_hline(x + 1, y + WINDOW_TITLE_HEIGHT, bounds.width - 2, 1,
+               (struct kos_gui_color){ 255, 255, 255, 23 });
+    draw_round_dot(x + 16, y + 14, 12, (struct kos_gui_color){ 255, 95, 87, 0 });
+    draw_round_dot(x + 35, y + 14, 12, (struct kos_gui_color){ 254, 188, 46, 0 });
+    draw_round_dot(x + 54, y + 14, 12, (struct kos_gui_color){ 40, 200, 64, 0 });
+    uint32_t title_length = string_length(app_names[app]);
+    int32_t title_width = (int32_t)(title_length * 8 + 32);
+    int32_t title_x = x + ((int32_t)bounds.width - title_width) / 2;
+    draw_app_icon(app, title_x, y + 4, 32, false);
+    draw_text(title_x + 32, y + 13, app_names[app], color_text, color_panel_high);
     if (app == APP_TERMINAL) draw_terminal_content(&visual_window);
     else if (app == APP_FILES) draw_files_content(&visual_window);
     else if (app == APP_SETTINGS) draw_settings_content(&visual_window);
     else if (app == APP_NETWORK) draw_network_content(&visual_window);
+    else if (app == APP_CONTROL_CENTER) draw_control_center_content(&visual_window);
+    else if (app == APP_NOTIFICATIONS) draw_notifications_content(&visual_window);
 }
 
 static void draw_windows(void) {
@@ -1109,36 +1556,123 @@ static void draw_windows(void) {
     }
 }
 
+static bool menu_app_matches(uint32_t app) {
+    if (app >= APP_COUNT) return false;
+    if (menu_search[0] == '\0') return true;
+    uint32_t query_length = string_length(menu_search);
+    uint32_t name_length = string_length(app_names[app]);
+    if (query_length > name_length) return false;
+    for (uint32_t start = 0; start + query_length <= name_length; ++start) {
+        uint32_t offset = 0;
+        while (offset < query_length) {
+            char left = app_names[app][start + offset];
+            char right = menu_search[offset];
+            if (left >= 'A' && left <= 'Z') left = (char)(left - 'A' + 'a');
+            if (right >= 'A' && right <= 'Z') right = (char)(right - 'A' + 'a');
+            if (left != right) break;
+            ++offset;
+        }
+        if (offset == query_length) return true;
+    }
+    return false;
+}
+
+static uint32_t menu_app_at(uint32_t visible_index) {
+    for (uint32_t app = 0; app < APP_COUNT; ++app) {
+        if (!menu_app_matches(app)) continue;
+        if (visible_index == 0) return app;
+        --visible_index;
+    }
+    return APP_COUNT;
+}
+
 static void draw_start_menu(void) {
     if (!start_menu_open && menu_animation_step == 0) return;
-    uint32_t target_height = surface.height < 400 ? surface.height - 106 : 310;
+    uint32_t target_height = surface.height > 592 ? 520 : surface.height - 72;
     uint32_t height = target_height * menu_animation_step / 4;
-    if (height < 56) height = menu_animation_step == 0 ? 0 : 56;
-    uint32_t width = surface.width > 360 ? 310 : surface.width - 24;
+    if (height < 60) height = menu_animation_step == 0 ? 0 : 60;
+    uint32_t width = surface.width > 508 ? 480 : surface.width - 28;
     int32_t x = 14;
-    int32_t y = (int32_t)surface.height - 58 - (int32_t)height - 8;
-    draw_box((struct kos_gui_rect){ x, y, width, height }, color_panel,
-             color_accent);
-    draw_text(x + 18, y + 15, "VINO OS", color_cyan, color_panel);
-    static const char *const items[] = { "Terminal", "Files", "Settings", "Network" };
-    uint32_t row_height = surface.height < 400 ? 20 : 34;
-    uint32_t row_gap = surface.height < 400 ? 22 : 42;
-    uint32_t heading = surface.height < 400 ? 32 : 48;
-    for (uint32_t index = 0; index < APP_COUNT; ++index) {
-        int32_t row_y = y + (int32_t)heading + (int32_t)index * (int32_t)row_gap;
-        if ((uint32_t)(row_y - y) + row_height > height) continue;
-        struct kos_gui_rect row = { x + 10, row_y, width - 20, row_height };
-        struct kos_gui_color fill = menu_selected == index ? color_panel_high : color_panel;
-        (void)vino_gui_fill(row, fill);
-        draw_text(row.x + 12, row.y + (int32_t)(row_height / 2 - 7), items[index],
-                  menu_selected == index ? color_cyan : color_text, fill);
-        char shortcut[3] = { (char)('1' + index), '\0', '\0' };
-        draw_text(row.x + (int32_t)row.width - 26,
-                  row.y + (int32_t)(row_height / 2 - 7), shortcut,
-                  color_muted, fill);
+    int32_t y = (int32_t)surface.height - 56 - (int32_t)height;
+    struct kos_gui_color panel_border = { 255, 255, 255, 23 };
+    draw_glass((struct kos_gui_rect){ x, y, width, height },
+               color_panel, panel_border, 20, 30);
+
+    if (height >= 62) {
+        struct kos_gui_rect search = { x + 20, y + 18, width - 40, 38 };
+        struct kos_gui_color search_fill = { 255, 255, 255, 15 };
+        struct kos_gui_color search_edge = { 255, 255, 255, 20 };
+        (void)vino_gui_glass(search, search_fill, search_edge, 12, 0);
+        draw_dot(search.x + 13, search.y + 11, 9, color_muted);
+        draw_dot(search.x + 15, search.y + 13, 5, color_panel_low);
+        draw_hline(search.x + 22, search.y + 20, 5, 2, color_muted);
+        draw_text(search.x + 36, search.y + 11,
+            menu_search[0] == '\0' ? "Search apps and settings" : menu_search,
+            menu_search[0] == '\0' ? color_muted : color_text, color_panel);
     }
-    if (height > 278) draw_text(x + 18, y + (int32_t)height - 22,
-        "Esc close   Enter launch", color_muted, color_panel);
+
+    if (height >= 100) {
+        draw_text(x + 24, y + 72, "Pinned", color_text, color_panel);
+        draw_text(x + (int32_t)width - 130, y + 72, "All apps  >", color_accent,
+                  color_panel);
+    }
+    uint32_t visible_apps = 0;
+    for (uint32_t app = 0; app < APP_COUNT; ++app)
+        if (menu_app_matches(app)) ++visible_apps;
+    const uint32_t cell_width = (width - 36) / 4;
+    const uint32_t cell_height = 78;
+    for (uint32_t item = 0; item < visible_apps; ++item) {
+        if (height <= 100) continue;
+        uint32_t app = menu_app_at(item);
+        uint32_t row = item / 4;
+        uint32_t column = item % 4;
+        int32_t cell_x = x + 18 + (int32_t)(column * cell_width);
+        int32_t cell_y = y + 92 + (int32_t)(row * cell_height);
+        if ((uint32_t)(cell_y - y) + cell_height > height - 100) continue;
+        struct kos_gui_rect cell = { cell_x, cell_y, cell_width, cell_height - 4 };
+        if (menu_selected == app || pointer_inside(cell)) {
+            struct kos_gui_color fill = { 255, 255, 255,
+                menu_selected == app ? 20 : 14 };
+            struct kos_gui_color border = { 255, 255, 255, 5 };
+            (void)vino_gui_glass(cell, fill, border, 12, 0);
+        }
+        uint32_t icon_size = 36;
+        int32_t icon_x = cell_x + ((int32_t)cell_width - (int32_t)icon_size) / 2;
+        draw_app_icon(app, icon_x, cell_y + 3, icon_size, true);
+        int32_t label_x = cell_x + 3;
+        int32_t label_y = cell_y + 47;
+        draw_text(label_x, label_y, app_names[app], color_text, color_panel);
+    }
+
+    if (height > 310) {
+        int32_t recent_y = y + 280;
+        draw_hline(x + 22, recent_y - 12, width - 44, 1,
+                   (struct kos_gui_color){ 255, 255, 255, 20 });
+        draw_text(x + 24, recent_y, "Recent", color_text, color_panel);
+        draw_text(x + (int32_t)width - 124, recent_y, "More  >", color_accent,
+                  color_panel);
+        uint32_t entries = recent_app_count < 2 ? recent_app_count : 2;
+        if (entries == 0) {
+            draw_text(x + 28, recent_y + 30, "No recently opened apps",
+                      color_muted, color_panel);
+        }
+        for (uint32_t index = 0; index < entries; ++index) {
+            uint32_t app = recent_apps[index];
+            int32_t item_y = recent_y + 24 + (int32_t)index * 38;
+            draw_app_icon(app, x + 26, item_y + 2, 32, true);
+            draw_text(x + 70, item_y + 1, app_names[app], color_text, color_panel);
+            draw_text(x + 70, item_y + 17, "Opened this session", color_muted,
+                      color_panel);
+        }
+    }
+
+    if (height > 370) {
+        int32_t footer_y = y + (int32_t)height - 54;
+        draw_hline(x + 18, footer_y - 7, width - 36, 1,
+                   (struct kos_gui_color){ 255, 255, 255, 20 });
+        draw_vino_mark(x + 28, footer_y + 7, 24);
+        draw_text(x + 62, footer_y + 11, "Vino OS Default", color_text, color_panel);
+    }
 }
 
 static void draw_context_menu(void) {
@@ -1150,17 +1684,18 @@ static void draw_context_menu(void) {
     uint32_t width = surface.width > 244 ? 220 : surface.width - 24;
     uint32_t row_height = surface.height < 320 ? 22 : 31;
     uint32_t row_gap = surface.height < 320 ? 24 : 34;
-    uint32_t height = 5 * row_gap + 10;
+    uint32_t height = 6 * row_gap + 10;
     if ((uint64_t)x + width > surface.width) x = (int32_t)surface.width - width - 8;
     if (x < 8) x = 8;
-    if ((uint64_t)y + height > surface.height - 60) {
-        y = (int32_t)surface.height - 60 - (int32_t)height;
+    if ((uint64_t)y + height > surface.height - 48) {
+        y = (int32_t)surface.height - 48 - (int32_t)height;
     }
-    if (y < 38) y = 38;
+    if (y < 8) y = 8;
     draw_box((struct kos_gui_rect){ x, y, width, height }, color_panel, color_accent);
     static const char *const items[] = {
-        "Open Terminal", "Open Files", "Open Settings", "Open Network", "Desktop" };
-    for (uint32_t index = 0; index < 5; ++index) {
+        "Open Terminal", "Open Files", "Open Settings", "Open Network",
+        "Control Center", "Notifications" };
+    for (uint32_t index = 0; index < APP_COUNT; ++index) {
         struct kos_gui_rect row = { x + 7, y + 5 + (int32_t)index * (int32_t)row_gap,
             width - 14, row_height };
         struct kos_gui_color fill = context_selected == index
@@ -1227,10 +1762,8 @@ static void draw_about(void) {
 }
 
 static void render_ui_contents(void) {
-    draw_desktop_icons();
     draw_windows();
-    draw_top_bar();
-    draw_dock();
+    draw_taskbar();
     draw_start_menu();
     draw_context_menu();
     draw_preview();
@@ -1276,6 +1809,8 @@ static void set_start_menu(bool open) {
     if (start_menu_open == open) return;
     if (open) {
         context_menu_open = false;
+        menu_search[0] = '\0';
+        menu_selected = 0;
         start_menu_open = true;
         animate_menu(true);
     }
@@ -1347,18 +1882,37 @@ static void handle_key(char key) {
     }
     if (start_menu_open) {
         if (key == 27 || key == 's') set_start_menu(false);
-        else if (key == 'j' && menu_selected + 1 < APP_COUNT) ++menu_selected;
-        else if (key == 'k' && menu_selected > 0) --menu_selected;
+        else if (key == 'j' || key == 'k') {
+            for (uint32_t attempt = 0; attempt < APP_COUNT; ++attempt) {
+                if (key == 'j') menu_selected = (menu_selected + 1) % APP_COUNT;
+                else menu_selected = menu_selected == 0 ? APP_COUNT - 1 : menu_selected - 1;
+                if (menu_app_matches(menu_selected)) break;
+            }
+        }
         else if (key == '\n') start_menu_launch();
-        else if (key >= '1' && key <= '4') {
+        else if (key >= '1' && key <= '6') {
             menu_selected = (uint32_t)(key - '1');
             start_menu_launch();
+        }
+        else if (key == '\b') {
+            uint32_t length = string_length(menu_search);
+            if (length != 0) menu_search[length - 1] = '\0';
+            uint32_t first = menu_app_at(0);
+            if (first < APP_COUNT) menu_selected = first;
+        }
+        else if ((uint8_t)key >= 32 && (uint8_t)key < 127
+                 && string_length(menu_search) + 1 < sizeof(menu_search)) {
+            uint32_t length = string_length(menu_search);
+            menu_search[length] = key;
+            menu_search[length + 1] = '\0';
+            uint32_t first = menu_app_at(0);
+            if (first < APP_COUNT) menu_selected = first;
         }
         return;
     }
     if (context_menu_open) {
         if (key == 27 || key == 'c') context_menu_open = false;
-        else if (key == 'j' && context_selected < 4) ++context_selected;
+        else if (key == 'j' && context_selected + 1 < APP_COUNT) ++context_selected;
         else if (key == 'k' && context_selected > 0) --context_selected;
         else if (key == '\n') context_menu_activate();
         return;
@@ -1405,7 +1959,12 @@ static void handle_key(char key) {
             file_scroll = file_selected - visible + 1;
         return;
     }
-    if (active_app == APP_SETTINGS && key >= '1' && key <= '3') {
+    if (active_app == APP_SETTINGS && settings_page == 2 && key == 'n') {
+        open_app(APP_NETWORK);
+        return;
+    }
+    if (active_app == APP_SETTINGS && settings_page == 3
+        && key >= '1' && key <= '3') {
         if (key == '1') {
             theme_variant = (theme_variant + 1) % 3;
             color_set_accent(theme_variant);
@@ -1419,7 +1978,21 @@ static void handle_key(char key) {
         refresh_system_info();
         return;
     }
-    if (key >= '1' && key <= '4') {
+    if (active_app == APP_CONTROL_CENTER && key >= '1' && key <= '4') {
+        if (key == '1') open_app(APP_NETWORK);
+        else if (key == '2') {
+            settings_page = 3;
+            open_app(APP_SETTINGS);
+        }
+        else if (key == '3') open_app(APP_NOTIFICATIONS);
+        else reduced_motion = !reduced_motion;
+        return;
+    }
+    if (active_app == APP_NOTIFICATIONS && key == 'c') {
+        notifications_cleared = true;
+        return;
+    }
+    if (key >= '1' && key <= '6') {
         open_app((uint32_t)(key - '1'));
         return;
     }
@@ -1475,23 +2048,35 @@ static int32_t top_window_at(int32_t x, int32_t y) {
 }
 
 static void handle_start_menu_pointer(int32_t x, int32_t y) {
-    uint32_t height = surface.height < 400 ? surface.height - 106 : 310;
-    uint32_t width = surface.width > 360 ? 310 : surface.width - 24;
+    uint32_t height = surface.height > 592 ? 520 : surface.height - 72;
+    uint32_t width = surface.width > 508 ? 480 : surface.width - 28;
     int32_t menu_x = 14;
-    int32_t menu_y = (int32_t)surface.height - 58 - (int32_t)height - 8;
+    int32_t menu_y = (int32_t)surface.height - 56 - (int32_t)height;
     if (x < menu_x || (uint32_t)(x - menu_x) >= width
         || y < menu_y || (uint32_t)(y - menu_y) >= height) {
         set_start_menu(false);
         return;
     }
-    uint32_t row_height = surface.height < 400 ? 20 : 34;
-    uint32_t row_gap = surface.height < 400 ? 22 : 42;
-    uint32_t heading = surface.height < 400 ? 32 : 48;
-    for (uint32_t app = 0; app < APP_COUNT; ++app) {
-        int32_t row_y = menu_y + (int32_t)heading + (int32_t)app * (int32_t)row_gap;
-        if (y >= row_y && (uint32_t)(y - row_y) < row_height) {
-            menu_selected = app;
-            start_menu_launch();
+    uint32_t cell_width = (width - 36) / 4;
+    int32_t grid_x = menu_x + 18;
+    int32_t grid_y = menu_y + 92;
+    if (x >= grid_x && y >= grid_y) {
+        uint32_t column = (uint32_t)(x - grid_x) / cell_width;
+        uint32_t row = (uint32_t)(y - grid_y) / 78;
+        if (column < 4 && row < 3) {
+            uint32_t app = menu_app_at(row * 4 + column);
+            if (app < APP_COUNT) {
+                menu_selected = app;
+                start_menu_launch();
+                return;
+            }
+        }
+    }
+    if (y >= menu_y + 304 && y < menu_y + 388) {
+        uint32_t recent = (uint32_t)(y - menu_y - 304) / 38;
+        if (recent < recent_app_count && recent < 2) {
+            open_app(recent_apps[recent]);
+            menu_animation_step = 0;
             return;
         }
     }
@@ -1503,30 +2088,30 @@ static void handle_context_menu_pointer(int32_t x, int32_t y) {
     uint32_t width = surface.width > 244 ? 220 : surface.width - 24;
     uint32_t row_height = surface.height < 320 ? 22 : 31;
     uint32_t row_gap = surface.height < 320 ? 24 : 34;
-    uint32_t height = 5 * row_gap + 10;
+    uint32_t height = 6 * row_gap + 10;
     if (!context_menu_at_pointer) {
         menu_x = active_app >= 0 ? windows[active_app].x + 64 : 184;
         menu_y = active_app >= 0 ? windows[active_app].y + 74 : 142;
         if ((uint64_t)menu_x + width > surface.width)
             menu_x = (int32_t)surface.width - (int32_t)width - 8;
         if (menu_x < 8) menu_x = 8;
-        if ((uint64_t)menu_y + height > surface.height - 60)
-            menu_y = (int32_t)surface.height - 60 - (int32_t)height;
-        if (menu_y < 38) menu_y = 38;
+        if ((uint64_t)menu_y + height > surface.height - 48)
+            menu_y = (int32_t)surface.height - 48 - (int32_t)height;
+        if (menu_y < 8) menu_y = 8;
     }
     if ((uint64_t)menu_x + width > surface.width)
         menu_x = (int32_t)surface.width - (int32_t)width - 8;
     if (menu_x < 8) menu_x = 8;
-    if ((uint64_t)menu_y + height > surface.height - 60)
-        menu_y = (int32_t)surface.height - 60 - (int32_t)height;
-    if (menu_y < 38) menu_y = 38;
+    if ((uint64_t)menu_y + height > surface.height - 48)
+        menu_y = (int32_t)surface.height - 48 - (int32_t)height;
+    if (menu_y < 8) menu_y = 8;
     if (x < menu_x || (uint32_t)(x - menu_x) >= width
         || y < menu_y || (uint32_t)(y - menu_y) >= height) {
         context_menu_open = false;
         context_menu_at_pointer = false;
         return;
     }
-    for (uint32_t item = 0; item < 5; ++item) {
+    for (uint32_t item = 0; item < APP_COUNT; ++item) {
         int32_t row_y = menu_y + 5 + (int32_t)item * (int32_t)row_gap;
         if (y >= row_y && (uint32_t)(y - row_y) < row_height) {
             context_selected = item;
@@ -1547,19 +2132,16 @@ static void handle_window_pointer(uint32_t app, int32_t x, int32_t y,
     context_menu_at_pointer = false;
 
     if (y < window->y + WINDOW_TITLE_HEIGHT) {
-        if (x >= window->x + (int32_t)window->width - 65
-            && x < window->x + (int32_t)window->width - 51) {
+        if (x >= window->x + 14 && x < window->x + 30) {
             close_active_app();
             return;
         }
-        if (x >= window->x + (int32_t)window->width - 47
-            && x < window->x + (int32_t)window->width - 33) {
+        if (x >= window->x + 33 && x < window->x + 49) {
             window->minimized = true;
             active_app = -1;
             return;
         }
-        if (x >= window->x + (int32_t)window->width - 29
-            && x < window->x + (int32_t)window->width - 15) {
+        if (x >= window->x + 52 && x < window->x + 68) {
             toggle_maximize();
             return;
         }
@@ -1572,33 +2154,89 @@ static void handle_window_pointer(uint32_t app, int32_t x, int32_t y,
     }
 
     if (app == APP_FILES) {
-        bool compact = window->height < 300;
-        int32_t content_top = window->y + WINDOW_TITLE_HEIGHT + (compact ? 8 : 14);
-        int32_t list_y = content_top + (compact ? 20 : 42);
-        if (x >= window->x + 18 && x < window->x + (int32_t)window->width - 18
-            && y >= list_y) {
-            uint32_t index = file_scroll + (uint32_t)(y - list_y) / 24;
-            if (index < file_entry_count) {
-                if (index == file_last_clicked && timestamp_ms >= file_last_click_ms
-                    && timestamp_ms - file_last_click_ms <= 500) {
-                    file_selected = index;
-                    (void)files_enter_selected();
-                    file_last_clicked = UINT32_MAX;
+        int32_t body_y = window->y + WINDOW_TITLE_HEIGHT;
+        if (y < body_y + 38) {
+            if (x < window->x + 42) {
+                path_parent(file_directory);
+                files_reload();
+            }
+        }
+        else if (x < window->x + 156) {
+            if (y >= body_y + 36 && y < body_y + 66) {
+                string_copy(file_directory, sizeof(file_directory), file_home_directory);
+                files_reload();
+            }
+            else if (y >= body_y + 70 && y < body_y + 100) {
+                char volume = system_info.system_volume_letter;
+                if (volume < 'C' || volume > 'Z') volume = 'D';
+                file_directory[0] = volume;
+                file_directory[1] = ':';
+                file_directory[2] = '/';
+                file_directory[3] = '\0';
+                files_reload();
+            }
+            else if (y >= body_y + 104 && y < body_y + 134) {
+                open_app(APP_NETWORK);
+            }
+        }
+        else {
+            int32_t content_x = window->x + 156;
+            int32_t quick_y = body_y + 75;
+            uint32_t content_width = window->width - 156;
+            uint32_t card_width = (content_width - 48) / 3;
+            if (y >= quick_y && y < quick_y + 44 && x >= content_x + 18) {
+                uint32_t column = (uint32_t)(x - content_x - 18) / (card_width + 6);
+                if (column < 3) {
+                    uint32_t index = files_quick_directory(column);
+                    if (index < file_entry_count) files_select_or_open(index, timestamp_ms);
                 }
-                else {
-                    file_selected = index;
-                    file_last_clicked = index;
-                    file_last_click_ms = timestamp_ms;
-                }
+            }
+            int32_t list_y = body_y + 156;
+            if (y >= list_y && x >= content_x + 18
+                && x < window->x + (int32_t)window->width - 8) {
+                uint32_t index = file_scroll + (uint32_t)(y - list_y) / 25;
+                files_select_or_open(index, timestamp_ms);
             }
         }
     }
     else if (app == APP_SETTINGS) {
-        int32_t relative_y = y - window->y - WINDOW_TITLE_HEIGHT - 20;
-        if (relative_y >= 0) {
-            uint32_t setting = (uint32_t)relative_y / 76;
-            if (setting > 2) setting = 2;
-            handle_key((char)('1' + setting));
+        int32_t top = window->y + WINDOW_TITLE_HEIGHT + 10;
+        if (x >= window->x + 10 && x < window->x + 162 && y >= top + 8) {
+            uint32_t page = (uint32_t)(y - top - 8) / 36;
+            if (page < 6) settings_page = page;
+        }
+        else if (settings_page == 2) {
+            open_app(APP_NETWORK);
+        }
+        else if (settings_page == 3) {
+            int32_t relative_y = y - (top + 42);
+            if (relative_y >= 0 && relative_y < 62) handle_key('1');
+            else if (relative_y >= 72 && relative_y < 134) handle_key('2');
+            else if (relative_y >= 144 && relative_y < 206) handle_key('3');
+        }
+    }
+    else if (app == APP_CONTROL_CENTER) {
+        int32_t top = window->y + WINDOW_TITLE_HEIGHT + 14;
+        int32_t tile_y = top + 30;
+        uint32_t cell_width = (window->width - 48) / 2;
+        if (y >= tile_y && y < tile_y + 146 && x >= window->x + 18) {
+            uint32_t row = (uint32_t)(y - tile_y) / 78;
+            uint32_t column = (uint32_t)(x - (window->x + 18))
+                / (cell_width + 10);
+            uint32_t action = row * 2 + column;
+            if (column < 2 && action == 0) open_app(APP_NETWORK);
+            else if (column < 2 && action == 1) {
+                settings_page = 3;
+                open_app(APP_SETTINGS);
+            }
+            else if (column < 2 && action == 2) open_app(APP_NOTIFICATIONS);
+            else if (column < 2 && action == 3) reduced_motion = !reduced_motion;
+        }
+    }
+    else if (app == APP_NOTIFICATIONS) {
+        if (y < window->y + WINDOW_TITLE_HEIGHT + 42
+            && x >= window->x + (int32_t)window->width - 100) {
+            notifications_cleared = true;
         }
     }
     else if (app == APP_NETWORK && y > window->y + (int32_t)window->height - 45) {
@@ -1621,11 +2259,11 @@ static void handle_pointer(const struct kos_gui_input_event *event) {
         window->x = pointer_x - drag_offset_x;
         window->y = pointer_y - drag_offset_y;
         if (window->x < 8) window->x = 8;
-        if (window->y < 38) window->y = 38;
+        if (window->y < 8) window->y = 8;
         if ((uint64_t)window->x + window->width > surface.width - 8)
             window->x = (int32_t)(surface.width - window->width - 8);
-        if ((uint64_t)window->y + window->height > surface.height - 60)
-            window->y = (int32_t)(surface.height - window->height - 60);
+        if ((uint64_t)window->y + window->height > surface.height - 48)
+            window->y = (int32_t)(surface.height - window->height - 48);
     }
     if ((buttons & 1u) == 0) drag_app = -1;
     if (event->pointer_wheel != 0 && active_app == APP_FILES
@@ -1651,28 +2289,50 @@ static void handle_pointer(const struct kos_gui_input_event *event) {
             handle_start_menu_pointer(pointer_x, pointer_y);
         }
         else {
-            uint32_t bar_y = surface.height - 58;
-            uint32_t start_width = surface.width >= 520 ? 102 : 44;
-            struct kos_gui_rect start = { 10, (int32_t)bar_y + 7, start_width, 44 };
+            uint32_t bar_y = surface.height - 48;
+            struct kos_gui_rect start = { 16, (int32_t)bar_y + 7, 34, 34 };
+            uint32_t search_width = surface.width >= 620 ? 210 : surface.width / 3;
+            if (search_width < 112) search_width = 112;
+            struct kos_gui_rect search = { 60, (int32_t)bar_y + 8, search_width, 32 };
+            struct kos_gui_rect notification = {
+                (int32_t)surface.width - 210, (int32_t)bar_y + 7, 30, 34,
+            };
+            struct kos_gui_rect network = {
+                (int32_t)surface.width - 174, (int32_t)bar_y + 7, 30, 34,
+            };
+            struct kos_gui_rect control = {
+                (int32_t)surface.width - 138, (int32_t)bar_y + 7, 34, 34,
+            };
+            struct kos_gui_rect clock = {
+                (int32_t)surface.width - 96, (int32_t)bar_y + 6, 80, 36,
+            };
             if (vino_gui_rect_contains(&start, pointer_x, pointer_y)) {
                 set_start_menu(true);
             }
+            else if (vino_gui_rect_contains(&search, pointer_x, pointer_y)) {
+                set_start_menu(true);
+            }
+            else if (vino_gui_rect_contains(&notification, pointer_x, pointer_y)) {
+                open_app(APP_NOTIFICATIONS);
+            }
+            else if (vino_gui_rect_contains(&network, pointer_x, pointer_y)) {
+                open_app(APP_NETWORK);
+            }
+            else if (vino_gui_rect_contains(&control, pointer_x, pointer_y)
+                     || vino_gui_rect_contains(&clock, pointer_x, pointer_y)) {
+                open_app(APP_CONTROL_CENTER);
+            }
             else {
-                uint32_t left_reserve = surface.width >= 520 ? 124 : 60;
-                uint32_t right_reserve = surface.width >= 520 ? 104 : 10;
-                uint32_t available_width = surface.width > left_reserve + right_reserve + 20
-                    ? surface.width - left_reserve - right_reserve - 20 : surface.width - 36;
-                uint32_t dock_width = available_width < 486 ? available_width : 486;
-                if (dock_width < 40) dock_width = 40;
-                int32_t dock_x = (int32_t)left_reserve
-                    + (int32_t)(available_width - dock_width) / 2;
-                int32_t dock_y = (int32_t)bar_y + 6;
-                uint32_t button_width = (dock_width - 24) / APP_COUNT;
+                uint32_t icon_size = surface.width >= 720 ? 38 : 32;
+                uint32_t icon_gap = surface.width >= 720 ? 6 : 2;
+                uint32_t dock_width = APP_COUNT * icon_size + (APP_COUNT - 1) * icon_gap;
+                int32_t dock_x = (int32_t)(surface.width - dock_width) / 2;
+                int32_t dock_y = (int32_t)bar_y + 5;
                 bool dock_hit = false;
                 for (uint32_t app = 0; app < APP_COUNT; ++app) {
                     struct kos_gui_rect button = {
-                        dock_x + 6 + (int32_t)(app * button_width), dock_y + 5,
-                        button_width - 3, 36,
+                        dock_x + (int32_t)(app * (icon_size + icon_gap)), dock_y,
+                        icon_size, 38,
                     };
                     if (vino_gui_rect_contains(&button, pointer_x, pointer_y)) {
                         open_app(app);
@@ -1686,22 +2346,7 @@ static void handle_pointer(const struct kos_gui_input_event *event) {
                         handle_window_pointer((uint32_t)app, pointer_x, pointer_y,
                                               buttons, event->timestamp_ms);
                     }
-                    else {
-                        bool icon_hit = false;
-                        if (surface.height >= 440) {
-                            for (uint32_t icon = 0; icon < APP_COUNT; ++icon) {
-                                struct kos_gui_rect icon_bounds = {
-                                    26, 64 + (int32_t)icon * 84, 144, 66,
-                                };
-                                if (vino_gui_rect_contains(&icon_bounds, pointer_x, pointer_y)) {
-                                    open_app(icon);
-                                    icon_hit = true;
-                                    break;
-                                }
-                            }
-                        }
-                        if (!icon_hit) active_app = -1;
-                    }
+                    else active_app = -1;
                 }
             }
         }
@@ -1717,6 +2362,7 @@ __attribute__((noreturn)) void _start(void) {
     pointer_x = (int32_t)(surface.width / 2);
     pointer_y = (int32_t)(surface.height / 2);
     (void)refresh_system_info();
+    wallpaper_load();
     last_state_poll_second = sys_gettime();
     displayed_uptime_minute = last_state_poll_second / 60;
     initialize_paths();

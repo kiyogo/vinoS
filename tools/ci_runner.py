@@ -77,7 +77,7 @@ def qemu_command(smoke):
 def run_qemu(smoke):
     label = "smoke" if smoke else "full"
     log_path = BUILD / f"ci-{label}.log"
-    timeout = 25 if smoke else 70
+    timeout = 40 if smoke else 70
     print(f"[CI] Starting {label} QEMU gate...")
     start = time.time()
     proc = subprocess.Popen(

@@ -120,12 +120,19 @@ long vino_gui_text(int32_t x, int32_t y, const char *text, uint32_t scale,
 
 long vino_gui_text_transparent(int32_t x, int32_t y, const char *text, uint32_t scale,
                                struct kos_gui_color foreground) {
+    return vino_gui_text_transparent_font(x, y, text, scale, KOS_GUI_FONT_8X8,
+                                          foreground);
+}
+
+long vino_gui_text_transparent_font(int32_t x, int32_t y, const char *text,
+                                    uint32_t scale, enum kos_gui_font_id font_id,
+                                    struct kos_gui_color foreground) {
     struct kos_gui_display_request request = {
         .operation = KOS_GUI_DISPLAY_DRAW_TEXT_TRANSPARENT,
         .rect = { .x = x, .y = y },
         .foreground = foreground,
         .scale = scale,
-        .font_id = KOS_GUI_FONT_8X8,
+        .font_id = (uint32_t)font_id,
     };
     if (!text_copy(request.text, text)) return -1;
     return display_request(&request);
@@ -144,6 +151,29 @@ long vino_gui_text_font(int32_t x, int32_t y, const char *text, uint32_t scale,
     };
     if (!text_copy(request.text, text)) return -1;
     return display_request(&request);
+}
+
+long vino_gui_blit_rgb24(struct kos_gui_rect destination, const uint8_t *pixels,
+                         uint64_t pixel_bytes, uint32_t source_width,
+                         uint32_t source_height, uint32_t source_pitch,
+                         uint32_t crop_x, uint32_t crop_y, uint32_t crop_width,
+                         uint32_t crop_height) {
+    struct kos_gui_image_request request = {
+        .abi_version = KOS_GUI_ABI_VERSION,
+        .pixel_format = KOS_GUI_IMAGE_RGB24,
+        .destination = destination,
+        .pixels = (uint64_t)pixels,
+        .pixel_bytes = pixel_bytes,
+        .source_width = source_width,
+        .source_height = source_height,
+        .source_pitch = source_pitch,
+        .crop_x = crop_x,
+        .crop_y = crop_y,
+        .crop_width = crop_width,
+        .crop_height = crop_height,
+    };
+    return vino_syscall2(SYS_gui_display, KOS_GUI_DISPLAY_BLIT_RGB24,
+                         (uint64_t)&request);
 }
 
 long vino_gui_input_read(struct kos_gui_input_event *event) {

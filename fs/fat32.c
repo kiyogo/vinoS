@@ -1300,6 +1300,12 @@ static bool fat32_vfs_read_file(void *context, const char *path, const uint8_t *
     return fat32_read_file((struct fat32_volume *)context, path, data, size);
 }
 
+static void fat32_vfs_release_file_data(void *context, const uint8_t *data,
+                                        uint64_t size) {
+    (void)context;
+    if (data != 0 && size != 0) (void)kfree((void *)data);
+}
+
 static bool fat32_vfs_write_file(void *context, const char *path, const uint8_t *data, uint64_t size) {
     return fat32_write_file((struct fat32_volume *)context, path, data, size);
 }
@@ -1377,6 +1383,7 @@ const struct vfs_backend *fat32_get_vfs_backend(struct fat32_volume *vol) {
     if (vol == NULL) return NULL;
     vol->backend.context = vol;
     vol->backend.read_file = fat32_vfs_read_file;
+    vol->backend.release_file_data = fat32_vfs_release_file_data;
     vol->backend.write_file = fat32_vfs_write_file;
     vol->backend.file_count = fat32_vfs_file_count;
     vol->backend.file_at = fat32_vfs_file_at;

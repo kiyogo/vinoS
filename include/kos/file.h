@@ -15,6 +15,8 @@ struct kos_file {
     bool can_write;
     enum vfs_node_type type;
     uint64_t offset;
+    struct vfs_file_data read_data;
+    bool read_data_loaded;
 };
 
 typedef bool (*kos_file_dir_callback)(const struct vfs_dir_entry *entry, void *user_arg);

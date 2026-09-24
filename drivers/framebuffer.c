@@ -546,6 +546,28 @@ void framebuffer_fill_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t heig
     }
 }
 
+void framebuffer_blit_rgb24_row(uint64_t x, uint64_t y, uint64_t destination_width,
+                                uint32_t source_width, const uint8_t *pixels) {
+    if (!framebuffer.initialized || pixels == 0 || source_width == 0
+        || destination_width == 0 || x >= framebuffer.width || y >= framebuffer.height
+        || destination_width > framebuffer.width - x) return;
+    volatile uint32_t *destination = framebuffer_row(y) + x;
+    uint64_t source_column = 0;
+    uint64_t source_step = source_width / destination_width;
+    uint64_t source_remainder = source_width % destination_width;
+    uint64_t source_error = 0;
+    for (uint64_t column = 0; column < destination_width; ++column) {
+        const uint8_t *pixel = pixels + source_column * 3;
+        destination[column] = framebuffer_make_color(pixel[0], pixel[1], pixel[2]);
+        source_column += source_step;
+        source_error += source_remainder;
+        if (source_error >= destination_width) {
+            ++source_column;
+            source_error -= destination_width;
+        }
+    }
+}
+
 void framebuffer_fill(uint32_t color) {
     framebuffer_fill_rect(0, 0, framebuffer.width, framebuffer.height, color);
 }

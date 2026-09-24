@@ -33,10 +33,21 @@ struct vfs_dir_entry {
 };
 
 typedef void (*vfs_readdir_callback)(const struct vfs_dir_entry *entry, void *user_arg);
+typedef void (*vfs_file_data_release_callback)(void *context, const uint8_t *data,
+                                               uint64_t size);
+
+struct vfs_file_data {
+    const uint8_t *data;
+    uint64_t size;
+    uint64_t revision;
+    void *release_context;
+    vfs_file_data_release_callback release;
+};
 
 struct vfs_backend {
     void *context;
     bool (*read_file)(void *context, const char *path, const uint8_t **data, uint64_t *size);
+    vfs_file_data_release_callback release_file_data;
     bool (*write_file)(void *context, const char *path, const uint8_t *data, uint64_t size);
     uint64_t (*file_count)(void *context);
     const struct vfs_file *(*file_at)(void *context, uint64_t index);
@@ -59,6 +70,9 @@ bool vfs_unmount_volume(char letter);
 bool vfs_mount_root(const struct vfs_backend *backend);
 bool vfs_is_initialized(void);
 bool vfs_read_file(const char *path, const uint8_t **data, uint64_t *size);
+bool vfs_read_file_acquire(const char *path, struct vfs_file_data *file_data);
+void vfs_file_data_release(struct vfs_file_data *file_data);
+uint64_t vfs_content_revision(void);
 bool vfs_write_file(const char *path, const uint8_t *data, uint64_t size);
 bool vfs_unlink_file(const char *path);
 bool vfs_mkdir(const char *path);

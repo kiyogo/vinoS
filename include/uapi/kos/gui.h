@@ -27,6 +27,7 @@ enum kos_gui_display_operation {
     KOS_GUI_DISPLAY_BACKGROUND_CAPTURE,
     KOS_GUI_DISPLAY_BACKGROUND_RESTORE,
     KOS_GUI_DISPLAY_GET_FRAME_STATS,
+    KOS_GUI_DISPLAY_BLIT_RGB24,
 };
 
 enum kos_gui_pixel_format {
@@ -35,6 +36,7 @@ enum kos_gui_pixel_format {
 
 enum kos_gui_font_id {
     KOS_GUI_FONT_8X8 = 1,
+    KOS_GUI_FONT_INTER_8X14 = 2,
 };
 
 enum kos_gui_input_type {
@@ -91,6 +93,26 @@ struct kos_gui_display_request {
     uint32_t radius;
     uint32_t blur_radius;
     char text[KOS_GUI_TEXT_MAX];
+};
+
+/* Image requests are separate from the small primitive request ABI. */
+struct kos_gui_image_request {
+    uint32_t abi_version;
+    uint32_t pixel_format;
+    struct kos_gui_rect destination;
+    uint64_t pixels;
+    uint64_t pixel_bytes;
+    uint32_t source_width;
+    uint32_t source_height;
+    uint32_t source_pitch;
+    uint32_t crop_x;
+    uint32_t crop_y;
+    uint32_t crop_width;
+    uint32_t crop_height;
+};
+
+enum kos_gui_image_pixel_format {
+    KOS_GUI_IMAGE_RGB24 = 1,
 };
 
 struct kos_gui_frame_stats {

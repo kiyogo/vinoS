@@ -137,11 +137,23 @@ def build_package(fields: dict[str, str], entry_data: bytes) -> bytes:
         "signature_status=unsigned\n"
         "ownership_file=share/OWNERSHIP.TXT\n"
     ).encode("ascii")
+    package_assets: list[tuple[str, bytes, int]] = []
+    if fields["id"] == "default":
+        wallpaper_path = ROOT / "assets" / "gui" / "wallpaper.kosrgb"
+        font_license_path = ROOT / "assets" / "gui" / "fonts" / "OFL.txt"
+        if not wallpaper_path.is_file() or not font_license_path.is_file():
+            raise ValueError("Default GUI wallpaper/font license assets are missing")
+        package_assets.extend([
+            ("share/wallpaper.kosrgb", wallpaper_path.read_bytes(), 0o100644),
+            ("share/fonts/Inter-OFL.txt", font_license_path.read_bytes(), 0o100644),
+        ])
+    extra_ownership = "".join(f"file={path}\n" for path, _, _ in package_assets)
     ownership_text = (
         f"package_id={fields['app_id']}\n"
         f"namespace=/{fields['install_root']}\n"
         "owner=package\n"
         f"file={entry_path}\n"
+        f"{extra_ownership}"
         "file=share/GUI.MANIFEST\n"
         "file=share/OWNERSHIP.TXT\n"
         "file=share/SHA256SUMS.TXT\n"
@@ -151,6 +163,7 @@ def build_package(fields: dict[str, str], entry_data: bytes) -> bytes:
         (entry_path, entry_data, 0o100755),
         ("share/GUI.MANIFEST", manifest_text, 0o100644),
         ("share/OWNERSHIP.TXT", ownership_text, 0o100644),
+        *package_assets,
     ]
     checksums = "".join(
         f"{hashlib.sha256(data).hexdigest()}  {path}\n" for path, data, _ in files

@@ -348,6 +348,13 @@ static bool installed_gui_package_matches(const struct gui_manifest *manifest) {
         if (!vfs_file_has_line(ownership_path, ownership_lines[index])) return false;
     }
     if (!vfs_file_has_line_suffix(checksums_path, manifest->entry_point)) return false;
+    if (kstrcmp(manifest->id, "default") == 0
+        && (!vfs_file_has_line(ownership_path, "file=share/wallpaper.kosrgb")
+            || !vfs_file_has_line(ownership_path, "file=share/fonts/Inter-OFL.txt")
+            || !vfs_file_has_line_suffix(checksums_path, "share/wallpaper.kosrgb")
+            || !vfs_file_has_line_suffix(checksums_path, "share/fonts/Inter-OFL.txt"))) {
+        return false;
+    }
 
     char owner[KPKG_MAX_APPID_LEN] = {0};
     return pkg_db_is_file_owned(entry_path, owner, sizeof(owner))

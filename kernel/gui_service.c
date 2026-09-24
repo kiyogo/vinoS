@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include <kos/framebuffer.h>
+#include <kos/heap.h>
 #include <kos/gui_canvas.h>
 #include <kos/gui_service.h>
 #include <kos/keyboard.h>
@@ -41,6 +42,62 @@ static bool valid_rect(const struct kos_gui_rect *rect) {
     return x < framebuffer_width() && y < framebuffer_height()
         && rect->width <= framebuffer_width() - x
         && rect->height <= framebuffer_height() - y;
+}
+
+static uint64_t display_blit_rgb24(uint64_t user_request) {
+    struct kos_gui_image_request request;
+    if (!access_ok((const void *)user_request, sizeof(request))
+        || copy_from_user(&request, (const void *)user_request, sizeof(request)) != 0) {
+        return (uint64_t)-EFAULT;
+    }
+    if (request.abi_version != KOS_GUI_ABI_VERSION
+        || request.pixel_format != KOS_GUI_IMAGE_RGB24
+        || !frame_open || !valid_rect(&request.destination)
+        || request.source_width == 0 || request.source_height == 0
+        || request.source_width > 4096 || request.source_height > 4096
+        || request.crop_width == 0 || request.crop_height == 0
+        || request.crop_x > request.source_width
+        || request.crop_width > request.source_width - request.crop_x
+        || request.crop_y > request.source_height
+        || request.crop_height > request.source_height - request.crop_y
+        || request.source_pitch < (uint64_t)request.source_width * 3u
+        || request.source_pitch > 16u * 1024u * 1024u
+        || request.source_height > UINT64_MAX / request.source_pitch
+        || (uint64_t)request.source_pitch * request.source_height > request.pixel_bytes
+        || request.pixel_bytes > 16u * 1024u * 1024u
+        || request.pixels == 0 || request.pixels > UINT64_MAX - request.pixel_bytes
+        || !access_ok((const void *)request.pixels, (size_t)request.pixel_bytes)) {
+        return (uint64_t)-EINVAL;
+    }
+
+    uint64_t row_bytes = (uint64_t)request.crop_width * 3u;
+    if (row_bytes > SIZE_MAX) return (uint64_t)-EOVERFLOW;
+    uint8_t *source_row = (uint8_t *)kmalloc(row_bytes);
+    if (source_row == NULL) return (uint64_t)-ENOMEM;
+
+    uint64_t result = 0;
+    for (uint64_t row = 0; row < request.destination.height; ++row) {
+        uint64_t source_y = request.crop_y
+            + row * request.crop_height / request.destination.height;
+        uint64_t source_offset = source_y * request.source_pitch
+            + (uint64_t)request.crop_x * 3u;
+        if (source_offset > request.pixel_bytes
+            || row_bytes > request.pixel_bytes - source_offset
+            || request.pixels > UINT64_MAX - source_offset
+            || !access_ok((const void *)(request.pixels + source_offset),
+                          (size_t)row_bytes)
+            || copy_from_user(source_row,
+                (const void *)(request.pixels + source_offset), (size_t)row_bytes) != 0) {
+            result = (uint64_t)-EFAULT;
+            break;
+        }
+        gui_canvas_blit_rgb24_row((uint32_t)request.destination.x,
+            (uint64_t)(uint32_t)request.destination.y + row,
+            request.destination.width, request.crop_width, source_row);
+    }
+    (void)kfree(source_row);
+    if (result == 0) record_draw_operation();
+    return result;
 }
 
 uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
@@ -88,6 +145,9 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
         return copy_to_user((void *)user_request, &snapshot, sizeof(snapshot)) == 0
             ? 0 : (uint64_t)-EFAULT;
     }
+
+    if (operation == KOS_GUI_DISPLAY_BLIT_RGB24)
+        return display_blit_rgb24(user_request);
 
     struct kos_gui_display_request request;
     if (!access_ok((const void *)user_request, sizeof(request))
@@ -138,7 +198,9 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
                 || (uint32_t)request.rect.x >= framebuffer_width()
                 || (uint32_t)request.rect.y >= framebuffer_height()
                 || request.scale == 0 || request.scale > 4
-                || request.font_id != KOS_GUI_FONT_8X8) return (uint64_t)-EINVAL;
+                || (request.font_id != KOS_GUI_FONT_8X8
+                    && request.font_id != KOS_GUI_FONT_INTER_8X14))
+                return (uint64_t)-EINVAL;
             bool terminated = false;
             for (uint32_t index = 0; index < KOS_GUI_TEXT_MAX; ++index) {
                 if (request.text[index] == '\0') {
@@ -148,13 +210,14 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
             }
             if (!terminated) return (uint64_t)-EINVAL;
             if (operation == KOS_GUI_DISPLAY_DRAW_TEXT_TRANSPARENT) {
-                gui_canvas_text_transparent((uint32_t)request.rect.x,
+                gui_canvas_text_transparent_font((uint32_t)request.rect.x,
                     (uint32_t)request.rect.y, request.text, request.scale,
-                    canvas_color(request.foreground));
+                    request.font_id, canvas_color(request.foreground));
             }
             else {
-                gui_canvas_text((uint32_t)request.rect.x, (uint32_t)request.rect.y,
-                    request.text, request.scale, canvas_color(request.foreground),
+                gui_canvas_text_font((uint32_t)request.rect.x,
+                    (uint32_t)request.rect.y, request.text, request.scale,
+                    request.font_id, canvas_color(request.foreground),
                     canvas_color(request.background));
             }
             record_draw_operation();
