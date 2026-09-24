@@ -25,7 +25,7 @@ static const char *const c_sources[] = {
     "arch/x86_64/descriptors.c", "arch/x86_64/interrupts.c", "arch/x86_64/ioapic.c", "arch/x86_64/pci.c",
     "arch/x86_64/pic.c", "arch/x86_64/security.c", "arch/x86_64/smp.c", "arch/x86_64/syscall_init.c",
     "drivers/ahci.c", "drivers/block.c", "drivers/driver.c", "drivers/e1000.c", "drivers/framebuffer.c",
-    "drivers/keyboard.c", "drivers/nvme.c", "drivers/ramdisk.c", "drivers/serial.c", "drivers/timer.c",
+    "drivers/keyboard.c", "drivers/mouse.c", "drivers/nvme.c", "drivers/ramdisk.c", "drivers/serial.c", "drivers/timer.c",
     "drivers/virtio_blk.c", "drivers/usb/xhci.c", "drivers/usb/usb_hid.c",
     "fs/block_cache.c", "fs/elf.c", "fs/fat32.c", "fs/initramfs.c", "fs/partition.c", "fs/ramfs.c", "fs/vfs.c", "fs/volume.c",
     "kernel/command.c", "kernel/console.c", "kernel/log.c", "kernel/main.c", "kernel/mutex.c",

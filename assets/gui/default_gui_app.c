@@ -83,6 +83,18 @@ static uint32_t menu_animation_step;
 static uint32_t theme_variant;
 static bool reduced_motion;
 static bool compact_panels;
+static bool pointer_available;
+static int32_t pointer_x;
+static int32_t pointer_y;
+static uint32_t pointer_buttons;
+static int32_t drag_app = -1;
+static int32_t drag_offset_x;
+static int32_t drag_offset_y;
+static bool context_menu_at_pointer;
+static int32_t context_menu_x;
+static int32_t context_menu_y;
+static uint32_t file_last_clicked = UINT32_MAX;
+static uint64_t file_last_click_ms;
 static uint64_t last_redraw_ms;
 static uint32_t animation_frame;
 static char text_scratch[KOS_GUI_TEXT_MAX];
@@ -188,7 +200,8 @@ static void draw_text(int32_t x, int32_t y, const char *text,
         if ((uint8_t)text_scratch[index] < 32 || (uint8_t)text_scratch[index] >= 127)
             text_scratch[index] = '?';
     }
-    (void)vino_gui_text(x, y, text_scratch, 1, foreground, background);
+    (void)background;
+    (void)vino_gui_text_transparent(x, y, text_scratch, 1, foreground);
 }
 
 static void draw_text_scale(int32_t x, int32_t y, const char *text, uint32_t scale,
@@ -199,14 +212,28 @@ static void draw_text_scale(int32_t x, int32_t y, const char *text, uint32_t sca
         if ((uint8_t)text_scratch[index] < 32 || (uint8_t)text_scratch[index] >= 127)
             text_scratch[index] = '?';
     }
-    (void)vino_gui_text(x, y, text_scratch, scale, foreground, background);
+    (void)background;
+    (void)vino_gui_text_transparent(x, y, text_scratch, scale, foreground);
+}
+
+static void draw_glass(struct kos_gui_rect rect, struct kos_gui_color fill,
+                       struct kos_gui_color border, uint32_t radius,
+                       uint32_t blur_radius) {
+    fill.alpha = 179;
+    border.alpha = 23;
+    (void)vino_gui_glass(rect, fill, border, radius, blur_radius);
 }
 
 static void draw_box(struct kos_gui_rect rect, struct kos_gui_color fill,
                      struct kos_gui_color border) {
     if (rect.width == 0 || rect.height == 0) return;
-    (void)vino_gui_fill(rect, fill);
-    (void)vino_gui_border(rect, border);
+    uint32_t radius = rect.width < rect.height ? rect.width / 3 : rect.height / 3;
+    if (radius > 12) radius = 12;
+    draw_glass(rect, fill, border, radius, 30);
+}
+
+static bool pointer_inside(struct kos_gui_rect rect) {
+    return pointer_available && vino_gui_rect_contains(&rect, pointer_x, pointer_y);
 }
 
 static void draw_dot(int32_t x, int32_t y, uint32_t size,
@@ -705,7 +732,7 @@ static void draw_wallpaper(void) {
 
 static void draw_top_bar(void) {
     struct kos_gui_rect top = { 0, 0, surface.width, 34 };
-    (void)vino_gui_fill(top, color_panel_low);
+    draw_glass(top, color_panel, color_text, 0, 30);
     (void)vino_gui_fill((struct kos_gui_rect){ 0, 33, surface.width, 1 }, color_accent);
     draw_dot(14, 10, 14, color_accent);
     draw_text(19, 13, "V", color_wallpaper, color_accent);
@@ -764,8 +791,8 @@ static void draw_desktop_icons(void) {
 static void draw_dock(void) {
     uint32_t bar_height = 58;
     int32_t bar_y = (int32_t)(surface.height - bar_height);
-    (void)vino_gui_fill((struct kos_gui_rect){ 0, bar_y, surface.width, bar_height },
-                        color_panel_low);
+    draw_glass((struct kos_gui_rect){ 0, bar_y, surface.width, bar_height },
+               color_panel, color_text, 0, 30);
     (void)vino_gui_fill((struct kos_gui_rect){ 0, bar_y, surface.width, 1 }, color_dim);
 
     uint32_t start_width = surface.width >= 520 ? 102 : 44;
@@ -794,8 +821,10 @@ static void draw_dock(void) {
         int32_t x = dock_x + 6 + (int32_t)(app * button_width);
         struct kos_gui_color fill = active_app == (int32_t)app
             ? color_panel_high : color_panel_low;
-        (void)vino_gui_fill((struct kos_gui_rect){ x, dock_y + 5,
-            button_width - 3, 36 }, fill);
+        struct kos_gui_rect app_button = { x, dock_y + 5, button_width - 3, 36 };
+        if (pointer_inside(app_button)) fill = color_panel_high;
+        draw_glass(app_button, fill,
+            active_app == (int32_t)app ? color_accent : color_dim, 8, 30);
         if (active_app == (int32_t)app) {
             uint32_t pulse = !reduced_motion && ((sys_gettime() / 2) & 1) ? 2 : 1;
             (void)vino_gui_fill((struct kos_gui_rect){ x + 3, dock_y + 5,
@@ -1022,23 +1051,24 @@ static void draw_window(uint32_t app) {
     };
     struct kos_gui_color edge = (int32_t)app == active_app ? color_accent : color_dim;
     if (compact_panels && bounds.width > 16 && bounds.height > 16) {
-        (void)vino_gui_fill((struct kos_gui_rect){ x + 6, y + 7,
-            bounds.width, bounds.height }, color_shadow);
+        struct kos_gui_color shadow = { 0, 0, 0, 128 };
+        struct kos_gui_color shadow_border = { 0, 0, 0, 1 };
+        (void)vino_gui_glass((struct kos_gui_rect){ x + 6, y + 7,
+            bounds.width, bounds.height }, shadow, shadow_border, 20, 30);
     }
-    (void)vino_gui_fill(bounds, color_panel_low);
-    (void)vino_gui_border(bounds, edge);
-    (void)vino_gui_fill((struct kos_gui_rect){ x + 1, y + 1,
-        bounds.width - 2, WINDOW_TITLE_HEIGHT }, color_panel_high);
+    struct kos_gui_color window_fill = { 15, 22, 40, 179 };
+    struct kos_gui_color window_border = edge;
+    window_border.alpha = (int32_t)app == active_app ? 96 : 23;
+    (void)vino_gui_glass(bounds, window_fill, window_border, 20, 30);
     (void)vino_gui_fill((struct kos_gui_rect){ x + 1, y + WINDOW_TITLE_HEIGHT,
         bounds.width - 2, 1 }, edge);
     draw_text(x + 17, y + 15, app_names[app], color_text, color_panel_high);
-    draw_text(x + (int32_t)bounds.width - 92, y + 15, "m  z  x", color_muted,
-              color_panel_high);
-    struct kos_gui_rect content = {
-        x + 1, y + WINDOW_TITLE_HEIGHT + 1, bounds.width - 2,
-        bounds.height - WINDOW_TITLE_HEIGHT - 2,
-    };
-    (void)vino_gui_fill(content, color_panel_low);
+    draw_dot(x + (int32_t)bounds.width - 58, y + 13, 11,
+             (struct kos_gui_color){ 248, 113, 113, 0 });
+    draw_dot(x + (int32_t)bounds.width - 40, y + 13, 11,
+             (struct kos_gui_color){ 250, 204, 21, 0 });
+    draw_dot(x + (int32_t)bounds.width - 22, y + 13, 11,
+             (struct kos_gui_color){ 74, 222, 128, 0 });
     if (app == APP_TERMINAL) draw_terminal_content(&visual_window);
     else if (app == APP_FILES) draw_files_content(&visual_window);
     else if (app == APP_SETTINGS) draw_settings_content(&visual_window);
@@ -1089,8 +1119,10 @@ static void draw_start_menu(void) {
 
 static void draw_context_menu(void) {
     if (!context_menu_open) return;
-    int32_t x = active_app >= 0 ? windows[active_app].x + 64 : 184;
-    int32_t y = active_app >= 0 ? windows[active_app].y + 74 : 142;
+    int32_t x = context_menu_at_pointer ? context_menu_x
+        : active_app >= 0 ? windows[active_app].x + 64 : 184;
+    int32_t y = context_menu_at_pointer ? context_menu_y
+        : active_app >= 0 ? windows[active_app].y + 74 : 142;
     uint32_t width = surface.width > 244 ? 220 : surface.width - 24;
     uint32_t row_height = surface.height < 320 ? 22 : 31;
     uint32_t row_gap = surface.height < 320 ? 24 : 34;
@@ -1170,6 +1202,32 @@ static void draw_about(void) {
     draw_text(x + 20, y + 150, "Esc close", color_muted, color_panel);
 }
 
+static void draw_pointer(void) {
+    if (!pointer_available) return;
+    static const uint16_t cursor_rows[14] = {
+        0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
+        0x01ff, 0x00ff, 0x00db, 0x0198, 0x0300, 0x0300, 0x0000,
+    };
+    for (uint32_t row = 0; row < 13; ++row) {
+        int32_t left = -1;
+        int32_t right = -1;
+        for (uint32_t column = 0; column < 9; ++column) {
+            if ((cursor_rows[row] & (1u << column)) != 0) {
+                if (left < 0) left = (int32_t)column;
+                right = (int32_t)column;
+            }
+        }
+        if (left < 0) continue;
+        uint32_t width = (uint32_t)(right - left + 1);
+        (void)vino_gui_fill((struct kos_gui_rect){
+            pointer_x + left - 1, pointer_y + (int32_t)row, width + 2, 1,
+        }, color_wallpaper);
+        (void)vino_gui_fill((struct kos_gui_rect){
+            pointer_x + left, pointer_y + (int32_t)row, width, 1,
+        }, color_text);
+    }
+}
+
 static void render_ui(void) {
     draw_wallpaper();
     draw_desktop_icons();
@@ -1188,6 +1246,7 @@ static void render_ui(void) {
         draw_text(overlay_x + 12, 48, "Move window: H/J/K/L  |  G to finish",
                   color_cyan, color_panel_high);
     }
+    draw_pointer();
 }
 
 static void animate_menu(bool opening) {
@@ -1227,6 +1286,7 @@ static void context_menu_activate(void) {
     if (context_selected < APP_COUNT) open_app(context_selected);
     else active_app = -1;
     context_menu_open = false;
+    context_menu_at_pointer = false;
 }
 
 static void move_active_window(char direction) {
@@ -1385,10 +1445,267 @@ static void handle_key(char key) {
     else if (key == 'q' && active_app < 0) app_exit();
 }
 
+static bool point_hits_window(uint32_t app, int32_t x, int32_t y) {
+    const struct vino_window *window = &windows[app];
+    struct kos_gui_rect bounds = {
+        window->x, window->y, window->width, window->height,
+    };
+    return window->open && !window->minimized
+        && vino_gui_rect_contains(&bounds, x, y);
+}
+
+static int32_t top_window_at(int32_t x, int32_t y) {
+    int32_t selected = -1;
+    for (uint32_t app = 0; app < APP_COUNT; ++app) {
+        if (point_hits_window(app, x, y)
+            && (selected < 0 || windows[app].z_order > windows[selected].z_order)) {
+            selected = (int32_t)app;
+        }
+    }
+    return selected;
+}
+
+static void handle_start_menu_pointer(int32_t x, int32_t y) {
+    uint32_t height = surface.height < 400 ? surface.height - 106 : 310;
+    uint32_t width = surface.width > 360 ? 310 : surface.width - 24;
+    int32_t menu_x = 14;
+    int32_t menu_y = (int32_t)surface.height - 58 - (int32_t)height - 8;
+    if (x < menu_x || (uint32_t)(x - menu_x) >= width
+        || y < menu_y || (uint32_t)(y - menu_y) >= height) {
+        set_start_menu(false);
+        return;
+    }
+    uint32_t row_height = surface.height < 400 ? 20 : 34;
+    uint32_t row_gap = surface.height < 400 ? 22 : 42;
+    uint32_t heading = surface.height < 400 ? 32 : 48;
+    for (uint32_t app = 0; app < APP_COUNT; ++app) {
+        int32_t row_y = menu_y + (int32_t)heading + (int32_t)app * (int32_t)row_gap;
+        if (y >= row_y && (uint32_t)(y - row_y) < row_height) {
+            menu_selected = app;
+            start_menu_launch();
+            return;
+        }
+    }
+}
+
+static void handle_context_menu_pointer(int32_t x, int32_t y) {
+    int32_t menu_x = context_menu_x;
+    int32_t menu_y = context_menu_y;
+    uint32_t width = surface.width > 244 ? 220 : surface.width - 24;
+    uint32_t row_height = surface.height < 320 ? 22 : 31;
+    uint32_t row_gap = surface.height < 320 ? 24 : 34;
+    uint32_t height = 5 * row_gap + 10;
+    if (!context_menu_at_pointer) {
+        menu_x = active_app >= 0 ? windows[active_app].x + 64 : 184;
+        menu_y = active_app >= 0 ? windows[active_app].y + 74 : 142;
+        if ((uint64_t)menu_x + width > surface.width)
+            menu_x = (int32_t)surface.width - (int32_t)width - 8;
+        if (menu_x < 8) menu_x = 8;
+        if ((uint64_t)menu_y + height > surface.height - 60)
+            menu_y = (int32_t)surface.height - 60 - (int32_t)height;
+        if (menu_y < 38) menu_y = 38;
+    }
+    if ((uint64_t)menu_x + width > surface.width)
+        menu_x = (int32_t)surface.width - (int32_t)width - 8;
+    if (menu_x < 8) menu_x = 8;
+    if ((uint64_t)menu_y + height > surface.height - 60)
+        menu_y = (int32_t)surface.height - 60 - (int32_t)height;
+    if (menu_y < 38) menu_y = 38;
+    if (x < menu_x || (uint32_t)(x - menu_x) >= width
+        || y < menu_y || (uint32_t)(y - menu_y) >= height) {
+        context_menu_open = false;
+        context_menu_at_pointer = false;
+        return;
+    }
+    for (uint32_t item = 0; item < 5; ++item) {
+        int32_t row_y = menu_y + 5 + (int32_t)item * (int32_t)row_gap;
+        if (y >= row_y && (uint32_t)(y - row_y) < row_height) {
+            context_selected = item;
+            context_menu_activate();
+            return;
+        }
+    }
+}
+
+static void handle_window_pointer(uint32_t app, int32_t x, int32_t y,
+                                  uint32_t buttons, uint64_t timestamp_ms) {
+    struct vino_window *window = &windows[app];
+    active_app = (int32_t)app;
+    raise_window(app);
+    start_menu_open = false;
+    menu_animation_step = 0;
+    context_menu_open = false;
+    context_menu_at_pointer = false;
+
+    if (y < window->y + WINDOW_TITLE_HEIGHT) {
+        if (x >= window->x + (int32_t)window->width - 65
+            && x < window->x + (int32_t)window->width - 51) {
+            close_active_app();
+            return;
+        }
+        if (x >= window->x + (int32_t)window->width - 47
+            && x < window->x + (int32_t)window->width - 33) {
+            window->minimized = true;
+            active_app = -1;
+            return;
+        }
+        if (x >= window->x + (int32_t)window->width - 29
+            && x < window->x + (int32_t)window->width - 15) {
+            toggle_maximize();
+            return;
+        }
+        if ((buttons & 1u) != 0 && !window->maximized) {
+            drag_app = (int32_t)app;
+            drag_offset_x = x - window->x;
+            drag_offset_y = y - window->y;
+        }
+        return;
+    }
+
+    if (app == APP_FILES) {
+        bool compact = window->height < 300;
+        int32_t content_top = window->y + WINDOW_TITLE_HEIGHT + (compact ? 8 : 14);
+        int32_t list_y = content_top + (compact ? 20 : 42);
+        if (x >= window->x + 18 && x < window->x + (int32_t)window->width - 18
+            && y >= list_y) {
+            uint32_t index = file_scroll + (uint32_t)(y - list_y) / 24;
+            if (index < file_entry_count) {
+                if (index == file_last_clicked && timestamp_ms >= file_last_click_ms
+                    && timestamp_ms - file_last_click_ms <= 500) {
+                    file_selected = index;
+                    (void)files_enter_selected();
+                    file_last_clicked = UINT32_MAX;
+                }
+                else {
+                    file_selected = index;
+                    file_last_clicked = index;
+                    file_last_click_ms = timestamp_ms;
+                }
+            }
+        }
+    }
+    else if (app == APP_SETTINGS) {
+        int32_t relative_y = y - window->y - WINDOW_TITLE_HEIGHT - 20;
+        if (relative_y >= 0) {
+            uint32_t setting = (uint32_t)relative_y / 76;
+            if (setting > 2) setting = 2;
+            handle_key((char)('1' + setting));
+        }
+    }
+    else if (app == APP_NETWORK && y > window->y + (int32_t)window->height - 45) {
+        refresh_system_info();
+    }
+}
+
+static void handle_pointer(const struct kos_gui_input_event *event) {
+    if (!pointer_available || event == NULL) return;
+    uint32_t previous_buttons = pointer_buttons;
+    pointer_x = event->pointer_x;
+    pointer_y = event->pointer_y;
+    uint32_t buttons = event->pointer_buttons;
+    bool left_pressed = (buttons & 1u) != 0 && (previous_buttons & 1u) == 0;
+    bool right_pressed = (buttons & 2u) != 0 && (previous_buttons & 2u) == 0;
+
+    if (drag_app >= 0 && (buttons & 1u) != 0) {
+        struct vino_window *window = &windows[drag_app];
+        window->x = pointer_x - drag_offset_x;
+        window->y = pointer_y - drag_offset_y;
+        if (window->x < 8) window->x = 8;
+        if (window->y < 38) window->y = 38;
+        if ((uint64_t)window->x + window->width > surface.width - 8)
+            window->x = (int32_t)(surface.width - window->width - 8);
+        if ((uint64_t)window->y + window->height > surface.height - 60)
+            window->y = (int32_t)(surface.height - window->height - 60);
+    }
+    if ((buttons & 1u) == 0) drag_app = -1;
+    if (event->pointer_wheel != 0 && active_app == APP_FILES
+        && point_hits_window(APP_FILES, pointer_x, pointer_y)) {
+        if (event->pointer_wheel > 0 && file_scroll > 0) --file_scroll;
+        else if (event->pointer_wheel < 0 && file_scroll + 1 < file_entry_count)
+            ++file_scroll;
+    }
+    if (right_pressed) {
+        start_menu_open = false;
+        menu_animation_step = 0;
+        context_menu_open = true;
+        context_menu_at_pointer = true;
+        context_menu_x = pointer_x;
+        context_menu_y = pointer_y;
+        context_selected = 0;
+    }
+    else if (left_pressed) {
+        if (context_menu_open) {
+            handle_context_menu_pointer(pointer_x, pointer_y);
+        }
+        else if (start_menu_open) {
+            handle_start_menu_pointer(pointer_x, pointer_y);
+        }
+        else {
+            uint32_t bar_y = surface.height - 58;
+            uint32_t start_width = surface.width >= 520 ? 102 : 44;
+            struct kos_gui_rect start = { 10, (int32_t)bar_y + 7, start_width, 44 };
+            if (vino_gui_rect_contains(&start, pointer_x, pointer_y)) {
+                set_start_menu(true);
+            }
+            else {
+                uint32_t left_reserve = surface.width >= 520 ? 124 : 60;
+                uint32_t right_reserve = surface.width >= 520 ? 104 : 10;
+                uint32_t available_width = surface.width > left_reserve + right_reserve + 20
+                    ? surface.width - left_reserve - right_reserve - 20 : surface.width - 36;
+                uint32_t dock_width = available_width < 486 ? available_width : 486;
+                if (dock_width < 40) dock_width = 40;
+                int32_t dock_x = (int32_t)left_reserve
+                    + (int32_t)(available_width - dock_width) / 2;
+                int32_t dock_y = (int32_t)bar_y + 6;
+                uint32_t button_width = (dock_width - 24) / APP_COUNT;
+                bool dock_hit = false;
+                for (uint32_t app = 0; app < APP_COUNT; ++app) {
+                    struct kos_gui_rect button = {
+                        dock_x + 6 + (int32_t)(app * button_width), dock_y + 5,
+                        button_width - 3, 36,
+                    };
+                    if (vino_gui_rect_contains(&button, pointer_x, pointer_y)) {
+                        open_app(app);
+                        dock_hit = true;
+                        break;
+                    }
+                }
+                if (!dock_hit) {
+                    int32_t app = top_window_at(pointer_x, pointer_y);
+                    if (app >= 0) {
+                        handle_window_pointer((uint32_t)app, pointer_x, pointer_y,
+                                              buttons, event->timestamp_ms);
+                    }
+                    else {
+                        bool icon_hit = false;
+                        if (surface.height >= 440) {
+                            for (uint32_t icon = 0; icon < APP_COUNT; ++icon) {
+                                struct kos_gui_rect icon_bounds = {
+                                    26, 64 + (int32_t)icon * 84, 144, 66,
+                                };
+                                if (vino_gui_rect_contains(&icon_bounds, pointer_x, pointer_y)) {
+                                    open_app(icon);
+                                    icon_hit = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!icon_hit) active_app = -1;
+                    }
+                }
+            }
+        }
+    }
+    pointer_buttons = buttons;
+}
+
 __attribute__((noreturn)) void _start(void) {
     surface.abi_version = KOS_GUI_ABI_VERSION;
     if (vino_gui_surface_get(&surface) < 0 || surface.width < 320
         || surface.height < 240) app_exit_with_status(1);
+    pointer_available = (surface.capabilities & KOS_GUI_SURFACE_POINTER) != 0;
+    pointer_x = (int32_t)(surface.width / 2);
+    pointer_y = (int32_t)(surface.height / 2);
     refresh_system_info();
     initialize_paths();
     terminal_init();
@@ -1397,8 +1714,10 @@ __attribute__((noreturn)) void _start(void) {
     render_ui();
     for (;;) {
         struct kos_gui_input_event event = { .abi_version = KOS_GUI_ABI_VERSION };
-        if (vino_gui_input_read(&event) == 0 && event.type == KOS_GUI_INPUT_KEY) {
-            handle_key((char)event.key);
+        if (vino_gui_input_read(&event) == 0
+            && (event.type == KOS_GUI_INPUT_KEY || event.type == KOS_GUI_INPUT_POINTER)) {
+            if (event.type == KOS_GUI_INPUT_KEY) handle_key((char)event.key);
+            else handle_pointer(&event);
             if (animation_frame != 0) --animation_frame;
             render_ui();
             if (animation_frame != 0) {

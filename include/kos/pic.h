@@ -9,6 +9,7 @@ enum {
     KOS_PIC_SLAVE_VECTOR = 40,
     KOS_PIC_IRQ_TIMER = 0,
     KOS_PIC_IRQ_KEYBOARD = 1,
+    KOS_PIC_IRQ_MOUSE = 12,
 };
 
 bool pic_initialize(void);

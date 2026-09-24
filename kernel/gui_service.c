@@ -5,13 +5,14 @@
 #include <kos/gui_canvas.h>
 #include <kos/gui_service.h>
 #include <kos/keyboard.h>
+#include <kos/mouse.h>
 #include <kos/timer.h>
 #include <kos/uaccess.h>
 #include <uapi/kos/gui.h>
 #include <uapi/kos/syscall_numbers.h>
 
 static struct gui_color canvas_color(struct kos_gui_color color) {
-    return (struct gui_color){ color.red, color.green, color.blue };
+    return (struct gui_color){ color.red, color.green, color.blue, color.alpha };
 }
 
 static bool valid_rect(const struct kos_gui_rect *rect) {
@@ -40,6 +41,8 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
         surface.pitch = (uint32_t)pitch;
         surface.bits_per_pixel = 32;
         surface.pixel_format = KOS_GUI_PIXEL_FORMAT_RGB32;
+        surface.capabilities = mouse_is_initialized() ? KOS_GUI_SURFACE_POINTER : 0;
+        mouse_set_bounds(surface.width, surface.height);
         return copy_to_user((void *)user_request, &surface, sizeof(surface)) == 0
             ? 0 : (uint64_t)-EFAULT;
     }
@@ -69,7 +72,20 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
                 (uint64_t)request.rect.y, request.rect.width, request.rect.height },
                 1, color);
             return 0;
-        case KOS_GUI_DISPLAY_DRAW_TEXT: {
+        case KOS_GUI_DISPLAY_GLASS_RECT:
+            if (!valid_rect(&request.rect) || request.radius > 64
+                || request.blur_radius > 30 || request.color.alpha == 0
+                || request.foreground.alpha == 0) return (uint64_t)-EINVAL;
+            gui_canvas_glass((struct gui_rect){ (uint64_t)request.rect.x,
+                (uint64_t)request.rect.y, request.rect.width, request.rect.height },
+                request.radius, request.blur_radius,
+                (struct gui_color){ request.color.red, request.color.green,
+                    request.color.blue, request.color.alpha },
+                (struct gui_color){ request.foreground.red, request.foreground.green,
+                    request.foreground.blue, request.foreground.alpha });
+            return 0;
+        case KOS_GUI_DISPLAY_DRAW_TEXT:
+        case KOS_GUI_DISPLAY_DRAW_TEXT_TRANSPARENT: {
             if (request.rect.x < 0 || request.rect.y < 0
                 || (uint32_t)request.rect.x >= framebuffer_width()
                 || (uint32_t)request.rect.y >= framebuffer_height()
@@ -83,9 +99,16 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
                 }
             }
             if (!terminated) return (uint64_t)-EINVAL;
-            gui_canvas_text((uint32_t)request.rect.x, (uint32_t)request.rect.y,
-                request.text, request.scale, canvas_color(request.foreground),
-                canvas_color(request.background));
+            if (operation == KOS_GUI_DISPLAY_DRAW_TEXT_TRANSPARENT) {
+                gui_canvas_text_transparent((uint32_t)request.rect.x,
+                    (uint32_t)request.rect.y, request.text, request.scale,
+                    canvas_color(request.foreground));
+            }
+            else {
+                gui_canvas_text((uint32_t)request.rect.x, (uint32_t)request.rect.y,
+                    request.text, request.scale, canvas_color(request.foreground),
+                    canvas_color(request.background));
+            }
             return 0;
         }
         default:
@@ -106,10 +129,24 @@ uint64_t gui_service_input(uint64_t user_event) {
     event.key = 0;
     event.modifiers = 0;
     event.timestamp_ms = timer_get_uptime_ms();
+    event.pointer_x = 0;
+    event.pointer_y = 0;
+    event.pointer_buttons = 0;
+    event.pointer_wheel = 0;
     char key = 0;
     if (keyboard_read_char(&key) && key != '\0') {
         event.type = KOS_GUI_INPUT_KEY;
         event.key = (uint8_t)key;
+    }
+    else {
+        struct kos_mouse_event pointer;
+        if (mouse_read_event(&pointer)) {
+            event.type = KOS_GUI_INPUT_POINTER;
+            event.pointer_x = pointer.x;
+            event.pointer_y = pointer.y;
+            event.pointer_buttons = pointer.buttons;
+            event.pointer_wheel = pointer.wheel;
+        }
     }
     return copy_to_user((void *)user_event, &event, sizeof(event)) == 0
         ? 0 : (uint64_t)-EFAULT;

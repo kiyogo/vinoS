@@ -2,6 +2,7 @@
 #include <stdint.h>
 
 #include <kos/framebuffer.h>
+#include <kos/heap.h>
 
 struct kos_framebuffer {
     volatile uint8_t *address;
@@ -86,6 +87,192 @@ uint64_t framebuffer_virtual_address(void) {
 
 static volatile uint32_t *framebuffer_row(uint64_t row) {
     return (volatile uint32_t *)(framebuffer.address + row * framebuffer.pitch);
+}
+
+static uint8_t pixel_channel(uint32_t pixel, uint8_t shift) {
+    return (uint8_t)(pixel >> shift);
+}
+
+static uint32_t rgb_pixel(uint8_t red, uint8_t green, uint8_t blue) {
+    return framebuffer_make_color(red, green, blue);
+}
+
+static uint32_t blend_pixel(uint32_t destination, uint8_t red, uint8_t green,
+                            uint8_t blue, uint8_t alpha) {
+    if (alpha == 255) return rgb_pixel(red, green, blue);
+    if (alpha == 0) return destination;
+    uint32_t inverse = 255u - alpha;
+    uint8_t out_red = (uint8_t)((red * alpha
+        + pixel_channel(destination, framebuffer.red_mask_shift) * inverse + 127u) / 255u);
+    uint8_t out_green = (uint8_t)((green * alpha
+        + pixel_channel(destination, framebuffer.green_mask_shift) * inverse + 127u) / 255u);
+    uint8_t out_blue = (uint8_t)((blue * alpha
+        + pixel_channel(destination, framebuffer.blue_mask_shift) * inverse + 127u) / 255u);
+    return rgb_pixel(out_red, out_green, out_blue);
+}
+
+static uint64_t rounded_row_inset(uint64_t radius, uint64_t row, uint64_t height) {
+    if (radius == 0 || row >= height || (row >= radius && row + radius < height)) return 0;
+    uint64_t dy = row < radius ? radius * 2 - row * 2 - 1
+        : (row - (height - radius)) * 2 + 1;
+    uint64_t diameter = radius * 2;
+    uint64_t circle = diameter * diameter;
+    for (uint64_t inset = 0; inset < radius; ++inset) {
+        uint64_t dx = diameter - inset * 2 - 1;
+        if (dx * dx + dy * dy <= circle) return inset;
+    }
+    return radius;
+}
+
+static uint32_t channel_sum_value(uint32_t sum, uint32_t count) {
+    return count == 0 ? 0 : (sum + count / 2) / count;
+}
+
+static void blur_snapshot(const uint32_t *source, uint32_t *horizontal,
+                          uint64_t width, uint64_t height, uint64_t radius) {
+    for (uint64_t y = 0; y < height; ++y) {
+        uint32_t red = 0, green = 0, blue = 0, count = 0;
+        uint64_t right = radius < width ? radius : width - 1;
+        for (uint64_t x = 0; x <= right; ++x) {
+            uint32_t pixel = source[y * width + x];
+            red += pixel_channel(pixel, framebuffer.red_mask_shift);
+            green += pixel_channel(pixel, framebuffer.green_mask_shift);
+            blue += pixel_channel(pixel, framebuffer.blue_mask_shift);
+            ++count;
+        }
+        for (uint64_t x = 0; x < width; ++x) {
+            horizontal[y * width + x] = rgb_pixel(
+                (uint8_t)channel_sum_value(red, count),
+                (uint8_t)channel_sum_value(green, count),
+                (uint8_t)channel_sum_value(blue, count));
+            if (x + 1 == width) continue;
+            if (x >= radius) {
+                uint32_t pixel = source[y * width + x - radius];
+                red -= pixel_channel(pixel, framebuffer.red_mask_shift);
+                green -= pixel_channel(pixel, framebuffer.green_mask_shift);
+                blue -= pixel_channel(pixel, framebuffer.blue_mask_shift);
+                --count;
+            }
+            if (x + radius + 1 < width) {
+                uint32_t pixel = source[y * width + x + radius + 1];
+                red += pixel_channel(pixel, framebuffer.red_mask_shift);
+                green += pixel_channel(pixel, framebuffer.green_mask_shift);
+                blue += pixel_channel(pixel, framebuffer.blue_mask_shift);
+                ++count;
+            }
+        }
+    }
+}
+
+void framebuffer_glass_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t height,
+                            uint64_t radius, uint64_t blur_radius,
+                            uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha,
+                            uint8_t border_red, uint8_t border_green, uint8_t border_blue,
+                            uint8_t border_alpha) {
+    if (!framebuffer.initialized || width == 0 || height == 0
+        || x >= framebuffer.width || y >= framebuffer.height) return;
+    if (width > framebuffer.width - x) width = framebuffer.width - x;
+    if (height > framebuffer.height - y) height = framebuffer.height - y;
+    if (radius > width / 2) radius = width / 2;
+    if (radius > height / 2) radius = height / 2;
+    if (blur_radius > 30) blur_radius = 30;
+
+    uint64_t area = width * height;
+    bool area_valid = height == 0 || area / height == width;
+    uint64_t buffer_bytes = area_valid && area <= UINT64_MAX / sizeof(uint32_t)
+        ? area * sizeof(uint32_t) : UINT64_MAX;
+    uint32_t *source = 0;
+    uint32_t *horizontal = 0;
+    if (blur_radius != 0 && buffer_bytes <= 16u * 1024u * 1024u) {
+        source = kmalloc(buffer_bytes);
+        horizontal = kmalloc(buffer_bytes);
+        if (source != 0 && horizontal != 0) {
+            for (uint64_t row = 0; row < height; ++row) {
+                volatile uint32_t *pixels = framebuffer_row(y + row) + x;
+                for (uint64_t column = 0; column < width; ++column) {
+                    source[row * width + column] = pixels[column];
+                }
+            }
+            blur_snapshot(source, horizontal, width, height, blur_radius);
+        }
+        else {
+            if (source != 0) (void)kfree(source);
+            if (horizontal != 0) (void)kfree(horizontal);
+            source = 0;
+            horizontal = 0;
+        }
+    }
+
+    for (uint64_t column = 0; column < width; ++column) {
+        uint32_t red_sum = 0, green_sum = 0, blue_sum = 0, count = 0;
+        uint64_t bottom = blur_radius < height ? blur_radius : height - 1;
+        if (horizontal != 0) {
+            for (uint64_t row = 0; row <= bottom; ++row) {
+                uint32_t pixel = horizontal[row * width + column];
+                red_sum += pixel_channel(pixel, framebuffer.red_mask_shift);
+                green_sum += pixel_channel(pixel, framebuffer.green_mask_shift);
+                blue_sum += pixel_channel(pixel, framebuffer.blue_mask_shift);
+                ++count;
+            }
+        }
+        for (uint64_t row = 0; row < height; ++row) {
+            uint64_t inset = rounded_row_inset(radius, row, height);
+            if (column >= inset && column < width - inset) {
+                volatile uint32_t *destination = framebuffer_row(y + row) + x + column;
+                if (horizontal != 0) {
+                    uint32_t blurred = rgb_pixel(
+                        (uint8_t)channel_sum_value(red_sum, count),
+                        (uint8_t)channel_sum_value(green_sum, count),
+                        (uint8_t)channel_sum_value(blue_sum, count));
+                    *destination = blend_pixel(blurred, red, green, blue, alpha);
+                }
+                else {
+                    *destination = blend_pixel(*destination, red, green, blue, alpha);
+                }
+            }
+            if (horizontal != 0 && row + 1 < height) {
+                if (row >= blur_radius) {
+                    uint32_t pixel = horizontal[(row - blur_radius) * width + column];
+                    red_sum -= pixel_channel(pixel, framebuffer.red_mask_shift);
+                    green_sum -= pixel_channel(pixel, framebuffer.green_mask_shift);
+                    blue_sum -= pixel_channel(pixel, framebuffer.blue_mask_shift);
+                    --count;
+                }
+                if (row + blur_radius + 1 < height) {
+                    uint32_t pixel = horizontal[(row + blur_radius + 1) * width + column];
+                    red_sum += pixel_channel(pixel, framebuffer.red_mask_shift);
+                    green_sum += pixel_channel(pixel, framebuffer.green_mask_shift);
+                    blue_sum += pixel_channel(pixel, framebuffer.blue_mask_shift);
+                    ++count;
+                }
+            }
+        }
+    }
+
+    if (border_alpha != 0 && width > 1 && height > 1) {
+        uint64_t inner_width = width - 2;
+        uint64_t inner_height = height - 2;
+        uint64_t inner_radius = radius == 0 ? 0 : radius - 1;
+        if (inner_radius > inner_width / 2) inner_radius = inner_width / 2;
+        if (inner_radius > inner_height / 2) inner_radius = inner_height / 2;
+        for (uint64_t row = 0; row < height; ++row) {
+            uint64_t outer_inset = rounded_row_inset(radius, row, height);
+            uint64_t inner_inset = row == 0 || row + 1 == height ? 0
+                : rounded_row_inset(inner_radius, row - 1, inner_height);
+            for (uint64_t column = outer_inset; column < width - outer_inset; ++column) {
+                bool inner = row != 0 && row + 1 != height
+                    && column >= 1 + inner_inset
+                    && column < width - 1 - inner_inset;
+                if (!inner) {
+                    volatile uint32_t *pixel = framebuffer_row(y + row) + x + column;
+                    *pixel = blend_pixel(*pixel, border_red, border_green,
+                                         border_blue, border_alpha);
+                }
+            }
+        }
+    }
+    if (source != 0) (void)kfree(source);
+    if (horizontal != 0) (void)kfree(horizontal);
 }
 
 void framebuffer_fill_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t height, uint32_t color) {

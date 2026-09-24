@@ -68,10 +68,37 @@ long vino_gui_border(struct kos_gui_rect rect, struct kos_gui_color color) {
     return display_request(&request);
 }
 
+long vino_gui_glass(struct kos_gui_rect rect, struct kos_gui_color fill,
+                    struct kos_gui_color border, uint32_t radius,
+                    uint32_t blur_radius) {
+    struct kos_gui_display_request request = {
+        .operation = KOS_GUI_DISPLAY_GLASS_RECT,
+        .rect = rect,
+        .color = fill,
+        .foreground = border,
+        .radius = radius,
+        .blur_radius = blur_radius,
+    };
+    return display_request(&request);
+}
+
 long vino_gui_text(int32_t x, int32_t y, const char *text, uint32_t scale,
                    struct kos_gui_color foreground, struct kos_gui_color background) {
     return vino_gui_text_font(x, y, text, scale, KOS_GUI_FONT_8X8,
                               foreground, background);
+}
+
+long vino_gui_text_transparent(int32_t x, int32_t y, const char *text, uint32_t scale,
+                               struct kos_gui_color foreground) {
+    struct kos_gui_display_request request = {
+        .operation = KOS_GUI_DISPLAY_DRAW_TEXT_TRANSPARENT,
+        .rect = { .x = x, .y = y },
+        .foreground = foreground,
+        .scale = scale,
+        .font_id = KOS_GUI_FONT_8X8,
+    };
+    if (!text_copy(request.text, text)) return -1;
+    return display_request(&request);
 }
 
 long vino_gui_text_font(int32_t x, int32_t y, const char *text, uint32_t scale,

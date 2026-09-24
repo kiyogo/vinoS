@@ -5,6 +5,7 @@
 #include <kos/acpi.h>
 #include <kos/apic.h>
 #include <kos/log.h>
+#include <kos/pic.h>
 #include <kos/vmm.h>
 
 #define IOREGSEL 0x00
@@ -137,6 +138,7 @@ bool ioapic_initialize(void) {
     ioapic_route_irq(0, KOS_APIC_TIMER_VECTOR, bsp_id, false);       /* Timer (IRQ0) */
     ioapic_route_irq(1, KOS_APIC_KEYBOARD_VECTOR, bsp_id, false);    /* Keyboard (IRQ1) */
     ioapic_route_irq(4, KOS_APIC_SERIAL_VECTOR, bsp_id, false);      /* Serial COM1 (IRQ4) */
+    ioapic_route_irq(KOS_PIC_IRQ_MOUSE, KOS_APIC_MOUSE_VECTOR, bsp_id, true);
 
     log_infof("IOAPIC: Initialized (ID: %u, GSI Base: %u, Max Redirs: %u, Base: 0x%lX)",
               (unsigned)ioapic_id, (unsigned)ioapic_gsi_base, (unsigned)ioapic_max_redirs, (unsigned long)ioapic_phys);

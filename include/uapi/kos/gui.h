@@ -3,8 +3,9 @@
 
 #include <stdint.h>
 
-#define KOS_GUI_ABI_VERSION 1u
+#define KOS_GUI_ABI_VERSION 2u
 #define KOS_GUI_TEXT_MAX 128u
+#define KOS_GUI_SURFACE_POINTER 0x01u
 
 #define KOS_GUI_RGB(red, green, blue) \
     ((((uint32_t)(red) & 0xffu) << 16) | (((uint32_t)(green) & 0xffu) << 8) \
@@ -16,6 +17,8 @@ enum kos_gui_display_operation {
     KOS_GUI_DISPLAY_FILL_RECT,
     KOS_GUI_DISPLAY_BORDER_RECT,
     KOS_GUI_DISPLAY_DRAW_TEXT,
+    KOS_GUI_DISPLAY_GLASS_RECT,
+    KOS_GUI_DISPLAY_DRAW_TEXT_TRANSPARENT,
 };
 
 enum kos_gui_pixel_format {
@@ -29,6 +32,7 @@ enum kos_gui_font_id {
 enum kos_gui_input_type {
     KOS_GUI_INPUT_NONE = 0,
     KOS_GUI_INPUT_KEY = 1,
+    KOS_GUI_INPUT_POINTER = 2,
 };
 
 /* KOS_GUI_INPUT_KEY.key contains translated ASCII, including these controls. */
@@ -49,6 +53,7 @@ struct kos_gui_surface {
     uint32_t pitch;
     uint32_t bits_per_pixel;
     uint32_t pixel_format;
+    uint32_t capabilities;
 };
 
 struct kos_gui_rect {
@@ -62,7 +67,7 @@ struct kos_gui_color {
     uint8_t red;
     uint8_t green;
     uint8_t blue;
-    uint8_t reserved;
+    uint8_t alpha;
 };
 
 struct kos_gui_display_request {
@@ -74,6 +79,8 @@ struct kos_gui_display_request {
     struct kos_gui_color background;
     uint32_t scale;
     uint32_t font_id;
+    uint32_t radius;
+    uint32_t blur_radius;
     char text[KOS_GUI_TEXT_MAX];
 };
 
@@ -83,6 +90,10 @@ struct kos_gui_input_event {
     uint32_t key;       /* KOS_GUI_INPUT_KEY carries translated ASCII. */
     uint32_t modifiers; /* Reserved; zero until modifier events are exposed. */
     uint64_t timestamp_ms;
+    int32_t pointer_x;
+    int32_t pointer_y;
+    uint32_t pointer_buttons;
+    int32_t pointer_wheel;
 };
 
 #endif /* KOS_UAPI_GUI_H */

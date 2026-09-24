@@ -11,6 +11,7 @@
 #define KOS_APIC_TIMER_VECTOR          0x20  /* 32 */
 #define KOS_APIC_KEYBOARD_VECTOR       0x21  /* 33 */
 #define KOS_APIC_SERIAL_VECTOR         0x24  /* 36 */
+#define KOS_APIC_MOUSE_VECTOR          0x2C  /* 44 */
 #define KOS_IPI_RESCHEDULE_VECTOR      0xFC
 #define KOS_IPI_TLB_SHOOTDOWN_VECTOR   0xFD
 #define KOS_IPI_GENERIC_VECTOR         0xFE

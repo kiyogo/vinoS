@@ -14,6 +14,7 @@
 #include <kos/keyboard.h>
 #include <kos/log.h>
 #include <kos/memory.h>
+#include <kos/mouse.h>
 #include <kos/net.h>
 #include <kos/socket.h>
 #include <kos/crypto.h>
@@ -237,6 +238,12 @@ static void vfs_self_test_listing_callback(const struct vfs_dir_entry *entry, vo
     }
 }
 
+static void mouse_irq_handler(uint8_t irq, void *context) {
+    (void)irq;
+    (void)context;
+    mouse_interrupt();
+}
+
 static bool vfs_volume_self_test(void) {
     const uint8_t *system_data;
     const uint8_t *data_volume_data;
@@ -420,6 +427,14 @@ KOS_NORETURN void kernel_main(void) {
     acpi_initialize();
     lapic_initialize();
     ioapic_initialize();
+    if (ioapic_is_enabled() && mouse_initialize()
+        && irq_register_handler(KOS_PIC_IRQ_MOUSE, mouse_irq_handler)) {
+        ioapic_unmask_irq(KOS_PIC_IRQ_MOUSE);
+        log_info("PS/2 mouse initialized and routed through IOAPIC.");
+    }
+    else {
+        log_info("PS/2 mouse unavailable; GUI remains keyboard-operable.");
+    }
     pic_disable();
     smp_initialize();
 

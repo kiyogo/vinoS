@@ -58,8 +58,13 @@ long vino_gui_surface_get(struct kos_gui_surface *surface);
 long vino_gui_clear(struct kos_gui_color color);
 long vino_gui_fill(struct kos_gui_rect rect, struct kos_gui_color color);
 long vino_gui_border(struct kos_gui_rect rect, struct kos_gui_color color);
+long vino_gui_glass(struct kos_gui_rect rect, struct kos_gui_color fill,
+                    struct kos_gui_color border, uint32_t radius,
+                    uint32_t blur_radius);
 long vino_gui_text(int32_t x, int32_t y, const char *text, uint32_t scale,
                    struct kos_gui_color foreground, struct kos_gui_color background);
+long vino_gui_text_transparent(int32_t x, int32_t y, const char *text, uint32_t scale,
+                               struct kos_gui_color foreground);
 long vino_gui_text_font(int32_t x, int32_t y, const char *text, uint32_t scale,
                         enum kos_gui_font_id font_id, struct kos_gui_color foreground,
                         struct kos_gui_color background);

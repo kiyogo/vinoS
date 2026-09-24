@@ -131,8 +131,10 @@ successful install; the installed CLI remains bootable.
 
 ### Native installer UI
 
-`kernel/gui_canvas.c` and `kernel/gui_service.c` adapt the kernel framebuffer
-and keyboard drivers to validated display/input syscalls. `user/lib/gui.c` and
+`kernel/gui_canvas.c` and `kernel/gui_service.c` adapt the kernel framebuffer,
+keyboard, and optional PS/2 mouse drivers to validated display/input syscalls.
+GUI ABI v2 adds alpha-blended rounded glass panels, a bounded software backdrop
+blur, transparent text, and pointer events. `user/lib/gui.c` and
 `user/lib/widgets.c` provide user-space surface, input-event, drawing, and
 window/panel/button/dropdown/list/dialog/progress-bar abstractions. Installer,
 Default, and MVP render in user processes; the kernel retains the hardware
@@ -177,18 +179,19 @@ of kernel code or a package payload.
 
 | Demoweb feature | Vino implementation boundary |
 | --- | --- |
-| dark/frosted panels | layered navy/blue panels with cyan accents, borders, and shadow treatment in Default |
+| dark/frosted panels | native rounded alpha panels, software backdrop blur, subtle border, and shadow in Default; the blur kernel is an approximation, not browser-identical CSS rendering |
 | start menu/taskbar | native user-space desktop, start menu, full-width bottom bar, dock, and launcher shortcuts |
 | file manager | read-only directory navigation and text preview through VFS file syscalls |
 | terminal | native user-space shell with VFS, uptime, network, and app-launch commands |
 | settings/control center | in-session accent, motion, and panel-density settings |
 | kernel monitor | live network/device snapshot provided by the system-info syscall |
-| focus, minimize, maximize, move | keyboard-driven window manager and focus/selection states; the current input UAPI exposes keyboard events only, so pointer hover/click is not claimed |
+| focus, minimize, maximize, move | keyboard controls plus optional PS/2 pointer hover, click, drag, right-click, and wheel events; pointer capability is reported only when the kernel detects and initializes a PS/2 mouse |
 | Font Awesome icons | future bitmap/icon asset package; no remote web dependency |
 
 The wallpaper PNG and browser-oriented HTML/CSS/JavaScript remain reference
-assets only. They are not copied into the kernel and are not presented as a
-native Vino GUI implementation.
+assets only. They are not copied into the kernel or embedded in Default yet.
+The native blur and text rasterization also do not promise pixel-identical
+browser output.
 
 ### Phase 7 — Native Default desktop
 
@@ -205,9 +208,11 @@ keystrokes to the kernel console. Network details come from a read-only
 Default keeps the Demoweb navy/cyan palette and uses a full-width bottom bar
 with Start, running-app dock indicators, and network status. Window stacking is
 bounded to the four built-in apps, animated content follows its window bounds,
-and the terminal reserves a separate prompt row. Interaction remains
-keyboard-driven (`S`, `C`, `Tab`, `M`, `Z`, `X`, and app shortcuts) until the
-input service exposes pointer events; there is no browser or WebView.
+and the terminal reserves a separate prompt row. Optional PS/2 pointer events
+support launcher and menu clicks, app-window focus/close/minimize/maximize,
+title-bar dragging, file selection/open-on-double-click, and file-list wheel
+scrolling. Keyboard shortcuts remain available as a fallback. There is no
+browser or WebView.
 
 The QEMU reboot integration test supports `--profile plus` to exercise the
 Plus → Default package install → Limine reboot → Default GUI autostart path,
@@ -222,12 +227,15 @@ tries the separately installed MVP recovery GUI, then leaves the CLI as the
 final fallback. No browser, WebView, HTML, CSS, JavaScript, or remote asset is
 used by the desktop.
 
-Input is currently keyboard-only: number shortcuts launch apps; `S` opens the
-start menu; `C` opens the context menu; `Tab` cycles focus; `M` minimizes; `Z`
-maximizes; `G` then `H/J/K/L` moves a window; `X` closes; and `Esc` returns
-focus to the desktop. Selection highlight serves as focus/hover feedback until
-a pointer driver and pointer input events exist. Settings are currently
+Keyboard controls include app number shortcuts, `S` for Start, `C` for the
+context menu, `Tab` for focus cycling, `M`/`Z`/`X` for minimize/maximize/close,
+and `G` then `H/J/K/L` to move a window. Pointer input is available only on
+systems with a working PS/2 mouse; headless QEMU currently exercises the
+keyboard fallback unless a pointer device is explicitly supplied. Settings are
 session-only, the file browser is read-only, and Network is a status view.
+Brightness, audio, Bluetooth, notifications, writable file management, and
+persistent user settings still need real kernel/service APIs and are not
+pretended as operational controls.
 
 ### Phase 8 — Standalone MVP recovery desktop
 

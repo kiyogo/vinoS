@@ -55,8 +55,17 @@ void gui_canvas_border(struct gui_rect rect, uint64_t thickness, struct gui_colo
     framebuffer_fill_rect(rect.x + rect.width - thickness, rect.y, thickness, rect.height, pixel);
 }
 
-void gui_canvas_text(uint64_t x, uint64_t y, const char *text, uint64_t scale,
-                     struct gui_color foreground, struct gui_color background) {
+void gui_canvas_glass(struct gui_rect rect, uint64_t radius, uint64_t blur_radius,
+                     struct gui_color fill, struct gui_color border) {
+    if (!canvas_initialized || rect.width == 0 || rect.height == 0) return;
+    framebuffer_glass_rect(rect.x, rect.y, rect.width, rect.height, radius, blur_radius,
+        fill.red, fill.green, fill.blue, fill.alpha,
+        border.red, border.green, border.blue, border.alpha);
+}
+
+static void canvas_text(uint64_t x, uint64_t y, const char *text, uint64_t scale,
+                        struct gui_color foreground, struct gui_color background,
+                        bool transparent_background) {
     if (!canvas_initialized || text == NULL || scale == 0 || scale > 16) {
         return;
     }
@@ -81,7 +90,9 @@ void gui_canvas_text(uint64_t x, uint64_t y, const char *text, uint64_t scale,
         if (glyph < 32 || glyph > 126) {
             glyph = '?';
         }
-        framebuffer_fill_rect(cursor_x, cursor_y, glyph_width, glyph_height, background_pixel);
+        if (!transparent_background) {
+            framebuffer_fill_rect(cursor_x, cursor_y, glyph_width, glyph_height, background_pixel);
+        }
         for (uint64_t row = 0; row < 8; ++row) {
             uint8_t bits = (uint8_t)font8x8_basic[glyph][row];
             for (uint64_t column = 0; column < 8; ++column) {
@@ -93,4 +104,14 @@ void gui_canvas_text(uint64_t x, uint64_t y, const char *text, uint64_t scale,
         }
         cursor_x += glyph_width;
     }
+}
+
+void gui_canvas_text(uint64_t x, uint64_t y, const char *text, uint64_t scale,
+                     struct gui_color foreground, struct gui_color background) {
+    canvas_text(x, y, text, scale, foreground, background, false);
+}
+
+void gui_canvas_text_transparent(uint64_t x, uint64_t y, const char *text, uint64_t scale,
+                                 struct gui_color foreground) {
+    canvas_text(x, y, text, scale, foreground, (struct gui_color){0, 0, 0, 0}, true);
 }
