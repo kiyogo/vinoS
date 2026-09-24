@@ -56,9 +56,9 @@ vino gui install <id>
 ```
 
 Install/remove/reinstall are wired to the package database and transactional
-installer. Start/stop/restart currently return an explicit not-implemented
-status because a user-space display-session/window-manager backend does not
-exist yet.
+installer. Start/stop/restart use the process/session manager and user-space
+display service; a failed Default launch can try MVP before leaving the CLI
+available.
 
 ### Installer flow
 
@@ -250,6 +250,20 @@ key, or configured TLS CA root currently exists, so the kernel rejects remote
 executables. Shutdown currently syncs storage and halts CPUs; ACPI firmware
 power-off is not implemented. Package integrity uses detached SHA-256, not a
 release signature.
+
+The disposable-disk QEMU integration can exercise the independent recovery
+path:
+
+```powershell
+python tools/boot_reboot_ci.py --profile plus --exercise-mvp-fallback
+python tools/boot_reboot_ci.py --profile cli --exercise-mvp-install
+```
+
+After the Plus reboot it removes Default from that test disk, requests Default
+again, verifies that the separately installed MVP session starts, then exits
+to the CLI. The CLI-profile run installs MVP from the ISO package, starts its
+standalone session, and returns to CLI. Both runs use disposable target disks
+and do not touch a host disk.
 
 ### Phase 9 — GUI manager runtime
 

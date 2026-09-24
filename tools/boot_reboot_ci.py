@@ -99,9 +99,14 @@ def free_tcp_port():
         return listener.getsockname()[1]
 
 
-def run(esp_dir, profile="cli"):
+def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
+        exercise_mvp_install=False):
     if profile not in ("cli", "plus"):
         raise ValueError(f"Unsupported installer profile: {profile}")
+    if exercise_mvp_fallback and profile != "plus":
+        raise ValueError("MVP fallback exercise requires the Plus recovery package")
+    if exercise_mvp_install and profile != "cli":
+        raise ValueError("MVP ISO-install exercise requires the CLI profile")
     required = (QEMU, OVMF_CODE, OVMF_VARS_TEMPLATE,
                 esp_dir / "EFI" / "BOOT" / "BOOTX64.EFI",
                 esp_dir / "EFI" / "BOOT" / "limine.conf",
@@ -221,11 +226,58 @@ def run(esp_dir, profile="cli"):
                         "Vino CLI ready; open the disk installer with `installer ui`.",
                         process, 30, occurrences=2)
                     print("[PASS] Vino Plus -> Default install -> Limine reboot -> Default GUI -> CLI fallback")
+                    if exercise_mvp_fallback:
+                        print("[QEMU] Removing Default on the disposable target and requesting it again")
+                        monitor.type_text("vino gui remove default")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "GUI Manager: removed 'default'; Vino OS remains bootable in CLI mode.",
+                            process, 30)
+                        monitor.type_text("vino gui start default")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "Default GUI failed to start (GUI is not installed); launching MVP recovery.",
+                            process, 30)
+                        wait_for_log(log_path,
+                            "GUI session 2: started 'mvp' in process", process, 30)
+                        time.sleep(1.0)
+                        mvp_log = log_path.read_text(encoding="utf-8", errors="replace")
+                        if ("GUI session 'mvp' exited with" in mvp_log
+                                or "GUI session 'mvp' stopped; CLI remains available" in mvp_log):
+                            raise RuntimeError("The standalone MVP GUI exited during startup")
+                        monitor.key("c")
+                        wait_for_log(log_path,
+                            "GUI session 'mvp' stopped; CLI remains available", process, 30)
+                        wait_for_log(log_path,
+                            "gui start default: OK", process, 30)
+                        print("[PASS] Default removed -> independent MVP fallback -> CLI shell")
                 else:
                     wait_for_log(log_path,
                         "Vino CLI ready; open the disk installer with `installer ui`.",
                         process, 90, occurrences=2)
                     print("[PASS] Limine rebooted from the installed ESP into the Vino CLI shell")
+                    if exercise_mvp_install:
+                        print("[QEMU] Installing MVP from the ISO package in CLI mode")
+                        monitor.type_text("vino gui install mvp")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "GUI Manager: installing 'mvp' from C:/GUI/MVP.KPKG",
+                            process, 30)
+                        wait_for_log(log_path, "gui install mvp: OK", process, 30)
+                        monitor.type_text("vino gui start mvp")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "GUI session 1: started 'mvp' in process", process, 30)
+                        time.sleep(1.0)
+                        mvp_log = log_path.read_text(encoding="utf-8", errors="replace")
+                        if ("GUI session 'mvp' exited with" in mvp_log
+                                or "GUI session 'mvp' stopped; CLI remains available" in mvp_log):
+                            raise RuntimeError("The locally installed MVP GUI exited during startup")
+                        monitor.key("c")
+                        wait_for_log(log_path,
+                            "GUI session 'mvp' stopped; CLI remains available", process, 30)
+                        wait_for_log(log_path, "gui start mvp: OK", process, 30)
+                        print("[PASS] CLI ISO install -> independent MVP session -> CLI shell")
                 return True
             finally:
                 if monitor is not None:
@@ -251,9 +303,14 @@ def main():
                         help="UEFI installer ESP staged by kos-tool build --installer")
     parser.add_argument("--profile", choices=("cli", "plus"), default="cli",
                         help="Installer profile to exercise; plus also checks Default GUI autostart")
+    parser.add_argument("--exercise-mvp-fallback", action="store_true",
+                        help="on a disposable Plus disk, remove Default and verify MVP fallback")
+    parser.add_argument("--exercise-mvp-install", action="store_true",
+                        help="on a disposable CLI disk, install MVP from ISO and verify its session")
     arguments = parser.parse_args()
     try:
-        if not run(arguments.esp_dir.resolve(), arguments.profile):
+        if not run(arguments.esp_dir.resolve(), arguments.profile,
+                   arguments.exercise_mvp_fallback, arguments.exercise_mvp_install):
             return 1
     except (OSError, RuntimeError, ValueError) as error:
         print(f"[FAIL] {error}")
