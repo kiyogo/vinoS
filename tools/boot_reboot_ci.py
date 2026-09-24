@@ -1,6 +1,7 @@
 """Exercise the graphical installer, Limine install, reboot, and disk boot in QEMU."""
 
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -125,11 +126,31 @@ def verify_cursor_pixel(image_path, x, y):
             f"Cursor tip is not visible at ({x},{y}); pixel={tip}, expected white cursor fill")
 
 
+def ppm_dimensions(image_path):
+    image = image_path.read_bytes()
+    header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\r?\n", image)
+    if header is None:
+        raise RuntimeError(f"QEMU screenshot is not a binary PPM image: {image_path}")
+    width, height = (int(header.group(1)), int(header.group(2)))
+    if len(image) - header.end() != width * height * 3:
+        raise RuntimeError(f"QEMU screenshot has invalid pixel data: {image_path}")
+    return width, height
+
+
 def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
         exercise_mvp_install=False, exercise_gui_manager=False,
-        ps2_only=False, exercise_pointer=False):
+        ps2_only=False, exercise_pointer=False, resolution="1024x768",
+        screenshot_path=None, leave_running=False):
+    resolution_match = re.fullmatch(r"(\d{3,4})x(\d{3,4})", resolution)
+    if resolution_match is None:
+        raise ValueError("Resolution must use WIDTHxHEIGHT, e.g. 1024x768")
+    resolution_width, resolution_height = map(int, resolution_match.groups())
+    if not (640 <= resolution_width <= 2560 and 480 <= resolution_height <= 1600):
+        raise ValueError("Resolution is outside the supported test range (640x480..2560x1600)")
     if profile not in ("cli", "plus"):
         raise ValueError(f"Unsupported installer profile: {profile}")
+    if leave_running and profile != "plus":
+        raise ValueError("Leaving QEMU open requires the Plus Default GUI profile")
     if exercise_mvp_fallback and profile != "plus":
         raise ValueError("MVP fallback exercise requires the Plus recovery package")
     if exercise_mvp_install and profile != "cli":
@@ -155,10 +176,24 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
     os.close(log_fd)
     log_path = Path(log_name)
 
-    with tempfile.TemporaryDirectory(prefix="vino-phase4-", dir=BUILD) as temporary:
+    temporary_context = (
+        nullcontext(Path(tempfile.mkdtemp(prefix="vino-phase4-", dir=BUILD)))
+        if leave_running else tempfile.TemporaryDirectory(prefix="vino-phase4-", dir=BUILD)
+    )
+    with temporary_context as temporary:
         temporary = Path(temporary)
         media_dir = temporary / "installer-esp"
         shutil.copytree(esp_dir, media_dir)
+        limine_config = media_dir / "EFI" / "BOOT" / "limine.conf"
+        config_text = limine_config.read_text(encoding="utf-8")
+        config_text, replacements = re.subn(
+            r"(?m)^resolution:\s*[^\r\n]+$",
+            f"resolution: {resolution_width}x{resolution_height}x32",
+            config_text,
+        )
+        if replacements != 1:
+            raise RuntimeError("Test ESP must contain exactly one Limine resolution setting")
+        limine_config.write_text(config_text, encoding="utf-8", newline="\n")
         target_path = temporary / "target.img"
         with target_path.open("wb") as target:
             target.truncate(TARGET_SIZE)
@@ -168,6 +203,9 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
 
         command = [
             str(QEMU), "-machine", "q35", "-cpu", "max", "-m", "512",
+            "-vga", "none", "-device",
+            f"VGA,edid=on,xres={resolution_width},yres={resolution_height},"
+            f"xmax={resolution_width},ymax={resolution_height}",
             "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
             "-drive", f"if=pflash,format=raw,file={vars_path}",
             "-drive", f"if=none,format=raw,id=target,file={target_path}",
@@ -179,7 +217,7 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                        "id=installer-media-device,bootindex=2",
             "-serial", "stdio", "-monitor", "none",
             "-qmp", f"tcp:127.0.0.1:{monitor_port},server=on,wait=off",
-            "-display", "none",
+            "-display", "default" if leave_running else "none",
         ]
         if not ps2_only:
             command[command.index("-serial"):command.index("-serial")] = [
@@ -256,6 +294,19 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                     if "GUI session 'default' exited with" in post_start_log:
                         raise RuntimeError("Default GUI exited during startup")
                     print("[QEMU] Default GUI started after the installed Vino Plus reboot")
+                    if screenshot_path is not None:
+                        screenshot_path = Path(screenshot_path).resolve()
+                        screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+                        monitor.screendump(screenshot_path)
+                        actual_dimensions = ppm_dimensions(screenshot_path)
+                        expected_dimensions = (resolution_width, resolution_height)
+                        if actual_dimensions != expected_dimensions:
+                            screenshot_path.unlink(missing_ok=True)
+                            raise RuntimeError(
+                                f"Requested GUI resolution {expected_dimensions}, "
+                                f"but QEMU captured {actual_dimensions}")
+                        print(f"[PASS] Desktop screenshot {actual_dimensions[0]}x"
+                              f"{actual_dimensions[1]} saved to {screenshot_path}")
                     if exercise_pointer:
                         print("[QEMU] Sending PS/2 move, left-click, and wheel events into the desktop")
                         monitor.pointer_move(48, 32)
@@ -299,6 +350,10 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         verify_cursor_pixel(cursor_screenshot,
                             int(pointer_position[-1][0]), int(pointer_position[-1][1]))
                         print("[PASS] QEMU scanout contains the independent cursor overlay at its input position")
+                    if leave_running:
+                        print(f"[QEMU] Leaving Vino Plus GUI open (PID {process.pid}); "
+                              f"private disk and firmware files: {temporary}")
+                        return True
                     frame_counts = re.findall(r"GUI frames: redraws=(\d+)", stats_log)
                     redraw_limit = 8 if exercise_pointer else 4
                     if not frame_counts or int(frame_counts[-1]) > redraw_limit:
@@ -441,12 +496,13 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                 return True
             finally:
                 if monitor is not None:
-                    try:
-                        monitor.execute("quit")
-                    except (OSError, RuntimeError):
-                        pass
+                    if not leave_running:
+                        try:
+                            monitor.execute("quit")
+                        except (OSError, RuntimeError):
+                            pass
                     monitor.close()
-                if process.poll() is None:
+                if not leave_running and process.poll() is None:
                     process.terminate()
                     try:
                         process.wait(timeout=5)
@@ -473,12 +529,19 @@ def main():
                         help="omit the USB tablet so QMP pointer events exercise the PS/2 fallback")
     parser.add_argument("--exercise-pointer", action="store_true",
                         help="send QEMU move, left-click, and wheel events and assert kernel delivery")
+    parser.add_argument("--resolution", default="1024x768",
+                        help="Limine desktop resolution to test (default: 1024x768)")
+    parser.add_argument("--screenshot", type=Path,
+                        help="save the installed Default desktop as a QEMU PPM screenshot")
+    parser.add_argument("--leave-running", action="store_true",
+                        help="show and keep the installed Plus GUI open in a QEMU window")
     arguments = parser.parse_args()
     try:
         if not run(arguments.esp_dir.resolve(), arguments.profile,
                    arguments.exercise_mvp_fallback, arguments.exercise_mvp_install,
                    arguments.exercise_gui_manager, arguments.ps2_only,
-                   arguments.exercise_pointer):
+                   arguments.exercise_pointer, arguments.resolution,
+                   arguments.screenshot, arguments.leave_running):
             return 1
     except (OSError, RuntimeError, ValueError) as error:
         print(f"[FAIL] {error}")
