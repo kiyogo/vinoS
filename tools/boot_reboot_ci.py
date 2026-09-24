@@ -170,6 +170,9 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
         raise ValueError(f"Unsupported installer profile: {profile}")
     if leave_running and profile != "plus":
         raise ValueError("Leaving QEMU open requires the Plus Default GUI profile")
+    if leave_running and (exercise_mvp_fallback or exercise_mvp_install
+                          or exercise_gui_manager or exercise_pointer):
+        raise ValueError("--leave-running cannot be combined with post-boot exercise options")
     if exercise_mvp_fallback and profile != "plus":
         raise ValueError("MVP fallback exercise requires the Plus recovery package")
     if exercise_mvp_install and profile != "cli":
@@ -326,6 +329,10 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                                 f"but QEMU captured {actual_dimensions}")
                         print(f"[PASS] Desktop screenshot {actual_dimensions[0]}x"
                               f"{actual_dimensions[1]} saved to {screenshot_path}")
+                    if leave_running:
+                        print(f"[QEMU] Leaving Vino Plus GUI open (PID {process.pid}); "
+                              f"private disk and firmware files: {temporary}")
+                        return True
                     if exercise_pointer:
                         print("[QEMU] Sending PS/2 move, left-click, and wheel events into the desktop")
                         monitor.pointer_move(48, 32)
@@ -378,10 +385,6 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         verify_cursor_pixel(cursor_screenshot,
                             int(pointer_position[-1][0]), int(pointer_position[-1][1]))
                         print("[PASS] QEMU scanout contains the independent cursor overlay at its input position")
-                    if leave_running:
-                        print(f"[QEMU] Leaving Vino Plus GUI open (PID {process.pid}); "
-                              f"private disk and firmware files: {temporary}")
-                        return True
                     frame_counts = re.findall(r"GUI frames: redraws=(\d+)", stats_log)
                     redraw_limit = 8 if exercise_pointer else 4
                     if not frame_counts or int(frame_counts[-1]) > redraw_limit:
