@@ -415,7 +415,7 @@ __attribute__((noreturn)) void _start(void) {
             if (key == 'y' || key == 'Y') {
                 format_confirmation_pending = false;
                 (void)send_action(KOS_INSTALLER_FORMAT_TARGET, true, 0);
-            } else if (key == 'n' || key == 'N' || key == 27) {
+            } else if (key == 'n' || key == 'N' || key == KOS_GUI_KEY_ESCAPE) {
                 format_confirmation_pending = false;
             }
             continue;
@@ -427,22 +427,25 @@ __attribute__((noreturn)) void _start(void) {
                                   delete_partition_name);
                 delete_partition_name[0] = '\0';
                 selection = 0;
-            } else if (key == 'n' || key == 'N' || key == 27) {
+            } else if (key == 'n' || key == 'N' || key == KOS_GUI_KEY_ESCAPE) {
                 delete_confirmation_pending = false;
                 delete_partition_name[0] = '\0';
             }
             continue;
         }
-        if (key == 27 || key == 'q' || key == 'Q') {
+        if (key == KOS_GUI_KEY_ESCAPE || key == 'q' || key == 'Q') {
             (void)send_action(KOS_INSTALLER_CLOSE, false, 0);
             app_exit(0);
         }
-        if (key == 'j' || key == 'J' || key == 'd' || key == '\t') ++selection;
-        else if (key == 'k' || key == 'K' || key == 'u' || key == 8 || key == 127) {
+        if (key == 'j' || key == 'J' || key == 'd' || key == KOS_GUI_KEY_TAB) ++selection;
+        else if (key == 'k' || key == 'K' || key == 'u'
+                 || key == KOS_GUI_KEY_BACKSPACE || key == KOS_GUI_KEY_DELETE) {
             if (selection > 0) --selection;
-            else if (key == 8 || key == 127) (void)send_action(KOS_INSTALLER_BACK, false, 0);
+            else if (key == KOS_GUI_KEY_BACKSPACE || key == KOS_GUI_KEY_DELETE)
+                (void)send_action(KOS_INSTALLER_BACK, false, 0);
         }
-        else if (key == '\n' || key == '\r' || key == ' ') handle_enter();
+        else if (key == KOS_GUI_KEY_ENTER || key == KOS_GUI_KEY_RETURN
+                 || key == KOS_GUI_KEY_SPACE) handle_enter();
         else if ((key == 'r' || key == 'R')
                  && installer.phase == KOS_INSTALLER_PHASE_FINISHED)
             (void)send_action(KOS_INSTALLER_REBOOT, true, 0);

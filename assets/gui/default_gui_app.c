@@ -4,6 +4,8 @@
 
 #include <uapi/kos/syscall_numbers.h>
 #include <vino/gui.h>
+#include <vino/system.h>
+#include <vino/vfs.h>
 
 enum {
     APP_TERMINAL = 0,

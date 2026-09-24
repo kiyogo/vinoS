@@ -111,6 +111,10 @@ def checklist(label, output):
     if label == "smoke":
         checks = common + [
             (
+                "UI filesystem mutation isolation",
+                "[CI SMOKE] PASS: UI process filesystem mutation syscalls are denied.",
+            ),
+            (
                 "GUI KPKG runtime install",
                 "[CI SMOKE] PASS: Default and MVP KPKG install commands completed.",
             ),

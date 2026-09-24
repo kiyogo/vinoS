@@ -131,11 +131,16 @@ successful install; the installed CLI remains bootable.
 
 ### Native installer UI
 
-`kernel/gui_canvas.c` provides a small framebuffer canvas and
-`kernel/installer_ui.c` provides a keyboard-accessible installer UI. The
-palette is based on the Demoweb audit: dark blue background, blue active
-surface, light cyan borders, and high-contrast white text. It is an
-installer/recovery surface only; it is not the final user-space Default GUI.
+`kernel/gui_canvas.c` and `kernel/gui_service.c` adapt the kernel framebuffer
+and keyboard drivers to validated display/input syscalls. `user/lib/gui.c` and
+`user/lib/widgets.c` provide user-space surface, input-event, drawing, and
+window/panel/button/dropdown/list/dialog/progress-bar abstractions. Installer,
+Default, and MVP render in user processes; the kernel retains the hardware
+drivers and service boundary only. UI processes are marked read-only: VFS
+write/open-for-write/unlink/mkdir/rename syscalls are denied, while disk
+changes must go through the privileged installer or package-manager service.
+The Installer palette is based on the Demoweb audit: dark blue background,
+blue active surface, light cyan borders, and high-contrast white text.
 
 Build and entry points:
 
@@ -210,7 +215,7 @@ Input is currently keyboard-only: number shortcuts launch apps; `S` opens the
 start menu; `C` opens the context menu; `Tab` cycles focus; `M` minimizes; `Z`
 maximizes; `G` then `H/J/K/L` moves a window; `X` closes; and `Esc` returns
 focus to the desktop. Selection highlight serves as focus/hover feedback until
-the kernel input service grows pointer events. Settings are currently
+a pointer driver and pointer input events exist. Settings are currently
 session-only, the file browser is read-only, and Network is a status view.
 
 ### Phase 8 — Standalone MVP recovery desktop

@@ -73,6 +73,8 @@ def compile_entry(clang: str, linker: str, source: Path, output: Path, name: str
         source,
         ROOT / "user" / "lib" / "gui.c",
         ROOT / "user" / "lib" / "widgets.c",
+        ROOT / "user" / "lib" / "vfs.c",
+        ROOT / "user" / "lib" / "system.c",
         ROOT / "user" / "lib" / "memory.c",
     ]
     for index, input_source in enumerate(sources):

@@ -44,6 +44,11 @@ static bool syscall_text_is_terminated(const char *text, uint64_t capacity) {
     return false;
 }
 
+static bool syscall_ui_read_only(void) {
+    struct process *proc = process_get_current();
+    return proc != NULL && (proc->flags & PROCESS_FLAG_UI_READ_ONLY) != 0;
+}
+
 static uint64_t syscall_gui_control(uint64_t user_request) {
     struct kos_gui_control_request request;
     if (!access_ok((const void *)user_request, sizeof(request))
@@ -314,6 +319,7 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
             if (len == 0) return 0;
             if (fd == 1 || fd == 2) return syscall_console_write(uaddr, len);
             if (fd <= 2) return (uint64_t)-EBADF;
+            if (syscall_ui_read_only()) return (uint64_t)-EPERM;
 
             struct process *proc = process_get_current();
             struct kos_file *file = proc ? handle_lookup_type(proc, (handle_t)fd, KOS_OBJ_FILE, KOS_RIGHT_WRITE) : 0;
@@ -365,11 +371,17 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
         }
 
         case SYS_open: {
+            uint32_t flags = (uint32_t)arg1;
+            if (syscall_ui_read_only()
+                && ((flags & KOS_O_ACCMODE) != KOS_O_RDONLY
+                    || (flags & (KOS_O_CREAT | KOS_O_TRUNC | KOS_O_APPEND)) != 0)) {
+                return (uint64_t)-EPERM;
+            }
             char path[VFS_MAX_PATH];
             long error = syscall_copy_path(path, (const char *)arg0);
             if (error != 0) return (uint64_t)error;
             int file_error = 0;
-            struct kos_file *file = kos_file_open(path, (uint32_t)arg1, &file_error);
+            struct kos_file *file = kos_file_open(path, flags, &file_error);
             if (file == 0) return (uint64_t)file_error;
             uint32_t rights = (file->can_read ? KOS_RIGHT_READ : 0)
                 | (file->can_write ? KOS_RIGHT_WRITE : 0);
@@ -426,6 +438,7 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
         }
 
         case SYS_unlink: {
+            if (syscall_ui_read_only()) return (uint64_t)-EPERM;
             char path[VFS_MAX_PATH];
             long error = syscall_copy_path(path, (const char *)arg0);
             if (error != 0) return (uint64_t)error;
@@ -436,6 +449,7 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
         }
 
         case SYS_mkdir: {
+            if (syscall_ui_read_only()) return (uint64_t)-EPERM;
             char path[VFS_MAX_PATH];
             long error = syscall_copy_path(path, (const char *)arg0);
             if (error != 0) return (uint64_t)error;
@@ -444,6 +458,7 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
         }
 
         case SYS_rename: {
+            if (syscall_ui_read_only()) return (uint64_t)-EPERM;
             char old_path[VFS_MAX_PATH];
             char new_path[VFS_MAX_PATH];
             long error = syscall_copy_path(old_path, (const char *)arg0);
@@ -654,6 +669,33 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
             return (uint64_t)-ENOSYS;
     }
 }
+
+#ifdef KOS_CI_SMOKE
+bool syscall_ui_sandbox_self_test(void) {
+    struct process *proc = process_get_current();
+    if (proc == NULL) return false;
+    uint32_t previous_flags = proc->flags;
+    proc->flags |= PROCESS_FLAG_UI_READ_ONLY;
+
+    bool passed = kos_syscall_dispatch(SYS_write, 3, 0, 1, 0, 0, 0)
+            == (uint64_t)-EPERM
+        && kos_syscall_dispatch(SYS_open, 0, KOS_O_WRONLY, 0, 0, 0, 0)
+            == (uint64_t)-EPERM
+        && kos_syscall_dispatch(SYS_open, 0, KOS_O_RDONLY | KOS_O_CREAT, 0, 0, 0, 0)
+            == (uint64_t)-EPERM
+        && kos_syscall_dispatch(SYS_unlink, 0, 0, 0, 0, 0, 0)
+            == (uint64_t)-EPERM
+        && kos_syscall_dispatch(SYS_mkdir, 0, 0, 0, 0, 0, 0)
+            == (uint64_t)-EPERM
+        && kos_syscall_dispatch(SYS_rename, 0, 0, 0, 0, 0, 0)
+            == (uint64_t)-EPERM;
+
+    proc->flags = previous_flags;
+    if (passed) log_info("[CI SMOKE] PASS: UI process filesystem mutation syscalls are denied.");
+    else log_error("[CI SMOKE] FAIL: UI filesystem write sandbox policy.");
+    return passed;
+}
+#endif
 
 const char *kos_syscall_name(uint64_t number) {
     switch (number) {

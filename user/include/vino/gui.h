@@ -5,10 +5,18 @@
 #include <stdint.h>
 
 #include <uapi/kos/gui.h>
-#include <uapi/kos/gui_control.h>
-#include <uapi/kos/system_info.h>
-#include <uapi/kos/system_control.h>
-#include <uapi/kos/syscall_numbers.h>
+
+struct vino_gui_window {
+    struct kos_gui_rect bounds;
+    const char *title;
+    struct kos_gui_color background;
+    struct kos_gui_color title_color;
+};
+
+struct vino_gui_panel {
+    struct kos_gui_rect bounds;
+    struct kos_gui_color color;
+};
 
 struct vino_gui_button {
     struct kos_gui_rect bounds;
@@ -23,6 +31,7 @@ struct vino_gui_list {
     uint32_t item_count;
     uint32_t selected_item;
     uint32_t row_height;
+    uint32_t first_visible_item;
 };
 
 struct vino_gui_dropdown {
@@ -51,18 +60,14 @@ long vino_gui_fill(struct kos_gui_rect rect, struct kos_gui_color color);
 long vino_gui_border(struct kos_gui_rect rect, struct kos_gui_color color);
 long vino_gui_text(int32_t x, int32_t y, const char *text, uint32_t scale,
                    struct kos_gui_color foreground, struct kos_gui_color background);
+long vino_gui_text_font(int32_t x, int32_t y, const char *text, uint32_t scale,
+                        enum kos_gui_font_id font_id, struct kos_gui_color foreground,
+                        struct kos_gui_color background);
 long vino_gui_input_read(struct kos_gui_input_event *event);
+bool vino_gui_rect_contains(const struct kos_gui_rect *rect, int32_t x, int32_t y);
 
-long vino_fs_open(const char *path, uint32_t flags);
-long vino_fs_close(long descriptor);
-long vino_fs_read(long descriptor, void *buffer, uint64_t length);
-long vino_fs_write(long descriptor, const void *buffer, uint64_t length);
-long vino_fs_stat(const char *path, struct kos_stat *stat);
-long vino_fs_getdents(long descriptor, struct kos_dirent *entries, uint64_t capacity);
-long vino_system_info_get(struct kos_system_info *info);
-long vino_gui_control(struct kos_gui_control_request *request);
-long vino_system_control(uint32_t action, bool confirmed);
-
+void vino_gui_window_render(const struct vino_gui_window *window);
+void vino_gui_panel_render(const struct vino_gui_panel *panel);
 void vino_gui_window_draw(struct kos_gui_rect bounds, const char *title,
                           struct kos_gui_color background,
                           struct kos_gui_color title_color);

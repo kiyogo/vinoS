@@ -6,6 +6,8 @@
 #include <uapi/kos/syscall_numbers.h>
 #include <uapi/kos/system_control.h>
 #include <vino/gui.h>
+#include <vino/system.h>
+#include <vino/vfs.h>
 
 enum {
     PAGE_HOME = 0,

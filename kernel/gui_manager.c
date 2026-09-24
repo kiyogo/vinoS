@@ -850,6 +850,7 @@ int gui_start(const char *id) {
 
     struct process *process = process_create("vino-gui-session");
     if (process == 0) return GUI_MANAGER_ERR_IO;
+    process->flags |= PROCESS_FLAG_UI_READ_ONLY;
     gui_session_init(&active_gui_session, id);
     active_gui_session.session_id = next_gui_session_id++;
     if (active_gui_session.session_id == 0)

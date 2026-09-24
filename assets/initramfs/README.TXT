@@ -10,4 +10,6 @@ SHA-256 sidecars are stored alongside the packages.
 User-space components:
   SYSTEM/GUI/INSTALLER.ELF - installer UI; disk changes are requested from the
   privileged installer engine and never performed directly by the UI.
-  Display/input operations are provided by kernel services through UAPI syscalls.
+  Display/input services adapt kernel framebuffer/keyboard drivers to UAPI.
+  GUI widgets and apps run in user space. UI processes cannot write, create,
+  delete or rename VFS files directly; they request mutations from system services.

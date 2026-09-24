@@ -31,6 +31,17 @@ enum kos_gui_input_type {
     KOS_GUI_INPUT_KEY = 1,
 };
 
+/* KOS_GUI_INPUT_KEY.key contains translated ASCII, including these controls. */
+enum kos_gui_key {
+    KOS_GUI_KEY_BACKSPACE = '\b',
+    KOS_GUI_KEY_TAB = '\t',
+    KOS_GUI_KEY_ENTER = '\n',
+    KOS_GUI_KEY_RETURN = '\r',
+    KOS_GUI_KEY_ESCAPE = 27,
+    KOS_GUI_KEY_SPACE = ' ',
+    KOS_GUI_KEY_DELETE = 127,
+};
+
 struct kos_gui_surface {
     uint32_t abi_version;
     uint32_t width;
@@ -69,8 +80,8 @@ struct kos_gui_display_request {
 struct kos_gui_input_event {
     uint32_t abi_version;
     uint32_t type;
-    uint32_t key;
-    uint32_t modifiers;
+    uint32_t key;       /* KOS_GUI_INPUT_KEY carries translated ASCII. */
+    uint32_t modifiers; /* Reserved; zero until modifier events are exposed. */
     uint64_t timestamp_ms;
 };
 

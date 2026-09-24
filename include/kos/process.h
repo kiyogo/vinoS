@@ -21,6 +21,11 @@ enum process_state {
     PROCESS_STATE_DEAD   = 3,
 };
 
+enum process_flag {
+    /* User interfaces may read VFS data but must request mutations via services. */
+    PROCESS_FLAG_UI_READ_ONLY = 1u << 0,
+};
+
 /* Forward declaration of handle table */
 struct handle_table;
 
@@ -33,6 +38,7 @@ struct process {
     struct list_head threads;
     uint32_t thread_count;
     uint64_t pml4_physical;
+    uint32_t flags;
     kos_spinlock_t lock;
     struct list_head process_node;
     struct list_head children;

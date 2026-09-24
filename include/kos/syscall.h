@@ -35,6 +35,10 @@ uint64_t kos_syscall_dispatch_frame(struct syscall_frame *frame);
 uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
                               uint64_t arg2, uint64_t arg3, uint64_t arg4, uint64_t arg5);
 
+#ifdef KOS_CI_SMOKE
+bool syscall_ui_sandbox_self_test(void);
+#endif
+
 const char *kos_syscall_name(uint64_t number);
 
 #endif /* KOS_SYSCALL_H */

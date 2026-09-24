@@ -14,6 +14,7 @@ bool installer_ui_run(void) {
     static const char application_path[] = "C:/SYSTEM/GUI/INSTALLER.ELF";
     struct process *child = process_create("vino-installer-ui");
     if (child == 0) return false;
+    child->flags |= PROCESS_FLAG_UI_READ_ONLY;
     if (thread_create(child, installer_process_entry, (void *)application_path,
                       "installer-ui") == 0) {
         process_exit(child, -ENOMEM);

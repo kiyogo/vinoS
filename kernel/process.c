@@ -141,6 +141,7 @@ struct process *process_create(const char *name) {
     list_init(&proc->threads);
     proc->thread_count = 0;
     proc->pml4_physical = cpu_read_cr3() & ~0xFFFull;
+    proc->flags = 0;
     spinlock_init(&proc->lock);
     list_init(&proc->process_node);
     list_init(&proc->children);
