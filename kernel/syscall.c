@@ -15,6 +15,7 @@
 #include <kos/memory.h>
 #include <kos/net.h>
 #include <kos/net_device.h>
+#include <kos/pmm.h>
 #include <kos/process.h>
 #include <kos/serial.h>
 #include <kos/socket.h>
@@ -283,6 +284,8 @@ uint64_t kos_syscall_dispatch(uint64_t number, uint64_t arg0, uint64_t arg1,
                 .abi_version = KOS_SYSTEM_INFO_ABI_VERSION,
                 .task_count = (uint32_t)task_count(),
                 .uptime_seconds = timer_uptime_seconds(),
+                .total_memory_bytes = pmm_total_memory_bytes(),
+                .free_memory_bytes = pmm_free_frame_count() * pmm_frame_size(),
                 .system_volume_letter = gui_manager_system_volume_letter(),
             };
             struct net_interface_info network = {0};

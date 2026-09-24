@@ -3,13 +3,16 @@
 
 #include <stdint.h>
 
-#define KOS_SYSTEM_INFO_ABI_VERSION 1u
+#define KOS_SYSTEM_INFO_ABI_VERSION 2u
 #define KOS_SYSTEM_INFO_DEVICE_NAME_MAX 32u
 
 struct kos_system_info {
     uint32_t abi_version;
     uint32_t task_count;
     uint64_t uptime_seconds;
+    /* Bytes reported by the physical-memory manager. */
+    uint64_t total_memory_bytes;
+    uint64_t free_memory_bytes;
     uint32_t network_available;
     uint32_t configuration_source;
     uint32_t dhcp_state;

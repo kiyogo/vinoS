@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include <uapi/kos/syscall_numbers.h>
+#include <uapi/kos/system_control.h>
 #include <vino/gui.h>
 #include <vino/system.h>
 #include <vino/vfs.h>
@@ -24,6 +25,10 @@ enum {
     PREVIEW_SIZE = 768,
     WALLPAPER_MAX_BYTES = 8 * 1024 * 1024,
     WALLPAPER_HEADER_SIZE = 20,
+    POWER_DIALOG_CLOSED = 0,
+    POWER_DIALOG_CHOOSE = 1,
+    POWER_DIALOG_CONFIRM_RESTART = 2,
+    POWER_DIALOG_CONFIRM_SHUTDOWN = 3,
 };
 
 static const char *const app_names[APP_COUNT] = {
@@ -32,6 +37,7 @@ static const char *const app_names[APP_COUNT] = {
 
 static struct kos_gui_surface surface;
 static struct kos_system_info system_info;
+static bool system_info_available;
 static struct kos_gui_color color_wallpaper = { 12, 19, 34, 0 };
 static struct kos_gui_color color_panel = { 15, 22, 40, 0 };
 static struct kos_gui_color color_panel_high = { 37, 48, 67, 0 };
@@ -82,13 +88,16 @@ static bool start_menu_open;
 static char menu_search[32];
 static bool context_menu_open;
 static bool about_dialog_open;
+static uint32_t power_dialog_state;
+static char power_dialog_message[96];
+static char network_action_message[96];
 static bool move_window_mode;
 static uint32_t menu_selected;
 static uint32_t context_selected;
 static uint32_t menu_animation_step;
 static uint32_t theme_variant;
 static bool reduced_motion;
-static bool compact_panels;
+static bool strong_window_shadow;
 static bool pointer_available;
 static int32_t pointer_x;
 static int32_t pointer_y;
@@ -113,7 +122,6 @@ static uint32_t wallpaper_pitch;
 static uint32_t recent_apps[2];
 static uint32_t recent_app_count;
 static uint32_t settings_page;
-static bool notifications_cleared;
 static bool handler_rendered_current_input;
 static uint32_t animation_frame;
 static char text_scratch[KOS_GUI_TEXT_MAX];
@@ -203,6 +211,22 @@ static void number_text(uint64_t value, char output[24]) {
     uint32_t index = 0;
     while (count != 0) output[index++] = reversed[--count];
     output[index] = '\0';
+}
+
+static void format_memory_summary(char output[64]) {
+    if (!system_info_available) {
+        string_copy(output, 64, "Kernel metrics unavailable");
+        return;
+    }
+    char total[24], free_memory[24];
+    number_text(system_info.total_memory_bytes / (1024 * 1024), total);
+    number_text(system_info.free_memory_bytes / (1024 * 1024), free_memory);
+    output[0] = '\0';
+    string_append(output, 64, "PMM: ");
+    string_append(output, 64, total);
+    string_append(output, 64, " MB total / ");
+    string_append(output, 64, free_memory);
+    string_append(output, 64, " MB free");
 }
 
 static void color_set_accent(uint32_t variant) {
@@ -431,7 +455,12 @@ static const char *dhcp_state_name(uint32_t state) {
 
 static bool system_info_visual_equal(const struct kos_system_info *left,
                                     const struct kos_system_info *right) {
-    if (left->network_available != right->network_available
+    if (left->task_count != right->task_count
+        || left->total_memory_bytes / (1024 * 1024)
+            != right->total_memory_bytes / (1024 * 1024)
+        || left->free_memory_bytes / (1024 * 1024)
+            != right->free_memory_bytes / (1024 * 1024)
+        || left->network_available != right->network_available
         || left->configuration_source != right->configuration_source
         || left->dhcp_state != right->dhcp_state
         || left->ipv4_address != right->ipv4_address
@@ -450,10 +479,16 @@ static bool system_info_visual_equal(const struct kos_system_info *left,
 
 static bool refresh_system_info(void) {
     struct kos_system_info previous = system_info;
+    bool was_available = system_info_available;
     if (vino_system_info_get(&system_info) < 0) {
-        system_info.network_available = 0;
+        system_info_available = false;
+        system_info = (struct kos_system_info){
+            .abi_version = KOS_SYSTEM_INFO_ABI_VERSION,
+        };
+        return was_available || !system_info_visual_equal(&previous, &system_info);
     }
-    return !system_info_visual_equal(&previous, &system_info);
+    system_info_available = true;
+    return !was_available || !system_info_visual_equal(&previous, &system_info);
 }
 
 static bool path_exists(const char *path, uint32_t expected_type) {
@@ -526,11 +561,18 @@ static void terminal_init(void) {
     terminal_input[0] = '\0';
     terminal_add_line("Vino OS Default  |  native shell");
     terminal_add_line("Type help for commands. Esc returns to the desktop.");
+    if (terminal_directory[0] == '\0')
+        terminal_add_line("No mounted system volume is exposed by the kernel.");
 }
 
 static void initialize_paths(void) {
     char volume = system_info.system_volume_letter;
-    if (volume < 'C' || volume > 'Z') volume = 'D';
+    if (volume < 'C' || volume > 'Z') {
+        file_directory[0] = '\0';
+        file_home_directory[0] = '\0';
+        terminal_directory[0] = '\0';
+        return;
+    }
     terminal_directory[0] = volume;
     terminal_directory[1] = ':';
     terminal_directory[2] = '/';
@@ -565,6 +607,11 @@ static void files_reload(void) {
     file_selected = 0;
     file_scroll = 0;
     file_error[0] = '\0';
+    if (file_directory[0] == '\0') {
+        string_copy(file_error, sizeof(file_error),
+                    "No mounted system volume is reported by the kernel.");
+        return;
+    }
     if (!list_directory(file_directory, file_entries, FILE_ENTRY_COUNT,
                         &file_entry_count)) {
         string_copy(file_error, sizeof(file_error), "Cannot open this VFS directory.");
@@ -656,8 +703,12 @@ static void terminal_cat_path(const char *path) {
 
 static void terminal_show_network(void) {
     refresh_system_info();
+    if (!system_info_available) {
+        terminal_add_line("Kernel system-info API: unavailable");
+        return;
+    }
     if (!system_info.network_available) {
-        terminal_add_line("Network interface: unavailable");
+        terminal_add_line("NIC: unavailable in kernel network state");
         return;
     }
     char ip[16];
@@ -668,10 +719,109 @@ static void terminal_show_network(void) {
     line[0] = '\0';
     string_copy(line, sizeof(line), "Interface: ");
     string_append(line, sizeof(line), system_info.device_name[0]
-        ? system_info.device_name : "eth0");
+        ? system_info.device_name : "Unavailable");
     string_append(line, sizeof(line), "  |  ");
     string_append(line, sizeof(line), dhcp_state_name(system_info.dhcp_state));
     terminal_add_line(line);
+}
+
+static void request_network_dhcp(void) {
+    (void)refresh_system_info();
+    if (!system_info_available) {
+        string_copy(network_action_message, sizeof(network_action_message),
+                    "Network API unavailable.");
+        return;
+    }
+    if (!system_info.network_available) {
+        string_copy(network_action_message, sizeof(network_action_message),
+                    "No NIC exposed; DHCP unavailable.");
+        return;
+    }
+    long result = vino_system_control(KOS_SYSTEM_CONTROL_CONNECT_NETWORK, false);
+    (void)refresh_system_info();
+    string_copy(network_action_message, sizeof(network_action_message), result < 0
+        ? "DHCP failed or timed out."
+        : "DHCP request completed.");
+}
+
+static void execute_power_action(uint32_t action) {
+    long result = vino_system_control(action, true);
+    if (result < 0) {
+        string_copy(power_dialog_message, sizeof(power_dialog_message),
+                    "Kernel rejected the request; the desktop is still running.");
+    }
+    else {
+        string_copy(power_dialog_message, sizeof(power_dialog_message),
+                    "Kernel accepted the request but did not transition state.");
+    }
+}
+
+static void open_power_dialog(void) {
+    power_dialog_state = POWER_DIALOG_CHOOSE;
+    power_dialog_message[0] = '\0';
+}
+
+static void handle_power_dialog_key(char key) {
+    if (key == 27) {
+        power_dialog_state = POWER_DIALOG_CLOSED;
+        return;
+    }
+    if (power_dialog_state == POWER_DIALOG_CHOOSE) {
+        if (key == 'r') power_dialog_state = POWER_DIALOG_CONFIRM_RESTART;
+        else if (key == 's') power_dialog_state = POWER_DIALOG_CONFIRM_SHUTDOWN;
+        return;
+    }
+    if (key == 'n') {
+        power_dialog_state = POWER_DIALOG_CLOSED;
+        return;
+    }
+    if (key == '\n' || key == 'y') {
+        execute_power_action(power_dialog_state == POWER_DIALOG_CONFIRM_RESTART
+            ? KOS_SYSTEM_CONTROL_RESTART : KOS_SYSTEM_CONTROL_SHUTDOWN);
+    }
+}
+
+static void handle_power_dialog_pointer(int32_t x, int32_t y) {
+    uint32_t width = surface.width > 484 ? 460 : surface.width - 24;
+    uint32_t height = 220;
+    int32_t left = (int32_t)(surface.width - width) / 2;
+    int32_t top = (int32_t)(surface.height - height) / 2;
+    if (power_dialog_state == POWER_DIALOG_CHOOSE) {
+        struct kos_gui_rect restart, shutdown, cancel;
+        if (width >= 430) {
+            restart = (struct kos_gui_rect){ left + 18, top + 126, 126, 38 };
+            shutdown = (struct kos_gui_rect){ left + 155, top + 126, 126, 38 };
+            cancel = (struct kos_gui_rect){ left + 292, top + 126, 126, 38 };
+        }
+        else {
+            uint32_t button_width = width - 36;
+            restart = (struct kos_gui_rect){ left + 18, top + 96, button_width, 32 };
+            shutdown = (struct kos_gui_rect){ left + 18, top + 136, button_width, 32 };
+            cancel = (struct kos_gui_rect){ left + 18, top + 176, button_width, 32 };
+        }
+        if (vino_gui_rect_contains(&restart, x, y))
+            power_dialog_state = POWER_DIALOG_CONFIRM_RESTART;
+        else if (vino_gui_rect_contains(&shutdown, x, y))
+            power_dialog_state = POWER_DIALOG_CONFIRM_SHUTDOWN;
+        else if (vino_gui_rect_contains(&cancel, x, y))
+            power_dialog_state = POWER_DIALOG_CLOSED;
+        return;
+    }
+    uint32_t action_width = width >= 430 ? 126 : (width - 48) / 2;
+    struct kos_gui_rect confirm = {
+        left + (width >= 430 ? 150 : 18), top + 150, action_width, 38,
+    };
+    struct kos_gui_rect cancel = {
+        left + (width >= 430 ? 286 : 30 + action_width),
+        top + 150, action_width, 38,
+    };
+    if (vino_gui_rect_contains(&confirm, x, y)) {
+        execute_power_action(power_dialog_state == POWER_DIALOG_CONFIRM_RESTART
+            ? KOS_SYSTEM_CONTROL_RESTART : KOS_SYSTEM_CONTROL_SHUTDOWN);
+    }
+    else if (vino_gui_rect_contains(&cancel, x, y)) {
+        power_dialog_state = POWER_DIALOG_CLOSED;
+    }
 }
 
 static void terminal_execute(void) {
@@ -749,11 +899,29 @@ static void terminal_execute(void) {
     }
     else if (string_equal(command, "gui")) {
         if (string_equal(argument, "status")) {
-            terminal_add_line(system_info.system_volume_letter
-                ? "Default GUI package is selected on the installed Vino volume."
-                : "Running in the live CLI / RAM environment.");
+            struct kos_gui_control_request request = {
+                .abi_version = KOS_GUI_CONTROL_ABI_VERSION,
+                .action = KOS_GUI_CONTROL_QUERY,
+            };
+            if (vino_gui_control(&request) < 0) {
+                terminal_add_line("GUI manager query unavailable.");
+            }
+            else {
+                char line[TERMINAL_LINE_LENGTH] = "Default GUI: ";
+                string_append(line, sizeof(line), request.default_gui_id[0] != '\0'
+                    ? request.default_gui_id : "none");
+                terminal_add_line(line);
+                string_copy(line, sizeof(line), "Installed GUI packages: ");
+                if (request.installed_mask & KOS_GUI_INSTALLED_DEFAULT)
+                    string_append(line, sizeof(line), "default ");
+                if (request.installed_mask & KOS_GUI_INSTALLED_MVP)
+                    string_append(line, sizeof(line), "mvp ");
+                if (request.installed_mask == 0)
+                    string_append(line, sizeof(line), "none");
+                terminal_add_line(line);
+            }
         }
-        else terminal_add_line("The native Default desktop is the active GUI session.");
+        else terminal_add_line("Only 'gui status' is implemented in this shell.");
     }
     else if (string_equal(command, "echo")) terminal_add_line(argument);
     else if (string_equal(command, "exit")) {
@@ -1125,7 +1293,7 @@ static void draw_files_content(struct vino_window *window) {
     (void)vino_gui_glass((struct kos_gui_rect){ window->x + 1, body_y,
         side_width, body_height }, side_fill, side_edge, 0, 0);
     draw_text(window->x + 18, body_y + 13, "Favorites", color_muted, side_fill);
-    const char *nav[3] = { "Home", "This PC", "Network" };
+    const char *nav[3] = { "System files", "This PC", "Network status" };
     for (uint32_t index = 0; index < 3; ++index) {
         int32_t row_y = body_y + 36 + (int32_t)index * 34;
         bool selected = index == 0 && string_equal(file_directory, file_home_directory);
@@ -1142,8 +1310,9 @@ static void draw_files_content(struct vino_window *window) {
     draw_hline(window->x + 16, body_y + 145, side_width - 32, 1,
                (struct kos_gui_color){ 255, 255, 255, 18 });
     draw_text(window->x + 18, body_y + 160, "Storage", color_muted, side_fill);
-    char volume[32] = "Vino volume";
+    char volume[32] = "System volume unavailable";
     if (system_info.system_volume_letter != 0) {
+        string_copy(volume, sizeof(volume), "System volume");
         char letter[5] = { ' ', '(', system_info.system_volume_letter, ')', '\0' };
         string_append(volume, sizeof(volume), letter);
     }
@@ -1168,7 +1337,7 @@ static void draw_files_content(struct vino_window *window) {
 
     int32_t left = content_x + 18;
     int32_t top = body_y + 52;
-    draw_text(left, top, "Quick access", color_text, color_panel_low);
+    draw_text(left, top, "Folders here", color_text, color_panel_low);
     uint32_t card_width = (content_width - 48) / 3;
     for (uint32_t card_index = 0; card_index < 3; ++card_index) {
         uint32_t index = files_quick_directory(card_index);
@@ -1276,14 +1445,18 @@ static void draw_settings_content(struct vino_window *window) {
         char task_count[64] = "Active tasks: ";
         char digits[24];
         number_text(system_info.task_count, digits);
-        string_append(task_count, sizeof(task_count), digits);
+        string_append(task_count, sizeof(task_count), system_info_available
+            ? digits : "unavailable");
         draw_text(card.x + 14, card.y + 42, task_count, color_muted, color_panel_high);
+        char memory[64];
+        format_memory_summary(memory);
+        draw_text(card.x + 14, card.y + 59, memory, color_muted, color_panel_high);
     }
     else if (settings_page == 1) {
         draw_text(left, y, "Bluetooth controller", color_text, color_panel_low);
-        draw_text(left, y + 30, "No Bluetooth adapter is exposed by the current kernel.",
+        draw_text(left, y + 30, "Unavailable: no kernel Bluetooth driver/service.",
                   color_muted, color_panel_low);
-        draw_text(left, y + 58, "No radio state is being simulated.", color_muted,
+        draw_text(left, y + 58, "No radio state or scan results are simulated.", color_muted,
                   color_panel_low);
     }
     else if (settings_page == 2) {
@@ -1293,10 +1466,13 @@ static void draw_settings_content(struct vino_window *window) {
         struct kos_gui_rect card = { left, y, content_width, 74 };
         draw_box(card, color_panel_high, color_dim);
         draw_text(card.x + 14, card.y + 12,
-            system_info.network_available ? "Network interface ready" : "No network interface",
+            !system_info_available ? "Kernel network API unavailable"
+                : system_info.network_available ? "NIC reported by kernel"
+                : "No NIC reported by kernel",
             color_text, color_panel_high);
         draw_text(card.x + 14, card.y + 40,
-            system_info.ipv4_address != 0 ? ip : "IPv4 address unavailable",
+            !system_info_available ? "Unavailable"
+                : system_info.ipv4_address != 0 ? ip : "IPv4 address unavailable",
             color_cyan, color_panel_high);
         draw_text(left, y + 94, "Press N to open Network details.",
                   color_muted, color_panel_low);
@@ -1316,17 +1492,19 @@ static void draw_settings_content(struct vino_window *window) {
             color_accent, color_panel_high);
         card.y += 72;
         draw_box(card, color_panel_high, color_dim);
-        draw_text(card.x + 14, card.y + 11, "Taskbar density", color_text,
+        draw_text(card.x + 14, card.y + 11, "Window shadow", color_text,
                   color_panel_high);
         draw_text(card.x + 14, card.y + 36,
-            compact_panels ? "Compact" : "Comfortable",
+            strong_window_shadow ? "Strong" : "Soft",
             color_accent, color_panel_high);
         draw_text(left, y + 238, "Wallpaper", color_text, color_panel_low);
         draw_text(left, y + 262, wallpaper_loaded
             ? "Demoweb local image  |  cover scaling" : "Local wallpaper asset unavailable",
             wallpaper_loaded ? color_muted : (struct kos_gui_color){ 251, 146, 60, 0 },
             color_panel_low);
-        draw_text(left, y + 294, "Use 1 / 2 / 3 to change the selected appearance option.",
+        draw_text(left, y + 294, "1 / 2 / 3 changes desktop-session appearance only.",
+                  color_muted, color_panel_low);
+        draw_text(left, y + 318, "Not saved; no kernel display-settings service is exposed.",
                   color_muted, color_panel_low);
     }
     else if (settings_page == 4) {
@@ -1340,7 +1518,11 @@ static void draw_settings_content(struct vino_window *window) {
         draw_text(left, y, "Vino OS Default", color_text, color_panel_low);
         draw_text(left, y + 30, "Native user-space GUI; no browser or WebView.",
                   color_muted, color_panel_low);
-        draw_text(left, y + 58, "Display, input and file access use kernel services.",
+        draw_text(left, y + 58, "Files: VFS. Info: uptime, tasks and PMM memory metrics.",
+                  color_muted, color_panel_low);
+        draw_text(left, y + 86, "Bluetooth, brightness and audio APIs unavailable.",
+                  color_muted, color_panel_low);
+        draw_text(left, y + 110, "Notification service unavailable.",
                   color_muted, color_panel_low);
     }
 }
@@ -1352,10 +1534,12 @@ static void draw_control_center_content(struct vino_window *window) {
     draw_text(left, top, "Quick settings", color_text, color_panel_low);
     const char *titles[4] = { "Network", "Personalize", "Notifications", "Motion" };
     const char *details[4] = {
-        system_info.ipv4_address != 0 ? "Connected" : "Unavailable",
+        !system_info_available ? "API unavailable"
+            : !system_info.network_available ? "No NIC"
+            : system_info.ipv4_address != 0 ? "IPv4 configured" : "NIC available",
         theme_variant == 0 ? "Ocean blue" : theme_variant == 1 ? "Lagoon teal" : "Violet",
-        notifications_cleared ? "Caught up" : "System status",
-        reduced_motion ? "Reduced" : "Subtle",
+        "Unavailable",
+        reduced_motion ? "Reduced (session)" : "Subtle (session)",
     };
     const uint32_t icons[4] = {
         APP_NETWORK, APP_SETTINGS, APP_NOTIFICATIONS, APP_CONTROL_CENTER,
@@ -1378,78 +1562,69 @@ static void draw_control_center_content(struct vino_window *window) {
     draw_text(left, status_y + 16, "System status", color_text, color_panel_low);
     char uptime[24] = "Uptime: ";
     append_uptime(uptime, sizeof(uptime), sys_gettime());
-    draw_text(left, status_y + 44, uptime, color_muted, color_panel_low);
+    draw_text(left, status_y + 40, uptime, color_muted, color_panel_low);
     char tasks[48] = "Tasks: ";
     char digits[24];
     number_text(system_info.task_count, digits);
-    string_append(tasks, sizeof(tasks), digits);
-    draw_text(left, status_y + 68, tasks, color_muted, color_panel_low);
-    draw_text(left, status_y + 98,
-        system_info.system_volume_letter != 0 ? "Installed system volume mounted"
-                                              : "Live / recovery session",
-        color_cyan, color_panel_low);
+    string_append(tasks, sizeof(tasks), system_info_available ? digits : "unavailable");
+    draw_text(left, status_y + 60, tasks, color_muted, color_panel_low);
+    char memory[64];
+    format_memory_summary(memory);
+    draw_text(left, status_y + 80, memory, color_muted, color_panel_low);
+    const char *volume_status = !system_info_available
+        ? "System volume state unavailable"
+        : system_info.system_volume_letter != 0
+            ? "Installed system volume mounted"
+            : "No installed volume reported";
+    draw_text(left, status_y + 102, volume_status, color_cyan, color_panel_low);
 }
 
 static void draw_notifications_content(struct vino_window *window) {
-    refresh_system_info();
     int32_t left = window->x + 14;
     int32_t top = window->y + WINDOW_TITLE_HEIGHT + 14;
-    uint32_t width = window->width - 28;
-    draw_text(left, top, "Today", color_muted, color_panel_low);
-    draw_text(window->x + (int32_t)window->width - 94, top, "Clear all",
-              color_accent, color_panel_low);
-    if (notifications_cleared) {
-        draw_text(left + 10, top + 58, "You're all caught up.", color_text,
-                  color_panel_low);
-        draw_text(left + 10, top + 84, "System notices will appear here.",
-                  color_muted, color_panel_low);
-        return;
-    }
-
-    const uint32_t card_height = 72;
-    for (uint32_t index = 0; index < 3; ++index) {
-        int32_t y = top + 26 + (int32_t)index * (card_height + 8);
-        struct kos_gui_rect card = { left, y, width, card_height };
-        struct kos_gui_color fill = { 0, 0, 0, 46 };
-        struct kos_gui_color edge = { 255, 255, 255, 10 };
-        (void)vino_gui_glass(card, fill, edge, 12, 0);
-        uint32_t icon = index == 0 ? APP_CONTROL_CENTER
-            : index == 1 ? APP_NETWORK : APP_FILES;
-        draw_app_icon(icon, card.x + 9, card.y + 20, 36, true);
-        if (index == 0) {
-            draw_text(card.x + 56, card.y + 13, "Desktop session", color_text, fill);
-            draw_text(card.x + 56, card.y + 39, "Vino OS Default is running.", color_muted, fill);
-            draw_text(card.x + 56, card.y + 55, "Current session", color_dim, fill);
-        }
-        else if (index == 1) {
-            draw_text(card.x + 56, card.y + 13,
-                system_info.network_available ? "Network interface" : "Network unavailable",
-                color_text, fill);
-            draw_text(card.x + 56, card.y + 39,
-                system_info.ipv4_address != 0 ? "Address configured" : "No address assigned",
-                color_muted, fill);
-            draw_text(card.x + 56, card.y + 55,
-                dhcp_state_name(system_info.dhcp_state), color_dim, fill);
-        }
-        else {
-            draw_text(card.x + 56, card.y + 13, "Storage", color_text, fill);
-            draw_text(card.x + 56, card.y + 39,
-                system_info.system_volume_letter != 0
-                    ? "Installed system volume is mounted" : "No installed system volume",
-                color_muted, fill);
-            draw_text(card.x + 56, card.y + 55, "VFS status", color_dim, fill);
-        }
-    }
+    draw_text(left, top, "Notifications unavailable", color_text, color_panel_low);
+    draw_text(left, top + 34, "No kernel notification service is exposed.",
+              color_muted, color_panel_low);
+    draw_text(left, top + 58, "No demo or placeholder notices are shown.",
+              color_muted, color_panel_low);
 }
 
 static void draw_network_content(struct vino_window *window) {
     refresh_system_info();
     int32_t left = window->x + 22;
+    if (window->height < 220) {
+        int32_t y = window->y + WINDOW_TITLE_HEIGHT + 12;
+        draw_text(left, y, !system_info_available ? "Kernel network API unavailable"
+            : system_info.network_available ? "NIC reported by kernel"
+                                            : "No NIC reported by kernel",
+            system_info_available && system_info.network_available
+                ? color_cyan : color_muted, color_panel_low);
+        char ip[16];
+        format_ipv4(system_info.ipv4_address, ip);
+        draw_text(left, y + 22, system_info.network_available
+            ? (system_info.ipv4_address != 0 ? ip : "IPv4 unassigned")
+            : "IPv4 unavailable", color_text, color_panel_low);
+        draw_text(left, y + 42, dhcp_state_name(system_info.dhcp_state),
+                  color_muted, color_panel_low);
+        int32_t action_y = window->y + (int32_t)window->height - 58;
+        struct kos_gui_rect action = { left + 4, action_y, 164, 34 };
+        draw_box(action, system_info.network_available ? color_panel_high : color_panel_low,
+                 color_dim);
+        draw_text(action.x + 10, action.y + 10,
+            system_info.network_available ? "Request DHCP (C)" : "DHCP unavailable",
+            system_info.network_available ? color_text : color_muted, color_panel_high);
+        draw_text(left + 178, action_y + 10, network_action_message[0] != '\0'
+            ? network_action_message : "R refresh",
+            color_muted, color_panel_low);
+        return;
+    }
     if (window->height < 360) {
         int32_t y = window->y + WINDOW_TITLE_HEIGHT + 12;
-        draw_text(left, y, system_info.network_available
-            ? "Network interface ready" : "No network interface",
-            system_info.network_available ? color_cyan : color_muted, color_panel_low);
+        draw_text(left, y, !system_info_available ? "Kernel network API unavailable"
+            : system_info.network_available ? "NIC reported by kernel"
+                                            : "No NIC reported by kernel",
+            system_info_available && system_info.network_available
+                ? color_cyan : color_muted, color_panel_low);
         y += 22;
         char ip[16], gateway[16], dns[16];
         format_ipv4(system_info.ipv4_address, ip);
@@ -1463,6 +1638,16 @@ static void draw_network_content(struct vino_window *window) {
                   color_muted, color_panel_low);
         draw_text(left, y + 64, dhcp_state_name(system_info.dhcp_state),
                   color_cyan, color_panel_low);
+        int32_t action_y = window->y + (int32_t)window->height - 58;
+        struct kos_gui_rect action = { left + 4, action_y, 164, 34 };
+        draw_box(action, system_info.network_available ? color_panel_high : color_panel_low,
+                 color_dim);
+        draw_text(action.x + 10, action.y + 10,
+            system_info.network_available ? "Request DHCP (C)" : "DHCP unavailable",
+            system_info.network_available ? color_text : color_muted, color_panel_high);
+        draw_text(left + 178, action_y + 10, network_action_message[0] != '\0'
+            ? network_action_message : "R refresh",
+            color_muted, color_panel_low);
         return;
     }
     int32_t y = window->y + WINDOW_TITLE_HEIGHT + 20;
@@ -1473,7 +1658,9 @@ static void draw_network_content(struct vino_window *window) {
         : (struct kos_gui_color){ 232, 151, 133, 0 };
     draw_dot(state.x + 14, state.y + 18, 10, status);
     draw_text(state.x + 34, state.y + 19,
-        system_info.network_available ? "Interface ready" : "No network interface",
+        !system_info_available ? "Kernel network API unavailable"
+            : system_info.network_available ? "NIC reported by kernel"
+                                            : "No NIC reported by kernel",
         color_text, color_panel_high);
     y += 64;
     char ip[16], mask[16], gateway[16], dns[16], mac[18];
@@ -1484,8 +1671,10 @@ static void draw_network_content(struct vino_window *window) {
     format_mac(mac);
     const char *labels[] = { "Device", "Address", "Subnet", "Gateway", "DNS", "Hardware" };
     const char *values[] = {
-        system_info.device_name[0] ? system_info.device_name : "eth0",
-        system_info.network_available ? ip : "-",
+        system_info.network_available && system_info.device_name[0]
+            ? system_info.device_name : "Unavailable",
+        system_info.network_available
+            ? system_info.ipv4_address != 0 ? ip : "Unassigned" : "Unavailable",
         system_info.network_available ? mask : "-",
         system_info.network_available ? gateway : "-",
         system_info.network_available ? dns : "-",
@@ -1500,9 +1689,16 @@ static void draw_network_content(struct vino_window *window) {
     char detail[96] = "DHCP  |  ";
     string_append(detail, sizeof(detail), dhcp_state_name(system_info.dhcp_state));
     draw_text(left + 8, y + 180, detail, color_cyan, color_panel_low);
-    draw_text(left + 8, window->y + (int32_t)window->height - 24,
-              "R refresh status   |   Network settings are read-only in this build",
-              color_muted, color_panel_low);
+    int32_t action_y = window->y + (int32_t)window->height - 58;
+    struct kos_gui_rect action = { left + 4, action_y, 164, 34 };
+    draw_box(action, system_info.network_available ? color_panel_high : color_panel_low,
+             color_dim);
+    draw_text(action.x + 10, action.y + 10,
+        system_info.network_available ? "Request DHCP (C)" : "DHCP unavailable",
+        system_info.network_available ? color_text : color_muted, color_panel_high);
+    draw_text(left + 178, action_y + 10, network_action_message[0] != '\0'
+        ? network_action_message : "R refresh | Wi-Fi toggle unavailable",
+        color_muted, color_panel_low);
 }
 
 static void draw_window(uint32_t app) {
@@ -1516,7 +1712,7 @@ static void draw_window(uint32_t app) {
         visual_window.x, visual_window.y, visual_window.width, visual_window.height,
     };
     struct kos_gui_color edge = (int32_t)app == active_app ? color_accent : color_dim;
-    struct kos_gui_color shadow = { 0, 0, 0, compact_panels ? 110 : 82 };
+    struct kos_gui_color shadow = { 0, 0, 0, strong_window_shadow ? 110 : 82 };
     struct kos_gui_color shadow_border = { 0, 0, 0, 1 };
     (void)vino_gui_glass((struct kos_gui_rect){ x + 8, y + 12,
         bounds.width, bounds.height }, shadow, shadow_border, 20, 30);
@@ -1607,14 +1803,12 @@ static void draw_start_menu(void) {
         draw_dot(search.x + 15, search.y + 13, 5, color_panel_low);
         draw_hline(search.x + 22, search.y + 20, 5, 2, color_muted);
         draw_text(search.x + 36, search.y + 11,
-            menu_search[0] == '\0' ? "Search apps and settings" : menu_search,
+            menu_search[0] == '\0' ? "Search available apps" : menu_search,
             menu_search[0] == '\0' ? color_muted : color_text, color_panel);
     }
 
     if (height >= 100) {
-        draw_text(x + 24, y + 72, "Pinned", color_text, color_panel);
-        draw_text(x + (int32_t)width - 130, y + 72, "All apps  >", color_accent,
-                  color_panel);
+        draw_text(x + 24, y + 72, "Available apps", color_text, color_panel);
     }
     uint32_t visible_apps = 0;
     for (uint32_t app = 0; app < APP_COUNT; ++app)
@@ -1649,8 +1843,6 @@ static void draw_start_menu(void) {
         draw_hline(x + 22, recent_y - 12, width - 44, 1,
                    (struct kos_gui_color){ 255, 255, 255, 20 });
         draw_text(x + 24, recent_y, "Recent", color_text, color_panel);
-        draw_text(x + (int32_t)width - 124, recent_y, "More  >", color_accent,
-                  color_panel);
         uint32_t entries = recent_app_count < 2 ? recent_app_count : 2;
         if (entries == 0) {
             draw_text(x + 28, recent_y + 30, "No recently opened apps",
@@ -1666,12 +1858,17 @@ static void draw_start_menu(void) {
         }
     }
 
-    if (height > 370) {
+    if (height > 150) {
         int32_t footer_y = y + (int32_t)height - 54;
         draw_hline(x + 18, footer_y - 7, width - 36, 1,
                    (struct kos_gui_color){ 255, 255, 255, 20 });
         draw_vino_mark(x + 28, footer_y + 7, 24);
         draw_text(x + 62, footer_y + 11, "Vino OS Default", color_text, color_panel);
+        struct kos_gui_rect power = {
+            x + (int32_t)width - 108, footer_y + 5, 94, 38,
+        };
+        draw_box(power, color_panel_high, color_dim);
+        draw_text(power.x + 20, power.y + 12, "Power", color_text, color_panel_high);
     }
 }
 
@@ -1761,6 +1958,73 @@ static void draw_about(void) {
     draw_text(x + 20, y + 150, "Esc close", color_muted, color_panel);
 }
 
+static void draw_power_dialog(void) {
+    if (power_dialog_state == POWER_DIALOG_CLOSED) return;
+    uint32_t width = surface.width > 484 ? 460 : surface.width - 24;
+    uint32_t height = 220;
+    int32_t x = (int32_t)(surface.width - width) / 2;
+    int32_t y = (int32_t)(surface.height - height) / 2;
+    draw_box((struct kos_gui_rect){ x, y, width, height }, color_panel, color_accent);
+    draw_text(x + 20, y + 18, "POWER OPTIONS", color_cyan, color_panel);
+    if (power_dialog_state == POWER_DIALOG_CHOOSE) {
+        draw_text(x + 20, y + 54, "Choose a kernel power action.", color_text, color_panel);
+        draw_text(x + 20, y + 78, width >= 430
+            ? "The next screen asks for confirmation." : "R restart / S halt",
+                  color_muted, color_panel);
+        struct kos_gui_rect restart, shutdown, cancel;
+        if (width >= 430) {
+            restart = (struct kos_gui_rect){ x + 18, y + 126, 126, 38 };
+            shutdown = (struct kos_gui_rect){ x + 155, y + 126, 126, 38 };
+            cancel = (struct kos_gui_rect){ x + 292, y + 126, 126, 38 };
+        }
+        else {
+            uint32_t button_width = width - 36;
+            restart = (struct kos_gui_rect){ x + 18, y + 96, button_width, 32 };
+            shutdown = (struct kos_gui_rect){ x + 18, y + 136, button_width, 32 };
+            cancel = (struct kos_gui_rect){ x + 18, y + 176, button_width, 32 };
+        }
+        draw_box(restart, color_panel_high, color_dim);
+        draw_box(shutdown, color_panel_high, color_dim);
+        draw_box(cancel, color_panel_low, color_dim);
+        draw_text(restart.x + 16, restart.y + (width >= 430 ? 12 : 9),
+                  "Restart", color_text, color_panel_high);
+        draw_text(shutdown.x + 16, shutdown.y + (width >= 430 ? 12 : 9),
+                  "Halt system", color_text, color_panel_high);
+        draw_text(cancel.x + 16, cancel.y + (width >= 430 ? 12 : 9),
+                  "Cancel", color_text, color_panel_low);
+        if (width >= 430) draw_text(x + 20, y + 184,
+            "Keys: R restart / S halt / Esc cancel",
+                  color_muted, color_panel);
+        return;
+    }
+    bool restart = power_dialog_state == POWER_DIALOG_CONFIRM_RESTART;
+    draw_text(x + 20, y + 54, width >= 430
+        ? (restart ? "Restart Vino OS now?" : "Halt the Vino OS CPU now?")
+        : (restart ? "Restart Vino OS?" : "Halt CPU now?"),
+              color_text, color_panel);
+    draw_text(x + 20, y + 82, restart
+        ? (width >= 430 ? "Kernel restart request after confirmation."
+                        : "Kernel restart request.")
+        : (width >= 430 ? "CPU halt requested; hardware power-off may not occur."
+                        : "CPU halt; power-off not guaranteed."),
+              color_muted, color_panel);
+    uint32_t action_width = width >= 430 ? 126 : (width - 48) / 2;
+    struct kos_gui_rect confirm = {
+        x + (width >= 430 ? 150 : 18), y + 150, action_width, 38,
+    };
+    struct kos_gui_rect cancel = {
+        x + (width >= 430 ? 286 : 30 + action_width), y + 150, action_width, 38,
+    };
+    draw_box(confirm, color_panel_high, color_accent);
+    draw_box(cancel, color_panel_low, color_dim);
+    draw_text(confirm.x + 16, confirm.y + 12, "Confirm", color_text, color_panel_high);
+    draw_text(cancel.x + 16, cancel.y + 12, "Cancel", color_text, color_panel_low);
+    draw_text(x + 20, y + 202, "Enter/Y confirm  |  N/Esc cancel",
+              color_muted, color_panel);
+    if (power_dialog_message[0] != '\0')
+        draw_text(x + 20, y + 122, power_dialog_message, color_cyan, color_panel);
+}
+
 static void render_ui_contents(void) {
     draw_windows();
     draw_taskbar();
@@ -1768,6 +2032,7 @@ static void render_ui_contents(void) {
     draw_context_menu();
     draw_preview();
     draw_about();
+    draw_power_dialog();
     if (move_window_mode) {
         uint32_t overlay_width = surface.width > 440 ? surface.width - 440 : surface.width - 24;
         int32_t overlay_x = surface.width > 440 ? 220 : 12;
@@ -1872,6 +2137,10 @@ static void handle_file_key(char key) {
 }
 
 static void handle_key(char key) {
+    if (power_dialog_state != POWER_DIALOG_CLOSED) {
+        handle_power_dialog_key(key);
+        return;
+    }
     if (about_dialog_open) {
         if (key == 27 || key == '\n') about_dialog_open = false;
         return;
@@ -1882,6 +2151,10 @@ static void handle_key(char key) {
     }
     if (start_menu_open) {
         if (key == 27 || key == 's') set_start_menu(false);
+        else if (key == 'p' || key == 'P') {
+            set_start_menu(false);
+            open_power_dialog();
+        }
         else if (key == 'j' || key == 'k') {
             for (uint32_t attempt = 0; attempt < APP_COUNT; ++attempt) {
                 if (key == 'j') menu_selected = (menu_selected + 1) % APP_COUNT;
@@ -1971,11 +2244,15 @@ static void handle_key(char key) {
             wallpaper_cache_valid = false;
         }
         else if (key == '2') reduced_motion = !reduced_motion;
-        else if (key == '3') compact_panels = !compact_panels;
+        else if (key == '3') strong_window_shadow = !strong_window_shadow;
         return;
     }
     if (active_app == APP_NETWORK && key == 'r') {
         refresh_system_info();
+        return;
+    }
+    if (active_app == APP_NETWORK && key == 'c') {
+        request_network_dhcp();
         return;
     }
     if (active_app == APP_CONTROL_CENTER && key >= '1' && key <= '4') {
@@ -1986,10 +2263,6 @@ static void handle_key(char key) {
         }
         else if (key == '3') open_app(APP_NOTIFICATIONS);
         else reduced_motion = !reduced_motion;
-        return;
-    }
-    if (active_app == APP_NOTIFICATIONS && key == 'c') {
-        notifications_cleared = true;
         return;
     }
     if (key >= '1' && key <= '6') {
@@ -2056,6 +2329,18 @@ static void handle_start_menu_pointer(int32_t x, int32_t y) {
         || y < menu_y || (uint32_t)(y - menu_y) >= height) {
         set_start_menu(false);
         return;
+    }
+    if (height > 150) {
+        struct kos_gui_rect power = {
+            menu_x + (int32_t)width - 108,
+            menu_y + (int32_t)height - 49,
+            94, 38,
+        };
+        if (vino_gui_rect_contains(&power, x, y)) {
+            set_start_menu(false);
+            open_power_dialog();
+            return;
+        }
     }
     uint32_t cell_width = (width - 36) / 4;
     int32_t grid_x = menu_x + 18;
@@ -2168,11 +2453,16 @@ static void handle_window_pointer(uint32_t app, int32_t x, int32_t y,
             }
             else if (y >= body_y + 70 && y < body_y + 100) {
                 char volume = system_info.system_volume_letter;
-                if (volume < 'C' || volume > 'Z') volume = 'D';
-                file_directory[0] = volume;
-                file_directory[1] = ':';
-                file_directory[2] = '/';
-                file_directory[3] = '\0';
+                if (volume >= 'C' && volume <= 'Z') {
+                    file_directory[0] = volume;
+                    file_directory[1] = ':';
+                    file_directory[2] = '/';
+                    file_directory[3] = '\0';
+                }
+                else {
+                    string_copy(file_error, sizeof(file_error),
+                                "Kernel reports no mounted system volume.");
+                }
                 files_reload();
             }
             else if (y >= body_y + 104 && y < body_y + 134) {
@@ -2234,13 +2524,17 @@ static void handle_window_pointer(uint32_t app, int32_t x, int32_t y,
         }
     }
     else if (app == APP_NOTIFICATIONS) {
-        if (y < window->y + WINDOW_TITLE_HEIGHT + 42
-            && x >= window->x + (int32_t)window->width - 100) {
-            notifications_cleared = true;
-        }
+        /* The kernel has no notification service; this view is informational only. */
     }
-    else if (app == APP_NETWORK && y > window->y + (int32_t)window->height - 45) {
-        refresh_system_info();
+    else if (app == APP_NETWORK) {
+        int32_t action_y = window->y + (int32_t)window->height - 58;
+        struct kos_gui_rect action = { window->x + 26, action_y, 164, 34 };
+        if (vino_gui_rect_contains(&action, x, y)) {
+            request_network_dhcp();
+        }
+        else if (y > window->y + (int32_t)window->height - 45) {
+            refresh_system_info();
+        }
     }
 }
 
@@ -2253,6 +2547,12 @@ static void handle_pointer(const struct kos_gui_input_event *event) {
     uint32_t buttons = event->pointer_buttons;
     bool left_pressed = (buttons & 1u) != 0 && (previous_buttons & 1u) == 0;
     bool right_pressed = (buttons & 2u) != 0 && (previous_buttons & 2u) == 0;
+
+    if (power_dialog_state != POWER_DIALOG_CLOSED) {
+        if (left_pressed) handle_power_dialog_pointer(pointer_x, pointer_y);
+        pointer_buttons = buttons;
+        return;
+    }
 
     if (drag_app >= 0 && (buttons & 1u) != 0) {
         struct vino_window *window = &windows[drag_app];
