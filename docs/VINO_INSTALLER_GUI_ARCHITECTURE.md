@@ -178,12 +178,12 @@ of kernel code or a package payload.
 | Demoweb feature | Vino implementation boundary |
 | --- | --- |
 | dark/frosted panels | layered navy/blue panels with cyan accents, borders, and shadow treatment in Default |
-| start menu/taskbar | native user-space desktop, start menu, dock, and launcher shortcuts |
+| start menu/taskbar | native user-space desktop, start menu, full-width bottom bar, dock, and launcher shortcuts |
 | file manager | read-only directory navigation and text preview through VFS file syscalls |
 | terminal | native user-space shell with VFS, uptime, network, and app-launch commands |
 | settings/control center | in-session accent, motion, and panel-density settings |
 | kernel monitor | live network/device snapshot provided by the system-info syscall |
-| focus, minimize, maximize, move | keyboard-driven window manager and focus/selection states |
+| focus, minimize, maximize, move | keyboard-driven window manager and focus/selection states; the current input UAPI exposes keyboard events only, so pointer hover/click is not claimed |
 | Font Awesome icons | future bitmap/icon asset package; no remote web dependency |
 
 The wallpaper PNG and browser-oriented HTML/CSS/JavaScript remain reference
@@ -201,6 +201,17 @@ display service. Its VFS-backed file browser is read-only and supports
 directory navigation and text preview. The terminal runs a small built-in shell and does not forward
 keystrokes to the kernel console. Network details come from a read-only
 `SYS_system_info` snapshot.
+
+Default keeps the Demoweb navy/cyan palette and uses a full-width bottom bar
+with Start, running-app dock indicators, and network status. Window stacking is
+bounded to the four built-in apps, animated content follows its window bounds,
+and the terminal reserves a separate prompt row. Interaction remains
+keyboard-driven (`S`, `C`, `Tab`, `M`, `Z`, `X`, and app shortcuts) until the
+input service exposes pointer events; there is no browser or WebView.
+
+The QEMU reboot integration test supports `--profile plus` to exercise the
+Plus → Default package install → Limine reboot → Default GUI autostart path,
+then exits the GUI and verifies the CLI fallback remains available.
 
 The package builder still emits the manifest, ownership list, per-file hashes,
 ELF entry point, and detached package SHA-256. On boot, the manager reads the

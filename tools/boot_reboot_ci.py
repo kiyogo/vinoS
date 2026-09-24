@@ -99,7 +99,9 @@ def free_tcp_port():
         return listener.getsockname()[1]
 
 
-def run(esp_dir):
+def run(esp_dir, profile="cli"):
+    if profile not in ("cli", "plus"):
+        raise ValueError(f"Unsupported installer profile: {profile}")
     required = (QEMU, OVMF_CODE, OVMF_VARS_TEMPLATE,
                 esp_dir / "EFI" / "BOOT" / "BOOTX64.EFI",
                 esp_dir / "EFI" / "BOOT" / "limine.conf",
@@ -153,11 +155,23 @@ def run(esp_dir):
                     process, 90)
                 time.sleep(1.5)
 
-                print("[QEMU] Launching installer UI and selecting Vino CLI")
+                print(f"[QEMU] Launching installer UI and selecting Vino {profile.upper()}")
                 monitor.type_text("installer ui")
                 monitor.key("ret")
                 time.sleep(0.7)
-                monitor.key("ret")
+                if profile == "plus":
+                    monitor.key("backspace")
+                    time.sleep(0.2)
+                    monitor.key("j")
+                    monitor.key("ret")
+                    wait_for_log(log_path, "Installer: selected profile=plus",
+                                 process, 20)
+                    monitor.key("ret")
+                    wait_for_log(log_path, "Installer: selected gui=default",
+                                 process, 20)
+                    monitor.key("ret")
+                else:
+                    monitor.key("ret")
                 disk_log = wait_for_log(log_path, "Installer: selected disk=",
                                         process, 20)
                 selection = disk_log.rsplit("Installer: selected disk=", 1)[1].splitlines()[0]
@@ -178,6 +192,10 @@ def run(esp_dir):
                 wait_for_log(log_path,
                     "Limine UEFI bootloader committed; Vino OS is bootable in CLI mode.",
                     process, 90)
+                if profile == "plus":
+                    wait_for_log(log_path,
+                        "[installer] GUI 'default' installed under Vino OS edition=default.",
+                        process, 90)
                 time.sleep(1.5)
 
                 print("[QEMU] Detaching installer media and rebooting into the target disk")
@@ -185,10 +203,29 @@ def run(esp_dir):
                 time.sleep(1.0)
                 monitor.key("r")
                 wait_for_log(log_path, "KOS booting...", process, 90, occurrences=2)
-                wait_for_log(log_path,
-                    "Vino CLI ready; open the disk installer with `installer ui`.",
-                    process, 90, occurrences=2)
-                print("[PASS] Limine rebooted from the installed ESP into the Vino CLI shell")
+                if profile == "plus":
+                    wait_for_log(log_path,
+                        "Vino Plus: starting selected GUI 'default'.", process, 90)
+                    wait_for_log(log_path,
+                        "GUI session 1: started 'default' in process", process, 90)
+                    time.sleep(1.0)
+                    post_start_log = log_path.read_text(
+                        encoding="utf-8", errors="replace")
+                    if "GUI session 'default' exited with" in post_start_log:
+                        raise RuntimeError("Default GUI exited during startup")
+                    print("[QEMU] Default GUI started after the installed Vino Plus reboot")
+                    monitor.key("q")
+                    wait_for_log(log_path,
+                        "GUI session 'default' stopped; CLI remains available", process, 30)
+                    wait_for_log(log_path,
+                        "Vino CLI ready; open the disk installer with `installer ui`.",
+                        process, 30, occurrences=2)
+                    print("[PASS] Vino Plus -> Default install -> Limine reboot -> Default GUI -> CLI fallback")
+                else:
+                    wait_for_log(log_path,
+                        "Vino CLI ready; open the disk installer with `installer ui`.",
+                        process, 90, occurrences=2)
+                    print("[PASS] Limine rebooted from the installed ESP into the Vino CLI shell")
                 return True
             finally:
                 if monitor is not None:
@@ -212,9 +249,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--esp-dir", type=Path, default=ROOT / "build" / "esp",
                         help="UEFI installer ESP staged by kos-tool build --installer")
+    parser.add_argument("--profile", choices=("cli", "plus"), default="cli",
+                        help="Installer profile to exercise; plus also checks Default GUI autostart")
     arguments = parser.parse_args()
     try:
-        if not run(arguments.esp_dir.resolve()):
+        if not run(arguments.esp_dir.resolve(), arguments.profile):
             return 1
     except (OSError, RuntimeError, ValueError) as error:
         print(f"[FAIL] {error}")

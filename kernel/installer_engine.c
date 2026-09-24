@@ -71,6 +71,15 @@ static bool make_volume_root(char *destination, uint64_t capacity, char volume,
     return length > 0 && (uint64_t)length < capacity;
 }
 
+static bool make_vino_gui_install_root(char *destination, uint64_t capacity,
+                                       char volume, const char *gui_root) {
+    if (gui_root == NULL || gui_root[0] == '\0') return false;
+    char relative_path[VFS_MAX_PATH];
+    int length = snprintf(relative_path, sizeof(relative_path), "VINO/%s", gui_root);
+    return length > 0 && (uint64_t)length < sizeof(relative_path)
+        && make_volume_root(destination, capacity, volume, relative_path);
+}
+
 static bool path_is_safe_relative(const char *path) {
     if (path == NULL || path[0] == '\0' || path[0] == '/' || path[0] == '\\') {
         return false;
@@ -689,8 +698,8 @@ static int install_recovery_gui_package(char volume) {
     char install_path[VFS_MAX_PATH];
     char data_root[VFS_MAX_PATH];
     char data_path[VFS_MAX_PATH];
-    if (!make_volume_root(install_path, sizeof(install_path), volume,
-                          recovery->install_root)
+    if (!make_vino_gui_install_root(install_path, sizeof(install_path), volume,
+                                    recovery->install_root)
         || !make_volume_root(data_root, sizeof(data_root), volume,
                              "VINO/SYSTEM/GUI/DATA")) {
         return INSTALLER_ERR_IO;
@@ -762,8 +771,8 @@ int install_gui(struct installer_flow *flow, const struct gui_manifest *gui,
     char target_install_path[VFS_MAX_PATH];
     char target_data_root[VFS_MAX_PATH];
     char target_data_path[VFS_MAX_PATH];
-    if (!make_volume_root(target_install_path, sizeof(target_install_path), volume,
-                          gui->install_root)
+    if (!make_vino_gui_install_root(target_install_path, sizeof(target_install_path), volume,
+                                    gui->install_root)
         || !make_volume_root(target_data_root, sizeof(target_data_root), volume,
                              "VINO/SYSTEM/GUI/DATA")) {
         return INSTALLER_FLOW_ERR_INVALID_STATE;
