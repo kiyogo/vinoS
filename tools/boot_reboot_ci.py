@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import socket
 import subprocess
@@ -217,7 +218,7 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         "Vino Plus: starting selected GUI 'default'.", process, 90)
                     wait_for_log(log_path,
                         "GUI session 1: started 'default' in process", process, 90)
-                    time.sleep(1.0)
+                    time.sleep(2.5)
                     post_start_log = log_path.read_text(
                         encoding="utf-8", errors="replace")
                     if "GUI session 'default' exited with" in post_start_log:
@@ -229,7 +230,17 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                     wait_for_log(log_path,
                         "Vino CLI ready; open the disk installer with `installer ui`.",
                         process, 30, occurrences=2)
+                    monitor.type_text("vino gui stats")
+                    monitor.key("ret")
+                    stats_log = wait_for_log(log_path,
+                        "GUI buffers: backbuffer=on wallpaper_cache=on", process, 30)
+                    frame_counts = re.findall(r"GUI frames: redraws=(\d+)", stats_log)
+                    if not frame_counts or int(frame_counts[-1]) > 4:
+                        raise RuntimeError(
+                            "Default GUI kept redrawing while idle; expected at most 4 frames "
+                            f"across startup and the 2.5-second idle window (got {frame_counts})")
                     print("[PASS] Vino Plus -> Default install -> Limine reboot -> Default GUI -> CLI fallback")
+                    print("[PASS] GUI idle redraw bound and backbuffer/wallpaper cache instrumentation")
                     if exercise_gui_manager:
                         print("[QEMU] Exercising GUI inventory, session, restart, and persistent default")
                         monitor.type_text("vino gui list")

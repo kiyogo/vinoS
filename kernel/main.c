@@ -367,6 +367,10 @@ KOS_NORETURN void kernel_main(void) {
         log_error("Kernel heap self-test failed.");
         kernel_halt();
     }
+    if (framebuffer_enable_backbuffer())
+        log_info("Framebuffer backbuffer enabled; GUI frames will be composed before present.");
+    else
+        log_warn("Framebuffer backbuffer unavailable; GUI will use direct rendering fallback.");
     log_info("Four-level virtual memory manager initialized.");
     log_info("Kernel heap self-test and page reclamation passed.");
     log_info("Running bootstrap meminfo command.");

@@ -6,16 +6,29 @@
 
 struct kos_framebuffer {
     volatile uint8_t *address;
+    uint32_t *backbuffer;
+    uint32_t *background_cache;
+    uint32_t *blur_source;
+    uint32_t *blur_horizontal;
     uint64_t width;
     uint64_t height;
     uint64_t pitch;
+    uint64_t backbuffer_bytes;
+    uint64_t background_cache_bytes;
+    uint64_t blur_capacity_bytes;
     uint8_t red_mask_shift;
     uint8_t green_mask_shift;
     uint8_t blue_mask_shift;
     bool initialized;
+    bool frame_active;
+    bool background_cache_valid;
 };
 
 static struct kos_framebuffer framebuffer;
+static volatile uint32_t *framebuffer_row(uint64_t row);
+
+#define FRAMEBUFFER_CACHE_MAX_BYTES (64ull * 1024ull * 1024ull)
+#define FRAMEBUFFER_BLUR_MAX_BYTES (16ull * 1024ull * 1024ull)
 
 static bool channel_mask_is_valid(uint8_t shift, uint8_t size) {
     return size == 8 && shift <= 24;
@@ -30,7 +43,8 @@ bool framebuffer_initialize(const struct limine_framebuffer *source) {
     }
     if (source->width > UINT64_MAX / sizeof(uint32_t)
         || source->pitch < source->width * sizeof(uint32_t)
-        || source->pitch % sizeof(uint32_t) != 0) {
+        || source->pitch % sizeof(uint32_t) != 0
+        || source->height > UINT64_MAX / source->pitch) {
         return false;
     }
     if (!channel_mask_is_valid(source->red_mask_shift, source->red_mask_size)
@@ -60,6 +74,110 @@ bool framebuffer_is_initialized(void) {
     return framebuffer.initialized;
 }
 
+bool framebuffer_enable_backbuffer(void) {
+    if (!framebuffer.initialized) return false;
+    uint64_t bytes = framebuffer.pitch * framebuffer.height;
+    if (bytes == 0 || bytes > FRAMEBUFFER_CACHE_MAX_BYTES) return false;
+    if (framebuffer.backbuffer != 0 && framebuffer.backbuffer_bytes >= bytes) return true;
+    uint32_t *replacement = kmalloc(bytes);
+    if (replacement == 0) return false;
+    if (framebuffer.backbuffer != 0) (void)kfree(framebuffer.backbuffer);
+    framebuffer.backbuffer = replacement;
+    framebuffer.backbuffer_bytes = bytes;
+    return true;
+}
+
+bool framebuffer_backbuffer_available(void) {
+    return framebuffer.initialized && framebuffer.backbuffer != 0;
+}
+
+bool framebuffer_frame_begin(bool preserve_contents) {
+    if (!framebuffer.initialized || framebuffer.frame_active
+        || framebuffer.backbuffer == 0) return false;
+    if (preserve_contents) {
+        for (uint64_t row = 0; row < framebuffer.height; ++row) {
+            volatile uint32_t *source = (volatile uint32_t *)
+                (framebuffer.address + row * framebuffer.pitch);
+            uint32_t *destination = (uint32_t *)((uint8_t *)framebuffer.backbuffer
+                + row * framebuffer.pitch);
+            for (uint64_t column = 0;
+                 column < framebuffer.pitch / sizeof(uint32_t); ++column) {
+                destination[column] = source[column];
+            }
+        }
+    }
+    framebuffer.frame_active = true;
+    return true;
+}
+
+void framebuffer_frame_present(void) {
+    if (!framebuffer.initialized || !framebuffer.frame_active
+        || framebuffer.backbuffer == 0) return;
+    for (uint64_t row = 0; row < framebuffer.height; ++row) {
+        volatile uint32_t *destination = (volatile uint32_t *)
+            (framebuffer.address + row * framebuffer.pitch);
+        const uint32_t *source = (const uint32_t *)((const uint8_t *)framebuffer.backbuffer
+            + row * framebuffer.pitch);
+        for (uint64_t column = 0; column < framebuffer.pitch / sizeof(uint32_t); ++column) {
+            destination[column] = source[column];
+        }
+    }
+    framebuffer.frame_active = false;
+}
+
+void framebuffer_frame_abort(void) {
+    framebuffer.frame_active = false;
+}
+
+static volatile uint32_t *framebuffer_scanout_row(uint64_t row) {
+    return (volatile uint32_t *)(framebuffer.address + row * framebuffer.pitch);
+}
+
+bool framebuffer_background_capture(void) {
+    if (!framebuffer.initialized
+        || framebuffer.width > UINT64_MAX / sizeof(uint32_t)) return false;
+    uint64_t row_bytes = framebuffer.width * sizeof(uint32_t);
+    if (framebuffer.height > UINT64_MAX / row_bytes) return false;
+    uint64_t bytes = row_bytes * framebuffer.height;
+    if (bytes == 0 || bytes > FRAMEBUFFER_CACHE_MAX_BYTES) return false;
+    if (framebuffer.background_cache == 0 || framebuffer.background_cache_bytes < bytes) {
+        uint32_t *replacement = kmalloc(bytes);
+        if (replacement == 0) return false;
+        if (framebuffer.background_cache != 0) (void)kfree(framebuffer.background_cache);
+        framebuffer.background_cache = replacement;
+        framebuffer.background_cache_bytes = bytes;
+    }
+    for (uint64_t row = 0; row < framebuffer.height; ++row) {
+        volatile uint32_t *source = framebuffer_row(row);
+        uint32_t *destination = (uint32_t *)((uint8_t *)framebuffer.background_cache
+            + row * row_bytes);
+        for (uint64_t column = 0; column < framebuffer.width; ++column) {
+            destination[column] = source[column];
+        }
+    }
+    framebuffer.background_cache_valid = true;
+    return true;
+}
+
+bool framebuffer_background_restore(void) {
+    if (!framebuffer.initialized || !framebuffer.background_cache_valid
+        || framebuffer.background_cache == 0) return false;
+    uint64_t row_bytes = framebuffer.width * sizeof(uint32_t);
+    for (uint64_t row = 0; row < framebuffer.height; ++row) {
+        volatile uint32_t *destination = framebuffer_row(row);
+        const uint32_t *source = (const uint32_t *)((const uint8_t *)framebuffer.background_cache
+            + row * row_bytes);
+        for (uint64_t column = 0; column < framebuffer.width; ++column) {
+            destination[column] = source[column];
+        }
+    }
+    return true;
+}
+
+bool framebuffer_background_cache_available(void) {
+    return framebuffer.background_cache_valid;
+}
+
 uint32_t framebuffer_make_color(uint8_t red, uint8_t green, uint8_t blue) {
     if (!framebuffer.initialized) {
         return 0;
@@ -86,7 +204,11 @@ uint64_t framebuffer_virtual_address(void) {
 }
 
 static volatile uint32_t *framebuffer_row(uint64_t row) {
-    return (volatile uint32_t *)(framebuffer.address + row * framebuffer.pitch);
+    if (framebuffer.frame_active && framebuffer.backbuffer != 0) {
+        return (volatile uint32_t *)((uint8_t *)framebuffer.backbuffer
+            + row * framebuffer.pitch);
+    }
+    return framebuffer_scanout_row(row);
 }
 
 static uint8_t pixel_channel(uint32_t pixel, uint8_t shift) {
@@ -164,6 +286,25 @@ static void blur_snapshot(const uint32_t *source, uint32_t *horizontal,
     }
 }
 
+static bool ensure_blur_buffers(uint64_t required_bytes) {
+    if (required_bytes == 0 || required_bytes > FRAMEBUFFER_BLUR_MAX_BYTES) return false;
+    if (framebuffer.blur_source != 0 && framebuffer.blur_horizontal != 0
+        && framebuffer.blur_capacity_bytes >= required_bytes) return true;
+    uint32_t *source = kmalloc(required_bytes);
+    uint32_t *horizontal = kmalloc(required_bytes);
+    if (source == 0 || horizontal == 0) {
+        if (source != 0) (void)kfree(source);
+        if (horizontal != 0) (void)kfree(horizontal);
+        return false;
+    }
+    if (framebuffer.blur_source != 0) (void)kfree(framebuffer.blur_source);
+    if (framebuffer.blur_horizontal != 0) (void)kfree(framebuffer.blur_horizontal);
+    framebuffer.blur_source = source;
+    framebuffer.blur_horizontal = horizontal;
+    framebuffer.blur_capacity_bytes = required_bytes;
+    return true;
+}
+
 void framebuffer_glass_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t height,
                             uint64_t radius, uint64_t blur_radius,
                             uint8_t red, uint8_t green, uint8_t blue, uint8_t alpha,
@@ -177,30 +318,21 @@ void framebuffer_glass_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t hei
     if (radius > height / 2) radius = height / 2;
     if (blur_radius > 30) blur_radius = 30;
 
+    if (width > UINT64_MAX / height) return;
     uint64_t area = width * height;
-    bool area_valid = height == 0 || area / height == width;
-    uint64_t buffer_bytes = area_valid && area <= UINT64_MAX / sizeof(uint32_t)
-        ? area * sizeof(uint32_t) : UINT64_MAX;
-    uint32_t *source = 0;
-    uint32_t *horizontal = 0;
-    if (blur_radius != 0 && buffer_bytes <= 16u * 1024u * 1024u) {
-        source = kmalloc(buffer_bytes);
-        horizontal = kmalloc(buffer_bytes);
-        if (source != 0 && horizontal != 0) {
-            for (uint64_t row = 0; row < height; ++row) {
-                volatile uint32_t *pixels = framebuffer_row(y + row) + x;
-                for (uint64_t column = 0; column < width; ++column) {
-                    source[row * width + column] = pixels[column];
-                }
+    if (area > UINT64_MAX / sizeof(uint32_t)) return;
+    uint64_t buffer_bytes = area * sizeof(uint32_t);
+    bool blurred = blur_radius != 0 && ensure_blur_buffers(buffer_bytes);
+    uint32_t *source = blurred ? framebuffer.blur_source : 0;
+    uint32_t *horizontal = blurred ? framebuffer.blur_horizontal : 0;
+    if (blurred) {
+        for (uint64_t row = 0; row < height; ++row) {
+            volatile uint32_t *pixels = framebuffer_row(y + row) + x;
+            for (uint64_t column = 0; column < width; ++column) {
+                source[row * width + column] = pixels[column];
             }
-            blur_snapshot(source, horizontal, width, height, blur_radius);
         }
-        else {
-            if (source != 0) (void)kfree(source);
-            if (horizontal != 0) (void)kfree(horizontal);
-            source = 0;
-            horizontal = 0;
-        }
+        blur_snapshot(source, horizontal, width, height, blur_radius);
     }
 
     for (uint64_t column = 0; column < width; ++column) {
@@ -271,8 +403,6 @@ void framebuffer_glass_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t hei
             }
         }
     }
-    if (source != 0) (void)kfree(source);
-    if (horizontal != 0) (void)kfree(horizontal);
 }
 
 void framebuffer_fill_rect(uint64_t x, uint64_t y, uint64_t width, uint64_t height, uint32_t color) {

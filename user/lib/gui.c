@@ -42,6 +42,36 @@ long vino_gui_surface_get(struct kos_gui_surface *surface) {
                          (uint64_t)surface);
 }
 
+static long display_simple_operation(uint32_t operation, uint32_t flags) {
+    struct kos_gui_display_request request = { .operation = operation, .flags = flags };
+    return display_request(&request);
+}
+
+long vino_gui_frame_begin(bool discard_previous) {
+    return display_simple_operation(KOS_GUI_DISPLAY_BEGIN_FRAME,
+        discard_previous ? KOS_GUI_FRAME_DISCARD_PREVIOUS : 0);
+}
+
+long vino_gui_frame_present(void) {
+    return display_simple_operation(KOS_GUI_DISPLAY_PRESENT_FRAME, 0);
+}
+
+long vino_gui_background_capture(void) {
+    return display_simple_operation(KOS_GUI_DISPLAY_BACKGROUND_CAPTURE, 0);
+}
+
+long vino_gui_background_restore(void) {
+    return display_simple_operation(KOS_GUI_DISPLAY_BACKGROUND_RESTORE, 0);
+}
+
+long vino_gui_frame_stats_get(struct kos_gui_frame_stats *stats) {
+    if (stats == NULL) return -1;
+    stats->abi_version = KOS_GUI_ABI_VERSION;
+    stats->struct_size = sizeof(*stats);
+    return vino_syscall2(SYS_gui_display, KOS_GUI_DISPLAY_GET_FRAME_STATS,
+                         (uint64_t)stats);
+}
+
 long vino_gui_clear(struct kos_gui_color color) {
     struct kos_gui_display_request request = {
         .operation = KOS_GUI_DISPLAY_CLEAR,

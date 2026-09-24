@@ -8,6 +8,14 @@
 
 bool framebuffer_initialize(const struct limine_framebuffer *framebuffer);
 bool framebuffer_is_initialized(void);
+bool framebuffer_enable_backbuffer(void);
+bool framebuffer_backbuffer_available(void);
+bool framebuffer_frame_begin(bool preserve_contents);
+void framebuffer_frame_present(void);
+void framebuffer_frame_abort(void);
+bool framebuffer_background_capture(void);
+bool framebuffer_background_restore(void);
+bool framebuffer_background_cache_available(void);
 uint32_t framebuffer_make_color(uint8_t red, uint8_t green, uint8_t blue);
 uint64_t framebuffer_width(void);
 uint64_t framebuffer_height(void);

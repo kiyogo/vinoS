@@ -59,6 +59,7 @@
 #include <kos/installer.h>
 #include <kos/installer_storage.h>
 #include <kos/gui_manager.h>
+#include <kos/gui_service.h>
 #include <kos/installer_flow.h>
 #include <kos/installer_ui.h>
 #include <kos/qa.h>
@@ -5325,7 +5326,26 @@ static void command_gui(const char *arguments) {
     char id[GUI_MAX_ID_LENGTH];
     const char *cursor = command_next_token(arguments, operation, sizeof(operation));
     if (cursor == NULL || operation[0] == '\0') {
-        log_info("Usage: vino gui list|installed|available|get-default|install <id>|remove <id>|reinstall <id>|start <id>|stop <id>|restart <id>|set-default <id>|status <id>");
+        log_info("Usage: vino gui list|installed|available|stats|get-default|install <id>|remove <id>|reinstall <id>|start <id>|stop <id>|restart <id>|set-default <id>|status <id>");
+        return;
+    }
+    if (kstrcmp(operation, "stats") == 0) {
+        struct kos_gui_frame_stats stats = {0};
+        gui_service_frame_stats_snapshot(&stats);
+        uint64_t average_ms = stats.redraw_count == 0 ? 0
+            : stats.total_frame_duration_ms / stats.redraw_count;
+        log_infof("GUI frames: redraws=%llu draw_ops=%llu last_ops=%llu",
+            (unsigned long long)stats.redraw_count,
+            (unsigned long long)stats.draw_operation_count,
+            (unsigned long long)stats.last_frame_draw_operations);
+        log_infof("GUI frame time (ms): last=%llu average=%llu max=%llu aborted=%llu",
+            (unsigned long long)stats.last_frame_duration_ms,
+            (unsigned long long)average_ms,
+            (unsigned long long)stats.max_frame_duration_ms,
+            (unsigned long long)stats.aborted_frame_count);
+        log_infof("GUI buffers: backbuffer=%s wallpaper_cache=%s",
+            stats.backbuffer_enabled ? "on" : "off (direct fallback)",
+            stats.background_cache_enabled ? "on" : "not captured");
         return;
     }
     if (kstrcmp(operation, "list") == 0) {
@@ -5402,7 +5422,7 @@ static void command_gui(const char *arguments) {
     }
     cursor = command_next_token(cursor, id, sizeof(id));
     if (cursor == NULL || id[0] == '\0') {
-        log_info("Usage: gui <operation> <id>");
+        log_info("Usage: gui <operation> <id> (or gui stats)");
         return;
     }
 
@@ -5416,7 +5436,7 @@ static void command_gui(const char *arguments) {
     else if (kstrcmp(operation, "restart") == 0) status = gui_restart(id);
     else if (kstrcmp(operation, "set-default") == 0) status = gui_set_default(id);
     else {
-        log_info("Usage: vino gui list|installed|available|get-default|install <id>|remove <id>|reinstall <id>|start <id>|stop <id>|restart <id>|set-default <id>|status <id>");
+        log_info("Usage: vino gui list|installed|available|stats|get-default|install <id>|remove <id>|reinstall <id>|start <id>|stop <id>|restart <id>|set-default <id>|status <id>");
         return;
     }
     if (status == GUI_MANAGER_OK) log_infof("gui %s %s: OK", operation, id);
@@ -5427,7 +5447,7 @@ static void command_vino(const char *arguments) {
     char component[24];
     const char *cursor = command_next_token(arguments, component, sizeof(component));
     if (cursor == NULL || kstrcmp(component, "gui") != 0) {
-        log_info("Usage: vino gui [list|installed|available|install|remove|reinstall|start|stop|restart|set-default|get-default|status] <id>");
+        log_info("Usage: vino gui [list|installed|available|stats|install|remove|reinstall|start|stop|restart|set-default|get-default|status] <id>");
         return;
     }
     command_gui(cursor);

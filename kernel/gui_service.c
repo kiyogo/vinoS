@@ -11,8 +11,25 @@
 #include <uapi/kos/gui.h>
 #include <uapi/kos/syscall_numbers.h>
 
+static struct kos_gui_frame_stats frame_stats = {
+    .abi_version = KOS_GUI_ABI_VERSION,
+    .struct_size = sizeof(struct kos_gui_frame_stats),
+};
+static bool frame_open;
+static bool frame_buffered;
+static uint64_t frame_started_ms;
+static uint64_t frame_draw_operations;
+
 static struct gui_color canvas_color(struct kos_gui_color color) {
     return (struct gui_color){ color.red, color.green, color.blue, color.alpha };
+}
+
+static void record_draw_operation(void) {
+    if (frame_open && frame_draw_operations != UINT64_MAX) ++frame_draw_operations;
+}
+
+static void saturating_increment(uint64_t *value) {
+    if (*value != UINT64_MAX) ++*value;
 }
 
 static bool valid_rect(const struct kos_gui_rect *rect) {
@@ -42,8 +59,27 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
         surface.bits_per_pixel = 32;
         surface.pixel_format = KOS_GUI_PIXEL_FORMAT_RGB32;
         surface.capabilities = mouse_is_initialized() ? KOS_GUI_SURFACE_POINTER : 0;
+        if (framebuffer_backbuffer_available())
+            surface.capabilities |= KOS_GUI_SURFACE_BACKBUFFER;
         mouse_set_bounds(surface.width, surface.height);
         return copy_to_user((void *)user_request, &surface, sizeof(surface)) == 0
+            ? 0 : (uint64_t)-EFAULT;
+    }
+
+    if (operation == KOS_GUI_DISPLAY_GET_FRAME_STATS) {
+        struct kos_gui_frame_stats requested;
+        if (!access_ok((const void *)user_request, sizeof(requested))
+            || copy_from_user(&requested, (const void *)user_request,
+                              sizeof(requested)) != 0) return (uint64_t)-EFAULT;
+        if (requested.abi_version != KOS_GUI_ABI_VERSION
+            || requested.struct_size < sizeof(requested)) return (uint64_t)-EINVAL;
+        struct kos_gui_frame_stats snapshot = frame_stats;
+        snapshot.abi_version = KOS_GUI_ABI_VERSION;
+        snapshot.struct_size = sizeof(snapshot);
+        snapshot.backbuffer_enabled = framebuffer_backbuffer_available() ? 1u : 0u;
+        snapshot.background_cache_enabled =
+            framebuffer_background_cache_available() ? 1u : 0u;
+        return copy_to_user((void *)user_request, &snapshot, sizeof(snapshot)) == 0
             ? 0 : (uint64_t)-EFAULT;
     }
 
@@ -55,22 +91,27 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
     if (request.abi_version != KOS_GUI_ABI_VERSION || request.operation != operation) {
         return (uint64_t)-EINVAL;
     }
+    if (operation != KOS_GUI_DISPLAY_BEGIN_FRAME && request.flags != 0)
+        return (uint64_t)-EINVAL;
 
     struct gui_color color = canvas_color(request.color);
     switch (operation) {
         case KOS_GUI_DISPLAY_CLEAR:
             gui_canvas_clear(color);
+            record_draw_operation();
             return 0;
         case KOS_GUI_DISPLAY_FILL_RECT:
             if (!valid_rect(&request.rect)) return (uint64_t)-EINVAL;
             gui_canvas_fill((struct gui_rect){ (uint64_t)request.rect.x,
                 (uint64_t)request.rect.y, request.rect.width, request.rect.height }, color);
+            record_draw_operation();
             return 0;
         case KOS_GUI_DISPLAY_BORDER_RECT:
             if (!valid_rect(&request.rect)) return (uint64_t)-EINVAL;
             gui_canvas_border((struct gui_rect){ (uint64_t)request.rect.x,
                 (uint64_t)request.rect.y, request.rect.width, request.rect.height },
                 1, color);
+            record_draw_operation();
             return 0;
         case KOS_GUI_DISPLAY_GLASS_RECT:
             if (!valid_rect(&request.rect) || request.radius > 64
@@ -83,6 +124,7 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
                     request.color.blue, request.color.alpha },
                 (struct gui_color){ request.foreground.red, request.foreground.green,
                     request.foreground.blue, request.foreground.alpha });
+            record_draw_operation();
             return 0;
         case KOS_GUI_DISPLAY_DRAW_TEXT:
         case KOS_GUI_DISPLAY_DRAW_TEXT_TRANSPARENT: {
@@ -109,11 +151,73 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
                     request.text, request.scale, canvas_color(request.foreground),
                     canvas_color(request.background));
             }
+            record_draw_operation();
             return 0;
         }
+        case KOS_GUI_DISPLAY_BEGIN_FRAME:
+            if (frame_open) return (uint64_t)-EBUSY;
+            if ((request.flags & ~KOS_GUI_FRAME_DISCARD_PREVIOUS) != 0)
+                return (uint64_t)-EINVAL;
+            frame_started_ms = timer_get_uptime_ms();
+            frame_buffered = framebuffer_backbuffer_available();
+            if (frame_buffered && !framebuffer_frame_begin(
+                    (request.flags & KOS_GUI_FRAME_DISCARD_PREVIOUS) == 0)) {
+                frame_buffered = false;
+                return (uint64_t)-EBUSY;
+            }
+            frame_open = true;
+            frame_draw_operations = 0;
+            return 0;
+        case KOS_GUI_DISPLAY_PRESENT_FRAME: {
+            if (!frame_open) return (uint64_t)-EINVAL;
+            if (frame_buffered) framebuffer_frame_present();
+            uint64_t now = timer_get_uptime_ms();
+            uint64_t duration = now >= frame_started_ms ? now - frame_started_ms : 0;
+            saturating_increment(&frame_stats.redraw_count);
+            if (UINT64_MAX - frame_stats.draw_operation_count < frame_draw_operations)
+                frame_stats.draw_operation_count = UINT64_MAX;
+            else frame_stats.draw_operation_count += frame_draw_operations;
+            frame_stats.last_frame_draw_operations = frame_draw_operations;
+            frame_stats.last_frame_duration_ms = duration;
+            if (UINT64_MAX - frame_stats.total_frame_duration_ms < duration)
+                frame_stats.total_frame_duration_ms = UINT64_MAX;
+            else frame_stats.total_frame_duration_ms += duration;
+            if (duration > frame_stats.max_frame_duration_ms)
+                frame_stats.max_frame_duration_ms = duration;
+            frame_stats.backbuffer_enabled = framebuffer_backbuffer_available() ? 1u : 0u;
+            frame_stats.background_cache_enabled =
+                framebuffer_background_cache_available() ? 1u : 0u;
+            frame_open = false;
+            frame_buffered = false;
+            return 0;
+        }
+        case KOS_GUI_DISPLAY_BACKGROUND_CAPTURE:
+            if (!frame_open) return (uint64_t)-EINVAL;
+            return framebuffer_background_capture() ? 0 : (uint64_t)-ENOMEM;
+        case KOS_GUI_DISPLAY_BACKGROUND_RESTORE:
+            if (!frame_open) return (uint64_t)-EINVAL;
+            return framebuffer_background_restore() ? 0 : (uint64_t)-ENOENT;
         default:
             return (uint64_t)-EINVAL;
     }
+}
+
+void gui_service_abort_frame(void) {
+    framebuffer_frame_abort();
+    if (frame_open) saturating_increment(&frame_stats.aborted_frame_count);
+    frame_open = false;
+    frame_buffered = false;
+    frame_draw_operations = 0;
+}
+
+void gui_service_frame_stats_snapshot(struct kos_gui_frame_stats *stats) {
+    if (stats == 0) return;
+    *stats = frame_stats;
+    stats->abi_version = KOS_GUI_ABI_VERSION;
+    stats->struct_size = sizeof(*stats);
+    stats->backbuffer_enabled = framebuffer_backbuffer_available() ? 1u : 0u;
+    stats->background_cache_enabled =
+        framebuffer_background_cache_available() ? 1u : 0u;
 }
 
 uint64_t gui_service_input(uint64_t user_event) {

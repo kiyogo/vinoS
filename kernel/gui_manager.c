@@ -6,6 +6,7 @@
 #include <kos/ramdisk.h>
 #endif
 #include <kos/gui_manager.h>
+#include <kos/gui_service.h>
 #include <kos/gui_repository.h>
 #include <kos/heap.h>
 #include <kos/installer.h>
@@ -841,6 +842,7 @@ int gui_start(const char *id) {
             return kstrcmp(active_gui_session.gui_id, id) == 0
                 ? GUI_MANAGER_OK : GUI_MANAGER_ERR_BUSY;
         int exit_code = active_gui_process->exit_code;
+        gui_service_abort_frame();
         if (process_wait(active_gui_process, 0, 0)) active_gui_process = 0;
         active_gui_session.state = exit_code == 0 ? GUI_SESSION_STOPPED : GUI_SESSION_CRASHED;
         active_gui_session.last_error = exit_code;
@@ -872,10 +874,12 @@ int gui_start(const char *id) {
 
     int exit_code = 0;
     if (!process_wait(process, &exit_code, UINT64_MAX)) {
+        gui_service_abort_frame();
         active_gui_session.state = GUI_SESSION_FAILED;
         active_gui_session.last_error = -EIO;
         return GUI_MANAGER_ERR_IO;
     }
+    gui_service_abort_frame();
     active_gui_process = 0;
     active_gui_session.state = exit_code == 0 ? GUI_SESSION_STOPPED : GUI_SESSION_CRASHED;
     active_gui_session.last_error = exit_code;
@@ -915,6 +919,7 @@ int gui_stop(const char *id) {
     int exit_code = 0;
     if (!process_wait(active_gui_process, &exit_code, UINT64_MAX))
         return GUI_MANAGER_ERR_IO;
+    gui_service_abort_frame();
     active_gui_process = 0;
     active_gui_session.state = GUI_SESSION_STOPPED;
     active_gui_session.last_error = 0;

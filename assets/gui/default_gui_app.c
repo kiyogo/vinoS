@@ -95,7 +95,10 @@ static int32_t context_menu_x;
 static int32_t context_menu_y;
 static uint32_t file_last_clicked = UINT32_MAX;
 static uint64_t file_last_click_ms;
-static uint64_t last_redraw_ms;
+static uint64_t last_state_poll_second;
+static uint64_t displayed_uptime_minute;
+static bool wallpaper_cache_valid;
+static bool handler_rendered_current_input;
 static uint32_t animation_frame;
 static char text_scratch[KOS_GUI_TEXT_MAX];
 
@@ -288,10 +291,31 @@ static const char *dhcp_state_name(uint32_t state) {
     }
 }
 
-static void refresh_system_info(void) {
+static bool system_info_visual_equal(const struct kos_system_info *left,
+                                    const struct kos_system_info *right) {
+    if (left->network_available != right->network_available
+        || left->configuration_source != right->configuration_source
+        || left->dhcp_state != right->dhcp_state
+        || left->ipv4_address != right->ipv4_address
+        || left->subnet_mask != right->subnet_mask
+        || left->gateway != right->gateway
+        || left->dns_server != right->dns_server
+        || left->system_volume_letter != right->system_volume_letter) return false;
+    for (uint32_t index = 0; index < sizeof(left->mac_address); ++index) {
+        if (left->mac_address[index] != right->mac_address[index]) return false;
+    }
+    for (uint32_t index = 0; index < sizeof(left->device_name); ++index) {
+        if (left->device_name[index] != right->device_name[index]) return false;
+    }
+    return true;
+}
+
+static bool refresh_system_info(void) {
+    struct kos_system_info previous = system_info;
     if (vino_system_info_get(&system_info) < 0) {
         system_info.network_available = 0;
     }
+    return !system_info_visual_equal(&previous, &system_info);
 }
 
 static bool path_exists(const char *path, uint32_t expected_type) {
@@ -1228,8 +1252,7 @@ static void draw_pointer(void) {
     }
 }
 
-static void render_ui(void) {
-    draw_wallpaper();
+static void render_ui_contents(void) {
     draw_desktop_icons();
     draw_windows();
     draw_top_bar();
@@ -1249,10 +1272,21 @@ static void render_ui(void) {
     draw_pointer();
 }
 
+static void render_ui(void) {
+    (void)vino_gui_frame_begin(true);
+    if (!wallpaper_cache_valid || vino_gui_background_restore() < 0) {
+        draw_wallpaper();
+        wallpaper_cache_valid = vino_gui_background_capture() == 0;
+    }
+    render_ui_contents();
+    (void)vino_gui_frame_present();
+}
+
 static void animate_menu(bool opening) {
     if (reduced_motion) {
         menu_animation_step = opening ? 4 : 0;
         render_ui();
+        handler_rendered_current_input = true;
         return;
     }
     while ((opening && menu_animation_step < 4)
@@ -1260,8 +1294,9 @@ static void animate_menu(bool opening) {
         if (opening) ++menu_animation_step;
         else --menu_animation_step;
         render_ui();
-        (void)sys_sleep(14);
+        (void)sys_sleep(16);
     }
+    handler_rendered_current_input = true;
 }
 
 static void set_start_menu(bool open) {
@@ -1401,6 +1436,7 @@ static void handle_key(char key) {
         if (key == '1') {
             theme_variant = (theme_variant + 1) % 3;
             color_set_accent(theme_variant);
+            wallpaper_cache_valid = false;
         }
         else if (key == '2') reduced_motion = !reduced_motion;
         else if (key == '3') compact_panels = !compact_panels;
@@ -1706,7 +1742,9 @@ __attribute__((noreturn)) void _start(void) {
     pointer_available = (surface.capabilities & KOS_GUI_SURFACE_POINTER) != 0;
     pointer_x = (int32_t)(surface.width / 2);
     pointer_y = (int32_t)(surface.height / 2);
-    refresh_system_info();
+    (void)refresh_system_info();
+    last_state_poll_second = sys_gettime();
+    displayed_uptime_minute = last_state_poll_second / 60;
     initialize_paths();
     terminal_init();
     file_entry_count = 0;
@@ -1716,22 +1754,34 @@ __attribute__((noreturn)) void _start(void) {
         struct kos_gui_input_event event = { .abi_version = KOS_GUI_ABI_VERSION };
         if (vino_gui_input_read(&event) == 0
             && (event.type == KOS_GUI_INPUT_KEY || event.type == KOS_GUI_INPUT_POINTER)) {
-            if (event.type == KOS_GUI_INPUT_KEY) handle_key((char)event.key);
-            else handle_pointer(&event);
-            if (animation_frame != 0) --animation_frame;
-            render_ui();
-            if (animation_frame != 0) {
-                (void)sys_sleep(14);
-                --animation_frame;
-                render_ui();
+            bool input_changed = true;
+            if (event.type == KOS_GUI_INPUT_POINTER) {
+                input_changed = event.pointer_x != pointer_x || event.pointer_y != pointer_y
+                    || event.pointer_buttons != pointer_buttons || event.pointer_wheel != 0;
             }
-            last_redraw_ms = sys_gettime() * 1000;
+            if (input_changed) {
+                handler_rendered_current_input = false;
+                if (event.type == KOS_GUI_INPUT_KEY) handle_key((char)event.key);
+                else handle_pointer(&event);
+                if (!handler_rendered_current_input || animation_frame != 0)
+                    render_ui();
+                while (animation_frame != 0) {
+                    --animation_frame;
+                    (void)sys_sleep(16);
+                    render_ui();
+                }
+                handler_rendered_current_input = false;
+            }
         }
-        uint64_t now = sys_gettime() * 1000;
-        if (now - last_redraw_ms >= (reduced_motion ? 1000 : 250)) {
-            refresh_system_info();
-            render_ui();
-            last_redraw_ms = now;
+        uint64_t now = sys_gettime();
+        if (now - last_state_poll_second >= 1) {
+            bool state_changed = refresh_system_info();
+            bool uptime_changed = now / 60 != displayed_uptime_minute;
+            last_state_poll_second = now;
+            if (state_changed || uptime_changed) {
+                render_ui();
+                displayed_uptime_minute = now / 60;
+            }
         }
         (void)sys_sleep(24);
     }

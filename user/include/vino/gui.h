@@ -55,6 +55,11 @@ struct vino_gui_progress_bar {
 };
 
 long vino_gui_surface_get(struct kos_gui_surface *surface);
+long vino_gui_frame_begin(bool discard_previous);
+long vino_gui_frame_present(void);
+long vino_gui_background_capture(void);
+long vino_gui_background_restore(void);
+long vino_gui_frame_stats_get(struct kos_gui_frame_stats *stats);
 long vino_gui_clear(struct kos_gui_color color);
 long vino_gui_fill(struct kos_gui_rect rect, struct kos_gui_color color);
 long vino_gui_border(struct kos_gui_rect rect, struct kos_gui_color color);
