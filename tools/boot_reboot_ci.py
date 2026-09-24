@@ -344,10 +344,10 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         actual_dimensions = ppm_dimensions(screenshot_path)
                         expected_dimensions = (resolution_width, resolution_height)
                         if actual_dimensions != expected_dimensions:
-                            screenshot_path.unlink(missing_ok=True)
                             raise RuntimeError(
                                 f"Requested GUI resolution {expected_dimensions}, "
-                                f"but QEMU captured {actual_dimensions}")
+                                f"but QEMU captured {actual_dimensions}; screenshot preserved at "
+                                f"{screenshot_path}")
                         print(f"[PASS] Desktop screenshot {actual_dimensions[0]}x"
                               f"{actual_dimensions[1]} saved to {screenshot_path}")
                     if leave_running:
