@@ -21,6 +21,11 @@ enum gui_manager_status {
 };
 
 bool gui_manager_init(void);
+#ifdef KOS_CI_SMOKE
+bool gui_manager_package_test_prepare(void);
+bool gui_manager_package_test_preflight(void);
+bool gui_manager_package_self_test(void);
+#endif
 char gui_manager_system_volume_letter(void);
 bool gui_manager_should_autostart_selected(void);
 int gui_manager_start_selected_with_fallback(void);

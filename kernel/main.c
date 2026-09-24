@@ -524,6 +524,15 @@ KOS_NORETURN void kernel_main(void) {
 #ifdef KOS_INSTALLER
     log_info("Vino CLI ready; open the disk installer with `installer ui`.");
 #elif defined(KOS_CI_SMOKE)
+    if (!gui_manager_package_test_prepare()
+        || !gui_manager_package_test_preflight()
+        || !kernel_command_execute("vino gui install default")
+        || !kernel_command_execute("vino gui install mvp")
+        || !gui_manager_package_self_test()) {
+        log_error("[CI SMOKE] GUI local package install/namespace gate failed.");
+        kernel_halt();
+    }
+    log_info("[CI SMOKE] PASS: Default and MVP KPKG install commands completed.");
     (void)kernel_command_execute("sockettest");
     (void)kernel_command_execute("syscalltest");
     (void)kernel_command_execute("filetest");

@@ -1,6 +1,10 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <kos/block_cache.h>
+#ifdef KOS_CI_SMOKE
+#include <kos/fat32.h>
+#include <kos/ramdisk.h>
+#endif
 #include <kos/gui_manager.h>
 #include <kos/gui_repository.h>
 #include <kos/heap.h>
@@ -63,6 +67,11 @@ static char active_gui_entry_path[GUI_MAX_PATH_LENGTH];
 static uint32_t next_gui_session_id = 1;
 static char persistent_volume_letter;
 static bool recovery_default_requested;
+#ifdef KOS_CI_SMOKE
+static struct block_device *package_test_disk;
+static char package_test_volume;
+static bool package_test_volume_mounted;
+#endif
 
 static bool find_installed_vino_volume(char *letter_out);
 
@@ -204,6 +213,147 @@ static bool selected_gui_is(const char *id) {
     return read_selected_gui_id(selected_id) && kstrcmp(selected_id, id) == 0;
 }
 
+#ifdef KOS_CI_SMOKE
+static bool vfs_file_has_line(const char *path, const char *line) {
+    const uint8_t *data = NULL;
+    uint64_t size = 0;
+    if (path == NULL || line == NULL || !vfs_read_file(path, &data, &size)
+        || data == NULL) return false;
+    bool found = buffer_has_line(data, size, line);
+    if (size != 0) kfree((void *)data);
+    return found;
+}
+
+static bool vfs_file_has_line_suffix(const char *path, const char *suffix) {
+    const uint8_t *data = NULL;
+    uint64_t size = 0;
+    if (path == NULL || suffix == NULL || suffix[0] == '\0'
+        || !vfs_read_file(path, &data, &size) || data == NULL) return false;
+    uint64_t suffix_size = kstrlen(suffix);
+    bool found = false;
+    uint64_t line_start = 0;
+    for (uint64_t index = 0; index <= size; ++index) {
+        if (index != size && data[index] != '\n') continue;
+        uint64_t line_end = index;
+        if (line_end > line_start && data[line_end - 1] == '\r') --line_end;
+        if (line_end - line_start >= suffix_size
+            && kmemcmp(data + line_end - suffix_size, suffix, suffix_size) == 0) {
+            found = true;
+            break;
+        }
+        line_start = index + 1;
+    }
+    if (size != 0) kfree((void *)data);
+    return found;
+}
+
+static bool installed_gui_package_matches(const struct gui_manifest *manifest) {
+    if (manifest == NULL) return false;
+    struct pkg_record *record = pkg_db_find(manifest->package_app_id);
+    if (record == NULL) return false;
+
+    char volume = 0;
+    char expected_root[GUI_MAX_PATH_LENGTH];
+    if (!find_installed_vino_volume(&volume)) return false;
+    int root_size = snprintf(expected_root, sizeof(expected_root), "%c:/VINO/%s",
+                             volume, manifest->install_root);
+    if (root_size <= 0 || (uint64_t)root_size >= sizeof(expected_root)
+        || kstrcmp(record->install_path, expected_root) != 0
+        || kstrcmp(record->entry_point, manifest->entry_point) != 0
+        || kstrcmp(record->version, manifest->version) != 0) return false;
+
+    char entry_path[GUI_MAX_PATH_LENGTH * 2];
+    char metadata_path[GUI_MAX_PATH_LENGTH * 2];
+    char ownership_path[GUI_MAX_PATH_LENGTH * 2];
+    char checksums_path[GUI_MAX_PATH_LENGTH * 2];
+    int entry_size = snprintf(entry_path, sizeof(entry_path), "%s/%s",
+                              expected_root, manifest->entry_point);
+    int metadata_size = snprintf(metadata_path, sizeof(metadata_path),
+                                 "%s/share/GUI.MANIFEST", expected_root);
+    int ownership_size = snprintf(ownership_path, sizeof(ownership_path),
+                                  "%s/share/OWNERSHIP.TXT", expected_root);
+    int checksums_size = snprintf(checksums_path, sizeof(checksums_path),
+                                  "%s/share/SHA256SUMS.TXT", expected_root);
+    if (entry_size <= 0 || (uint64_t)entry_size >= sizeof(entry_path)
+        || metadata_size <= 0 || (uint64_t)metadata_size >= sizeof(metadata_path)
+        || ownership_size <= 0 || (uint64_t)ownership_size >= sizeof(ownership_path)
+        || checksums_size <= 0 || (uint64_t)checksums_size >= sizeof(checksums_path)) {
+        return false;
+    }
+
+    const uint8_t *elf = NULL;
+    uint64_t elf_size = 0;
+    bool elf_valid = vfs_read_file(entry_path, &elf, &elf_size) && elf != NULL
+        && elf_size >= 64 && elf[0] == 0x7F && elf[1] == 'E'
+        && elf[2] == 'L' && elf[3] == 'F' && elf[4] == 2 && elf[5] == 1;
+    if (elf_valid) {
+        uint16_t elf_type = 0;
+        uint16_t elf_machine = 0;
+        uint64_t elf_entry = 0;
+        kmemcpy(&elf_type, elf + 16, sizeof(elf_type));
+        kmemcpy(&elf_machine, elf + 18, sizeof(elf_machine));
+        kmemcpy(&elf_entry, elf + 24, sizeof(elf_entry));
+        elf_valid = elf_type == 2 && elf_machine == 62 && elf_entry != 0;
+    }
+    if (elf != NULL && elf_size != 0) kfree((void *)elf);
+    if (!elf_valid) return false;
+
+    char expected_line[GUI_MAX_PATH_LENGTH * 2];
+    const char *metadata_lines[] = {
+        "format=VINO_GUI_PACKAGE_V1",
+        "checksum_algorithm=SHA-256",
+        "signature_type=none",
+        "signature_status=unsigned",
+        "ownership_file=share/OWNERSHIP.TXT",
+    };
+    for (uint32_t index = 0;
+         index < sizeof(metadata_lines) / sizeof(metadata_lines[0]); ++index) {
+        if (!vfs_file_has_line(metadata_path, metadata_lines[index])) return false;
+    }
+    const char *manifest_keys[] = { "id", "name", "version", "architecture",
+                                    "entry_point", "namespace" };
+    const char *manifest_values[] = { manifest->id, manifest->name,
+                                      manifest->version, manifest->architecture,
+                                      manifest->entry_point, NULL };
+    for (uint32_t index = 0;
+         index < sizeof(manifest_keys) / sizeof(manifest_keys[0]); ++index) {
+        if (manifest_values[index] != NULL) {
+            (void)snprintf(expected_line, sizeof(expected_line), "%s=%s",
+                           manifest_keys[index], manifest_values[index]);
+        } else {
+            (void)snprintf(expected_line, sizeof(expected_line), "namespace=/%s",
+                           manifest->install_root);
+        }
+        if (!vfs_file_has_line(metadata_path, expected_line)) return false;
+    }
+
+    const char *ownership_lines[] = {
+        "owner=package",
+        "file=share/GUI.MANIFEST",
+        "file=share/OWNERSHIP.TXT",
+        "file=share/SHA256SUMS.TXT",
+    };
+    (void)snprintf(expected_line, sizeof(expected_line), "package_id=%s",
+                   manifest->package_app_id);
+    if (!vfs_file_has_line(ownership_path, expected_line)) return false;
+    (void)snprintf(expected_line, sizeof(expected_line), "namespace=/%s",
+                   manifest->install_root);
+    if (!vfs_file_has_line(ownership_path, expected_line)) return false;
+    (void)snprintf(expected_line, sizeof(expected_line), "file=%s",
+                   manifest->entry_point);
+    if (!vfs_file_has_line(ownership_path, expected_line)) return false;
+    for (uint32_t index = 0;
+         index < sizeof(ownership_lines) / sizeof(ownership_lines[0]); ++index) {
+        if (!vfs_file_has_line(ownership_path, ownership_lines[index])) return false;
+    }
+    if (!vfs_file_has_line_suffix(checksums_path, manifest->entry_point)) return false;
+
+    char owner[KPKG_MAX_APPID_LEN] = {0};
+    return pkg_db_is_file_owned(entry_path, owner, sizeof(owner))
+        && kstrcmp(owner, manifest->package_app_id) == 0;
+}
+#endif
+
 static void gui_process_entry(void *argument) {
     const char *path = (const char *)argument;
     int result = process_exec(path, 0, 0);
@@ -272,7 +422,7 @@ static bool package_checksum_matches(const struct gui_manifest *manifest,
     }
     char expected_checksum[GUI_MAX_CHECKSUM_LENGTH] = {0};
     if (valid_checksum_file) kmemcpy(expected_checksum, checksum_file, 64);
-    if (checksum_file_size != 0) kfree((void *)checksum_file);
+    /* C:/GUI is backed by the immutable initramfs; its read buffers are borrowed. */
     return valid_checksum_file
         && package_verifier_verify_checksum(&local_package_verifier,
                                              expected_checksum, package_data,
@@ -418,6 +568,109 @@ bool gui_manager_init(void) {
     log_info("GUI Manager: manifest registry initialized (Vino OS edition=default).");
     return true;
 }
+
+#ifdef KOS_CI_SMOKE
+static bool gui_manager_package_test_cleanup(void) {
+    if (package_test_disk == NULL) return true;
+    bool ok = true;
+    if (package_test_volume_mounted
+        && !volume_manager_unmount_device(package_test_disk)) ok = false;
+    if (!ramdisk_destroy(package_test_disk)) ok = false;
+    package_test_disk = NULL;
+    package_test_volume = 0;
+    package_test_volume_mounted = false;
+    return ok;
+}
+
+bool gui_manager_package_test_prepare(void) {
+    char existing_volume = 0;
+    if (!manager_initialized || package_test_disk != NULL
+        || find_installed_vino_volume(&existing_volume)) return false;
+    package_test_disk = ramdisk_create("gui_pkg_ci", 32ULL * 1024 * 1024, 512);
+    if (package_test_disk == NULL || !fat32_format(package_test_disk, "GUI_PKG_CI")
+        || !volume_manager_mount_device(package_test_disk, 0, "GUI_PKG_CI")) {
+        (void)gui_manager_package_test_cleanup();
+        return false;
+    }
+    package_test_volume_mounted = true;
+    for (uint32_t index = 0; index < volume_manager_get_count(); ++index) {
+        const struct volume_entry *volume = volume_manager_get_at(index);
+        if (volume != NULL && volume->is_mounted && volume->bdev == package_test_disk) {
+            package_test_volume = volume->letter;
+            break;
+        }
+    }
+    char vino_path[GUI_MAX_PATH_LENGTH];
+    char system_path[GUI_MAX_PATH_LENGTH];
+    char metadata_path[GUI_MAX_PATH_LENGTH];
+    int vino_size = snprintf(vino_path, sizeof(vino_path), "%c:/VINO",
+                             package_test_volume);
+    int system_size = snprintf(system_path, sizeof(system_path), "%s/SYSTEM",
+                               vino_path);
+    int metadata_size = snprintf(metadata_path, sizeof(metadata_path), "%s/OS.META",
+                                 system_path);
+    if (package_test_volume < 'E' || vino_size <= 0
+        || (uint64_t)vino_size >= sizeof(vino_path) || system_size <= 0
+        || (uint64_t)system_size >= sizeof(system_path) || metadata_size <= 0
+        || (uint64_t)metadata_size >= sizeof(metadata_path)
+        || !vfs_mkdir(vino_path) || !vfs_mkdir(system_path)) {
+        (void)gui_manager_package_test_cleanup();
+        return false;
+    }
+    static const uint8_t os_metadata[] =
+        "os_edition=default\ninstall_state=committed\n";
+    if (!vfs_write_file(metadata_path, os_metadata, sizeof(os_metadata) - 1)
+        || !block_cache_flush_device(package_test_disk)) {
+        (void)gui_manager_package_test_cleanup();
+        return false;
+    }
+    log_infof("GUI package test target: isolated FAT32 RAM disk mounted as %c:.",
+              package_test_volume);
+    return true;
+}
+
+bool gui_manager_package_test_preflight(void) {
+    char installed_volume = 0;
+    const struct volume_entry *test_volume = package_test_volume == 0
+        ? NULL : volume_manager_find_by_letter(package_test_volume);
+    if (!manager_initialized || package_test_disk == NULL
+        || !package_test_volume_mounted || test_volume == NULL
+        || test_volume->bdev != package_test_disk
+        || !find_installed_vino_volume(&installed_volume)
+        || installed_volume != package_test_volume) return false;
+    for (uint32_t index = 0; index < gui_manifest_count(); ++index) {
+        if (!gui_manifest_package_available(&gui_registry[index])) return false;
+    }
+    return true;
+}
+
+bool gui_manager_package_self_test(void) {
+    const struct gui_manifest *default_gui = find_manifest("default");
+    const struct gui_manifest *mvp_gui = find_manifest("mvp");
+    if (!gui_manager_package_test_preflight() || default_gui == NULL || mvp_gui == NULL
+        || !installed_gui_package_matches(default_gui)
+        || !installed_gui_package_matches(mvp_gui)) {
+        return false;
+    }
+    if (gui_remove("default") != GUI_MANAGER_OK || gui_is_installed("default")
+        || !installed_gui_package_matches(mvp_gui)) {
+        return false;
+    }
+    if (gui_install("default") != GUI_MANAGER_OK
+        || !installed_gui_package_matches(default_gui)
+        || !installed_gui_package_matches(mvp_gui)) {
+        return false;
+    }
+    if (gui_remove("default") != GUI_MANAGER_OK
+        || gui_remove("mvp") != GUI_MANAGER_OK
+        || gui_is_installed("default") || gui_is_installed("mvp")
+        || !gui_manager_package_test_cleanup()) {
+        return false;
+    }
+    log_info("GUI package self-test passed: ELF, manifest, ownership, SHA-256 metadata, isolated namespaces, remove/reinstall.");
+    return true;
+}
+#endif
 
 char gui_manager_system_volume_letter(void) {
     if (persistent_volume_letter >= 'E' && persistent_volume_letter <= 'Z') {

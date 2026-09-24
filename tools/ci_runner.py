@@ -110,6 +110,14 @@ def checklist(label, output):
     ]
     if label == "smoke":
         checks = common + [
+            (
+                "GUI KPKG runtime install",
+                "[CI SMOKE] PASS: Default and MVP KPKG install commands completed.",
+            ),
+            (
+                "GUI package ownership/isolation",
+                "GUI package self-test passed: ELF, manifest, ownership, SHA-256 metadata, isolated namespaces, remove/reinstall.",
+            ),
             ("Base OS installer RAM test", "[installer-engine] RAM-disk base OS install and commit test passed."),
             ("Smoke completion", "[CI SMOKE] PASS:"),
         ]
