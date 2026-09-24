@@ -109,7 +109,10 @@ def checklist(label, output):
         ("User-space file syscalls", ">>> [PASS] USER-SPACE FILE SYSCALL TEST PASSED <<<"),
     ]
     if label == "smoke":
-        checks = common + [("Smoke completion", "[CI SMOKE] PASS:")]
+        checks = common + [
+            ("Base OS installer RAM test", "[installer-engine] RAM-disk base OS install and commit test passed."),
+            ("Smoke completion", "[CI SMOKE] PASS:"),
+        ]
     else:
         checks = common + [
             ("Hardware syscall Ring 3", "Hardware syscall Ring 3 execution"),

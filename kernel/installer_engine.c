@@ -9,8 +9,10 @@
 #include <kos/initramfs.h>
 #include <kos/installer.h>
 #include <kos/installer_engine.h>
+#include <kos/installer_storage.h>
 #include <kos/log.h>
 #include <kos/memory.h>
+#include <kos/ramdisk.h>
 #include <kos/vfs.h>
 #include <kos/volume.h>
 
@@ -302,45 +304,45 @@ static bool add_payload(struct installer_os_payload *payloads, uint32_t *count,
 
 static bool build_os_payloads(struct installer_os_payload *payloads,
                               uint32_t *payload_count) {
-    const uint8_t *kernel = NULL;
-    uint64_t kernel_size = 0;
     const uint8_t *archive = NULL;
     uint64_t archive_size = 0;
-    if (!vfs_read_file("C:/KOS.ELF", &kernel, &kernel_size)
-        || kernel == NULL || kernel_size == 0
-        || !initramfs_get_archive(&archive, &archive_size)
-        || !add_payload(payloads, payload_count, "BOOT/KOS.ELF", kernel, kernel_size)
+    if (!initramfs_get_archive(&archive, &archive_size)
         || !add_payload(payloads, payload_count, "BOOT/INITRAMFS.CPIO", archive,
                         archive_size)) {
         return false;
     }
 
+    bool have_kernel = false;
+    /* The installer initramfs owns these immutable buffers for the full copy. */
     for (uint64_t index = 0; index < vfs_file_count_on_volume('C'); ++index) {
         const struct vfs_file *source = vfs_file_at_on_volume('C', index);
-        if (source == NULL || source->type == VFS_NODE_DIRECTORY || source->path == NULL) {
+        if (source == NULL || source->path == NULL) {
             return false;
         }
-        if (kstrcmp(source->path, "KOS.ELF") == 0
-            || kstrcmp(source->path, "EFI/BOOT/BOOTX64.EFI") == 0) {
+        if (source->type == VFS_NODE_DIRECTORY) continue;
+        if (kstrcmp(source->path, "KOS.ELF") == 0) {
+            if (have_kernel || !add_payload(payloads, payload_count,
+                    "BOOT/KOS.ELF", source->data, source->size)) {
+                return false;
+            }
+            have_kernel = true;
+            continue;
+        }
+        if (kstrcmp(source->path, "EFI/BOOT/BOOTX64.EFI") == 0) {
             continue;
         }
         if (!path_is_safe_relative(source->path)) return false;
 
-        const uint8_t *data = NULL;
-        uint64_t size = 0;
-        char source_path[VFS_MAX_PATH];
         char destination_path[VFS_MAX_PATH];
-        int source_path_size = snprintf(source_path, sizeof(source_path), "C:/%s", source->path);
         int destination_size = snprintf(destination_path, sizeof(destination_path),
                                         "SYSTEM/%s", source->path);
-        if (source_path_size <= 0 || (uint64_t)source_path_size >= sizeof(source_path)
-            || destination_size <= 0 || (uint64_t)destination_size >= sizeof(destination_path)
-            || !vfs_read_file(source_path, &data, &size)
-            || !add_payload(payloads, payload_count, destination_path, data, size)) {
+        if (destination_size <= 0 || (uint64_t)destination_size >= sizeof(destination_path)
+            || !add_payload(payloads, payload_count, destination_path,
+                            source->data, source->size)) {
             return false;
         }
     }
-    return *payload_count >= 3;
+    return have_kernel && *payload_count >= 3;
 }
 
 static void checksum_to_hex(const uint8_t checksum[32], char output[65]) {
@@ -921,4 +923,90 @@ int install_bootloader(struct installer_flow *flow, void *context) {
     kfree(verify_items);
     kfree(created_directories);
     return ok ? 0 : INSTALLER_FLOW_ERR_INVALID_STATE;
+}
+
+static int installer_engine_test_bootloader(struct installer_flow *flow, void *context) {
+    (void)context;
+    char volume = 0;
+    return transaction_target_volume(flow, &volume) && installed_os_is_bootable(volume)
+        ? 0 : INSTALLER_FLOW_ERR_INVALID_STATE;
+}
+
+bool installer_engine_self_test(void) {
+    const uint64_t disk_size = 32ULL * 1024 * 1024;
+    struct block_device *disk = ramdisk_create("installer_engine_test", disk_size, 512);
+    struct block_device *partition = NULL;
+    bool ok = disk != NULL;
+
+    if (ok) {
+        uint64_t block_count = disk->total_blocks - 2081;
+        ok = installer_storage_create_partition(disk, PARTITION_TABLE_GPT, 2048,
+                                                block_count, true, true);
+    }
+    if (ok) {
+        struct installer_partition_info info;
+        ok = installer_storage_partition_count(disk) == 1
+            && installer_storage_partition_at(disk, 0, &info)
+            && info.parent == disk && info.start_lba == 2048
+            && info.block_count == disk->total_blocks - 2081;
+        if (ok) partition = info.device;
+    }
+    if (ok) {
+        ok = installer_storage_format_partition(partition,
+            PARTITION_PLAN_FILESYSTEM_FAT32, true);
+    }
+
+    struct installer_flow flow;
+    if (ok) {
+        ok = installer_flow_init(&flow)
+            && installer_flow_select_profile(&flow, "cli") == INSTALLER_FLOW_OK
+            && installer_flow_select_disk(&flow, disk->name) == INSTALLER_FLOW_OK
+            && installer_flow_select_partition(&flow, partition->name) == INSTALLER_FLOW_OK;
+    }
+    if (ok) {
+        flow.state.partition_plan.confirmed = true;
+        struct installer_engine engine = {
+            .install_base_os = install_base_os,
+            .install_bootloader = installer_engine_test_bootloader,
+        };
+        ok = installer_flow_execute(&flow, &engine) == INSTALLER_FLOW_OK
+            && flow.state.phase == INSTALLER_FLOW_FINISHED
+            && flow.state.transaction.state == INSTALL_TRANSACTION_COMMITTED
+            && flow.state.transaction.transaction_id != 0
+            && flow.state.transaction.base_os_applied
+            && flow.state.transaction.bootloader_applied
+            && flow.state.transaction.cli_fallback_ready;
+    }
+    if (ok) {
+        char volume = 0;
+        char metadata_path[VFS_MAX_PATH];
+        char kernel_path[VFS_MAX_PATH];
+        char initramfs_path[VFS_MAX_PATH];
+        const uint8_t *metadata = NULL;
+        uint64_t metadata_size = 0;
+        struct vfs_metadata kernel_info;
+        struct vfs_metadata initramfs_info;
+        ok = transaction_target_volume(&flow, &volume)
+            && installed_os_is_bootable(volume)
+            && make_absolute_path(metadata_path, sizeof(metadata_path), volume,
+                                  "VINO/SYSTEM/OS.META")
+            && make_absolute_path(kernel_path, sizeof(kernel_path), volume,
+                                  "VINO/BOOT/KOS.ELF")
+            && make_absolute_path(initramfs_path, sizeof(initramfs_path), volume,
+                                  "VINO/BOOT/INITRAMFS.CPIO")
+            && vfs_read_file(metadata_path, &metadata, &metadata_size)
+            && buffer_has_line(metadata, metadata_size, "os_edition=default")
+            && !buffer_has_line(metadata, metadata_size, "os_edition=plus")
+            && vfs_stat(kernel_path, &kernel_info)
+            && kernel_info.type == VFS_NODE_FILE && kernel_info.size != 0
+            && vfs_stat(initramfs_path, &initramfs_info)
+            && initramfs_info.type == VFS_NODE_FILE && initramfs_info.size != 0;
+        if (metadata != NULL) kfree((void *)metadata);
+    }
+
+    if (partition != NULL) (void)volume_manager_unmount_device(partition);
+    if (disk != NULL && !ramdisk_destroy(disk)) ok = false;
+    if (ok) log_info("[installer-engine] RAM-disk base OS install and commit test passed.");
+    else log_error("[installer-engine] RAM-disk base OS install and commit test failed.");
+    return ok;
 }

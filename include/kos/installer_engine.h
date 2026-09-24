@@ -7,5 +7,6 @@ int install_base_os(struct installer_flow *flow, void *context);
 int install_gui(struct installer_flow *flow, const struct gui_manifest *gui,
                 void *context);
 int install_bootloader(struct installer_flow *flow, void *context);
+bool installer_engine_self_test(void);
 
 #endif /* KOS_INSTALLER_ENGINE_H */

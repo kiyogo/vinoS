@@ -100,6 +100,7 @@ def run_case(kind, image_path):
         "Type: NVME",
         f"{kind.upper()} table",
         ">>> [PASS] INSTALLER STORAGE MANAGER TEST PASSED <<<",
+        "[installer-engine] RAM-disk base OS install and commit test passed.",
     )
     missing = [entry for entry in required if entry not in full_log]
     if not passed or missing:
