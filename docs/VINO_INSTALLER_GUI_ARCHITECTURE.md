@@ -251,20 +251,6 @@ executables. Shutdown currently syncs storage and halts CPUs; ACPI firmware
 power-off is not implemented. Package integrity uses detached SHA-256, not a
 release signature.
 
-The disposable-disk QEMU integration can exercise the independent recovery
-path:
-
-```powershell
-python tools/boot_reboot_ci.py --profile plus --exercise-mvp-fallback
-python tools/boot_reboot_ci.py --profile cli --exercise-mvp-install
-```
-
-After the Plus reboot it removes Default from that test disk, requests Default
-again, verifies that the separately installed MVP session starts, then exits
-to the CLI. The CLI-profile run installs MVP from the ISO package, starts its
-standalone session, and returns to CLI. Both runs use disposable target disks
-and do not touch a host disk.
-
 ### Phase 9 — GUI manager runtime
 
 The kernel command dispatcher supports `vino gui list`, `installed`,
@@ -282,6 +268,21 @@ active session stops and reaps its process first. Registry initialization
 rejects overlapping GUI install namespaces/package IDs so one GUI package
 cannot claim or remove another GUI's files. Runtime fallback is one-shot and
 never reboots the machine, so a failing GUI cannot cause a GUI reboot loop.
+
+The disposable-disk QEMU integration exercises the runtime paths:
+
+```powershell
+python tools/boot_reboot_ci.py --profile plus --exercise-mvp-fallback
+python tools/boot_reboot_ci.py --profile cli --exercise-mvp-install
+python tools/boot_reboot_ci.py --profile plus --exercise-gui-manager
+```
+
+The MVP fallback run removes Default from its test disk, requests Default
+again, verifies that MVP starts, then exits to CLI. The CLI-profile run
+installs MVP from the ISO package, starts its standalone session, and returns
+to CLI. The manager run checks inventory, availability, status, restart,
+selection persistence across reboot, and that removing one GUI leaves the
+other package intact. Each run uses a disposable target disk.
 
 ### Phase 10 — Remote GUI interfaces
 

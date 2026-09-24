@@ -65,8 +65,8 @@ class QmpMonitor:
 
     def type_text(self, text):
         for character in text:
-            key_name = "spc" if character == " " else character
-            if not (key_name == "spc" or key_name.isalnum()):
+            key_name = {" ": "spc", "-": "minus"}.get(character, character)
+            if not (key_name in ("spc", "minus") or key_name.isalnum()):
                 raise ValueError(f"Unsupported QEMU keyboard character: {character!r}")
             self.key(key_name)
             time.sleep(0.04)
@@ -100,13 +100,17 @@ def free_tcp_port():
 
 
 def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
-        exercise_mvp_install=False):
+        exercise_mvp_install=False, exercise_gui_manager=False):
     if profile not in ("cli", "plus"):
         raise ValueError(f"Unsupported installer profile: {profile}")
     if exercise_mvp_fallback and profile != "plus":
         raise ValueError("MVP fallback exercise requires the Plus recovery package")
     if exercise_mvp_install and profile != "cli":
         raise ValueError("MVP ISO-install exercise requires the CLI profile")
+    if exercise_gui_manager and profile != "plus":
+        raise ValueError("GUI manager exercise requires both installed Plus packages")
+    if exercise_gui_manager and exercise_mvp_fallback:
+        raise ValueError("GUI manager and MVP fallback exercises use separate disk scenarios")
     required = (QEMU, OVMF_CODE, OVMF_VARS_TEMPLATE,
                 esp_dir / "EFI" / "BOOT" / "BOOTX64.EFI",
                 esp_dir / "EFI" / "BOOT" / "limine.conf",
@@ -226,6 +230,85 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         "Vino CLI ready; open the disk installer with `installer ui`.",
                         process, 30, occurrences=2)
                     print("[PASS] Vino Plus -> Default install -> Limine reboot -> Default GUI -> CLI fallback")
+                    if exercise_gui_manager:
+                        print("[QEMU] Exercising GUI inventory, session, restart, and persistent default")
+                        monitor.type_text("vino gui list")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "default - Default v1.0.0 [iso] installed", process, 30)
+                        wait_for_log(log_path,
+                            "mvp - MVP v1.0.0 [iso] installed", process, 30)
+                        monitor.type_text("vino gui installed")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "default - Default [selected for boot]", process, 30)
+                        wait_for_log(log_path, "mvp - MVP", process, 30)
+                        monitor.type_text("vino gui available")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "default - Default v1.0.0 [installed]", process, 30)
+                        wait_for_log(log_path,
+                            "mvp - MVP v1.0.0 [installed]", process, 30)
+                        monitor.type_text("vino gui get-default")
+                        monitor.key("ret")
+                        wait_for_log(log_path, "] default", process, 30)
+                        monitor.type_text("vino gui status default")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "GUI default: installed, selected for boot; last_session=1 process_id=",
+                            process, 30)
+                        monitor.type_text("vino gui restart default")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "GUI session 2: started 'default' in process", process, 30)
+                        time.sleep(1.0)
+                        manager_log = log_path.read_text(encoding="utf-8", errors="replace")
+                        if "GUI session 'default' exited with" in manager_log:
+                            raise RuntimeError("Default GUI crashed during manager restart")
+                        monitor.key("q")
+                        wait_for_log(log_path,
+                            "GUI session 'default' stopped; CLI remains available",
+                            process, 30, occurrences=2)
+                        wait_for_log(log_path, "gui restart default: OK", process, 30)
+                        monitor.type_text("vino gui set-default mvp")
+                        monitor.key("ret")
+                        wait_for_log(log_path, "gui set-default mvp: OK", process, 30)
+                        monitor.type_text("vino gui get-default")
+                        monitor.key("ret")
+                        wait_for_log(log_path, "] mvp", process, 30)
+                        monitor.type_text("vino gui installed")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "mvp - MVP [selected for boot]", process, 30)
+                        monitor.type_text("reboot")
+                        monitor.key("ret")
+                        wait_for_log(log_path, "KOS booting...", process, 90,
+                                     occurrences=3)
+                        wait_for_log(log_path,
+                            "Vino Plus: starting selected GUI 'mvp'.", process, 90)
+                        wait_for_log(log_path,
+                            "GUI session 1: started 'mvp' in process", process, 90)
+                        time.sleep(1.0)
+                        manager_log = log_path.read_text(encoding="utf-8", errors="replace")
+                        if "GUI session 'mvp' exited with" in manager_log:
+                            raise RuntimeError("Persistently selected MVP GUI crashed after reboot")
+                        monitor.key("c")
+                        wait_for_log(log_path,
+                            "GUI session 'mvp' stopped; CLI remains available", process, 30)
+                        monitor.type_text("vino gui remove default")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "GUI Manager: removed 'default'; Vino OS remains bootable in CLI mode.",
+                            process, 30)
+                        monitor.type_text("vino gui installed")
+                        monitor.key("ret")
+                        wait_for_log(log_path,
+                            "mvp - MVP [selected for boot]", process, 30,
+                            occurrences=2)
+                        monitor.type_text("vino gui reinstall default")
+                        monitor.key("ret")
+                        wait_for_log(log_path, "gui reinstall default: OK", process, 30)
+                        print("[PASS] GUI commands -> session restart -> persistent MVP selection -> reboot -> package isolation")
                     if exercise_mvp_fallback:
                         print("[QEMU] Removing Default on the disposable target and requesting it again")
                         monitor.type_text("vino gui remove default")
@@ -307,10 +390,13 @@ def main():
                         help="on a disposable Plus disk, remove Default and verify MVP fallback")
     parser.add_argument("--exercise-mvp-install", action="store_true",
                         help="on a disposable CLI disk, install MVP from ISO and verify its session")
+    parser.add_argument("--exercise-gui-manager", action="store_true",
+                        help="on a disposable Plus disk, verify GUI commands and persistent selection")
     arguments = parser.parse_args()
     try:
         if not run(arguments.esp_dir.resolve(), arguments.profile,
-                   arguments.exercise_mvp_fallback, arguments.exercise_mvp_install):
+                   arguments.exercise_mvp_fallback, arguments.exercise_mvp_install,
+                   arguments.exercise_gui_manager):
             return 1
     except (OSError, RuntimeError, ValueError) as error:
         print(f"[FAIL] {error}")
