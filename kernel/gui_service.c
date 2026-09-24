@@ -19,6 +19,7 @@ static bool frame_open;
 static bool frame_buffered;
 static uint64_t frame_started_ms;
 static uint64_t frame_draw_operations;
+static bool pointer_input_first;
 
 static struct gui_color canvas_color(struct kos_gui_color color) {
     return (struct gui_color){ color.red, color.green, color.blue, color.alpha };
@@ -58,10 +59,15 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
         surface.pitch = (uint32_t)pitch;
         surface.bits_per_pixel = 32;
         surface.pixel_format = KOS_GUI_PIXEL_FORMAT_RGB32;
-        surface.capabilities = mouse_is_initialized() ? KOS_GUI_SURFACE_POINTER : 0;
+        bool pointer_available = mouse_is_initialized();
+        surface.capabilities = pointer_available ? KOS_GUI_SURFACE_POINTER : 0;
         if (framebuffer_backbuffer_available())
             surface.capabilities |= KOS_GUI_SURFACE_BACKBUFFER;
         mouse_set_bounds(surface.width, surface.height);
+        int32_t pointer_x = 0;
+        int32_t pointer_y = 0;
+        mouse_get_position(&pointer_x, &pointer_y);
+        framebuffer_cursor_set(pointer_available, pointer_x, pointer_y);
         return copy_to_user((void *)user_request, &surface, sizeof(surface)) == 0
             ? 0 : (uint64_t)-EFAULT;
     }
@@ -159,10 +165,12 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
             if ((request.flags & ~KOS_GUI_FRAME_DISCARD_PREVIOUS) != 0)
                 return (uint64_t)-EINVAL;
             frame_started_ms = timer_get_uptime_ms();
+            framebuffer_cursor_suspend();
             frame_buffered = framebuffer_backbuffer_available();
             if (frame_buffered && !framebuffer_frame_begin(
                     (request.flags & KOS_GUI_FRAME_DISCARD_PREVIOUS) == 0)) {
                 frame_buffered = false;
+                framebuffer_cursor_resume();
                 return (uint64_t)-EBUSY;
             }
             frame_open = true;
@@ -171,6 +179,7 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
         case KOS_GUI_DISPLAY_PRESENT_FRAME: {
             if (!frame_open) return (uint64_t)-EINVAL;
             if (frame_buffered) framebuffer_frame_present();
+            else framebuffer_cursor_resume();
             uint64_t now = timer_get_uptime_ms();
             uint64_t duration = now >= frame_started_ms ? now - frame_started_ms : 0;
             saturating_increment(&frame_stats.redraw_count);
@@ -204,6 +213,7 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
 
 void gui_service_abort_frame(void) {
     framebuffer_frame_abort();
+    framebuffer_cursor_set(false, 0, 0);
     if (frame_open) saturating_increment(&frame_stats.aborted_frame_count);
     frame_open = false;
     frame_buffered = false;
@@ -237,20 +247,30 @@ uint64_t gui_service_input(uint64_t user_event) {
     event.pointer_y = 0;
     event.pointer_buttons = 0;
     event.pointer_wheel = 0;
+    struct kos_mouse_event pointer;
     char key = 0;
-    if (keyboard_read_char(&key) && key != '\0') {
-        event.type = KOS_GUI_INPUT_KEY;
-        event.key = (uint8_t)key;
+    bool have_pointer = false;
+    bool have_key = false;
+    if (pointer_input_first) {
+        have_pointer = mouse_read_event(&pointer);
+        if (!have_pointer) have_key = keyboard_read_char(&key) && key != '\0';
     }
     else {
-        struct kos_mouse_event pointer;
-        if (mouse_read_event(&pointer)) {
-            event.type = KOS_GUI_INPUT_POINTER;
-            event.pointer_x = pointer.x;
-            event.pointer_y = pointer.y;
-            event.pointer_buttons = pointer.buttons;
-            event.pointer_wheel = pointer.wheel;
-        }
+        have_key = keyboard_read_char(&key) && key != '\0';
+        if (!have_key) have_pointer = mouse_read_event(&pointer);
+    }
+    pointer_input_first = !pointer_input_first;
+    if (have_pointer) {
+        event.type = KOS_GUI_INPUT_POINTER;
+        event.pointer_x = pointer.x;
+        event.pointer_y = pointer.y;
+        event.pointer_buttons = pointer.buttons;
+        event.pointer_wheel = pointer.wheel;
+        framebuffer_cursor_set(true, pointer.x, pointer.y);
+    }
+    else if (have_key) {
+        event.type = KOS_GUI_INPUT_KEY;
+        event.key = (uint8_t)key;
     }
     return copy_to_user((void *)user_event, &event, sizeof(event)) == 0
         ? 0 : (uint64_t)-EFAULT;

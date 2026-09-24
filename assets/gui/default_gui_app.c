@@ -1226,32 +1226,6 @@ static void draw_about(void) {
     draw_text(x + 20, y + 150, "Esc close", color_muted, color_panel);
 }
 
-static void draw_pointer(void) {
-    if (!pointer_available) return;
-    static const uint16_t cursor_rows[14] = {
-        0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
-        0x01ff, 0x00ff, 0x00db, 0x0198, 0x0300, 0x0300, 0x0000,
-    };
-    for (uint32_t row = 0; row < 13; ++row) {
-        int32_t left = -1;
-        int32_t right = -1;
-        for (uint32_t column = 0; column < 9; ++column) {
-            if ((cursor_rows[row] & (1u << column)) != 0) {
-                if (left < 0) left = (int32_t)column;
-                right = (int32_t)column;
-            }
-        }
-        if (left < 0) continue;
-        uint32_t width = (uint32_t)(right - left + 1);
-        (void)vino_gui_fill((struct kos_gui_rect){
-            pointer_x + left - 1, pointer_y + (int32_t)row, width + 2, 1,
-        }, color_wallpaper);
-        (void)vino_gui_fill((struct kos_gui_rect){
-            pointer_x + left, pointer_y + (int32_t)row, width, 1,
-        }, color_text);
-    }
-}
-
 static void render_ui_contents(void) {
     draw_desktop_icons();
     draw_windows();
@@ -1269,7 +1243,6 @@ static void render_ui_contents(void) {
         draw_text(overlay_x + 12, 48, "Move window: H/J/K/L  |  G to finish",
                   color_cyan, color_panel_high);
     }
-    draw_pointer();
 }
 
 static void render_ui(void) {
@@ -1634,7 +1607,8 @@ static void handle_window_pointer(uint32_t app, int32_t x, int32_t y,
 }
 
 static void handle_pointer(const struct kos_gui_input_event *event) {
-    if (!pointer_available || event == NULL) return;
+    if (event == NULL) return;
+    pointer_available = true;
     uint32_t previous_buttons = pointer_buttons;
     pointer_x = event->pointer_x;
     pointer_y = event->pointer_y;

@@ -102,8 +102,19 @@ struct usb_hid_mouse_report {
     int8_t wheel;
 } __attribute__((packed));
 
+/* Normalized output from a parsed absolute HID tablet report. */
+struct usb_hid_tablet_report {
+    uint16_t x;
+    uint16_t y;
+    uint16_t max_x;
+    uint16_t max_y;
+    uint8_t buttons;
+    int8_t wheel;
+} __attribute__((packed));
+
 /* USB HID Handlers */
 void usb_hid_keyboard_handle_report(const struct usb_hid_keyboard_report *report);
 void usb_hid_mouse_handle_report(const struct usb_hid_mouse_report *report);
+void usb_hid_tablet_handle_report(const struct usb_hid_tablet_report *report);
 
 #endif /* KOS_USB_H */

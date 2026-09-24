@@ -65,6 +65,8 @@ def qemu_command(smoke):
         "-drive", f"if=pflash,format=raw,readonly=on,file={OVMF_CODE}",
         "-drive", f"if=pflash,format=raw,file={VARS}",
         "-drive", "format=raw,file=fat:rw:build/esp",
+        "-device", "qemu-xhci,id=pointer-xhci",
+        "-device", "usb-tablet,bus=pointer-xhci.0,id=usb-pointer",
         "-serial", "stdio", "-monitor", "none", "-no-reboot",
         "-netdev", "user,id=kosnet,ipv4=on,ipv6=off,hostfwd=tcp::18080-:80",
         "-device", "e1000,netdev=kosnet,mac=52:54:00:12:34:56",

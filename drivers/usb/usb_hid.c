@@ -4,12 +4,10 @@
 
 #include <kos/keyboard.h>
 #include <kos/log.h>
+#include <kos/mouse.h>
 #include <kos/usb.h>
 
 static uint8_t prev_keycodes[6] = {0};
-static int32_t mouse_x = 0;
-static int32_t mouse_y = 0;
-static uint8_t prev_mouse_buttons = 0;
 
 static const char hid_ascii_table[128] = {
     0, 0, 0, 0,
@@ -62,14 +60,12 @@ void usb_hid_keyboard_handle_report(const struct usb_hid_keyboard_report *report
 
 void usb_hid_mouse_handle_report(const struct usb_hid_mouse_report *report) {
     if (report == 0) return;
+    mouse_usb_relative_report(report->delta_x, report->delta_y,
+                              report->buttons, report->wheel);
+}
 
-    mouse_x += report->delta_x;
-    mouse_y += report->delta_y;
-
-    if (mouse_x < 0) mouse_x = 0;
-    if (mouse_y < 0) mouse_y = 0;
-
-    if (report->buttons != prev_mouse_buttons) {
-        prev_mouse_buttons = report->buttons;
-    }
+void usb_hid_tablet_handle_report(const struct usb_hid_tablet_report *report) {
+    if (report == 0 || report->max_x == 0 || report->max_y == 0) return;
+    mouse_usb_absolute_report(report->x, report->y, report->max_x,
+                              report->max_y, report->buttons, report->wheel);
 }

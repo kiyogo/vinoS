@@ -22,13 +22,103 @@ struct kos_framebuffer {
     bool initialized;
     bool frame_active;
     bool background_cache_valid;
+    bool cursor_visible;
+    bool cursor_saved;
+    int32_t cursor_x;
+    int32_t cursor_y;
+    uint64_t cursor_saved_x;
+    uint64_t cursor_saved_y;
+    uint32_t cursor_saved_width;
+    uint32_t cursor_saved_height;
+    uint32_t cursor_underlay[15 * 11];
 };
 
 static struct kos_framebuffer framebuffer;
 static volatile uint32_t *framebuffer_row(uint64_t row);
+static volatile uint32_t *framebuffer_scanout_row(uint64_t row);
 
 #define FRAMEBUFFER_CACHE_MAX_BYTES (64ull * 1024ull * 1024ull)
 #define FRAMEBUFFER_BLUR_MAX_BYTES (16ull * 1024ull * 1024ull)
+
+static const uint16_t cursor_rows[13] = {
+    0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
+    0x01ff, 0x00ff, 0x00db, 0x0198, 0x0300, 0x0300,
+};
+
+static bool cursor_shape_pixel(int32_t x, int32_t y) {
+    if (x < 0 || x >= 9 || y < 0 || y >= 13) return false;
+    return (cursor_rows[y] & (1u << (uint32_t)x)) != 0;
+}
+
+static void cursor_restore(void) {
+    if (!framebuffer.cursor_saved) return;
+    for (uint32_t row = 0; row < framebuffer.cursor_saved_height; ++row) {
+        volatile uint32_t *destination = framebuffer_scanout_row(
+            framebuffer.cursor_saved_y + row) + framebuffer.cursor_saved_x;
+        const uint32_t *source = framebuffer.cursor_underlay
+            + (uint64_t)row * 11;
+        for (uint32_t column = 0; column < framebuffer.cursor_saved_width; ++column) {
+            destination[column] = source[column];
+        }
+    }
+    framebuffer.cursor_saved = false;
+}
+
+static void cursor_draw(void) {
+    if (!framebuffer.initialized || !framebuffer.cursor_visible
+        || framebuffer.cursor_saved
+        || framebuffer.frame_active || framebuffer.width == 0
+        || framebuffer.height == 0) return;
+
+    int64_t left = (int64_t)framebuffer.cursor_x - 1;
+    int64_t top = (int64_t)framebuffer.cursor_y - 1;
+    int64_t right = (int64_t)framebuffer.cursor_x + 10;
+    int64_t bottom = (int64_t)framebuffer.cursor_y + 14;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if ((uint64_t)right > framebuffer.width) right = (int64_t)framebuffer.width;
+    if ((uint64_t)bottom > framebuffer.height) bottom = (int64_t)framebuffer.height;
+    if (right <= left || bottom <= top) return;
+
+    framebuffer.cursor_saved_x = (uint64_t)left;
+    framebuffer.cursor_saved_y = (uint64_t)top;
+    framebuffer.cursor_saved_width = (uint32_t)(right - left);
+    framebuffer.cursor_saved_height = (uint32_t)(bottom - top);
+    for (uint32_t row = 0; row < framebuffer.cursor_saved_height; ++row) {
+        volatile uint32_t *source = framebuffer_scanout_row(
+            framebuffer.cursor_saved_y + row) + framebuffer.cursor_saved_x;
+        uint32_t *destination = framebuffer.cursor_underlay + (uint64_t)row * 11;
+        for (uint32_t column = 0; column < framebuffer.cursor_saved_width; ++column) {
+            destination[column] = source[column];
+        }
+    }
+
+    uint32_t outline = framebuffer_make_color(5, 12, 22);
+    uint32_t fill = framebuffer_make_color(244, 249, 255);
+    for (int64_t y = top; y < bottom; ++y) {
+        volatile uint32_t *destination = framebuffer_scanout_row((uint64_t)y);
+        for (int64_t x = left; x < right; ++x) {
+            int32_t shape_x = (int32_t)(x - framebuffer.cursor_x);
+            int32_t shape_y = (int32_t)(y - framebuffer.cursor_y);
+            if (cursor_shape_pixel(shape_x, shape_y)) {
+                destination[x] = fill;
+                continue;
+            }
+            bool edge = false;
+            for (int32_t dy = -1; dy <= 1 && !edge; ++dy) {
+                for (int32_t dx = -1; dx <= 1; ++dx) {
+                    if ((dx != 0 || dy != 0)
+                        && cursor_shape_pixel(shape_x + dx, shape_y + dy)) {
+                        edge = true;
+                        break;
+                    }
+                }
+            }
+            if (edge) destination[x] = outline;
+        }
+    }
+    framebuffer.cursor_saved = true;
+}
 
 static bool channel_mask_is_valid(uint8_t shift, uint8_t size) {
     return size == 8 && shift <= 24;
@@ -94,6 +184,7 @@ bool framebuffer_backbuffer_available(void) {
 bool framebuffer_frame_begin(bool preserve_contents) {
     if (!framebuffer.initialized || framebuffer.frame_active
         || framebuffer.backbuffer == 0) return false;
+    cursor_restore();
     if (preserve_contents) {
         for (uint64_t row = 0; row < framebuffer.height; ++row) {
             volatile uint32_t *source = (volatile uint32_t *)
@@ -123,10 +214,37 @@ void framebuffer_frame_present(void) {
         }
     }
     framebuffer.frame_active = false;
+    cursor_draw();
 }
 
 void framebuffer_frame_abort(void) {
     framebuffer.frame_active = false;
+    cursor_draw();
+}
+
+void framebuffer_cursor_set(bool visible, int32_t x, int32_t y) {
+    if (!framebuffer.initialized) return;
+    cursor_restore();
+    framebuffer.cursor_visible = visible;
+    if (visible) {
+        if (x < 0) x = 0;
+        if (y < 0) y = 0;
+        uint64_t max_x = framebuffer.width - 1;
+        uint64_t max_y = framebuffer.height - 1;
+        framebuffer.cursor_x = (uint64_t)(uint32_t)x > max_x
+            ? (int32_t)(max_x > INT32_MAX ? INT32_MAX : max_x) : x;
+        framebuffer.cursor_y = (uint64_t)(uint32_t)y > max_y
+            ? (int32_t)(max_y > INT32_MAX ? INT32_MAX : max_y) : y;
+        cursor_draw();
+    }
+}
+
+void framebuffer_cursor_suspend(void) {
+    cursor_restore();
+}
+
+void framebuffer_cursor_resume(void) {
+    cursor_draw();
 }
 
 static volatile uint32_t *framebuffer_scanout_row(uint64_t row) {

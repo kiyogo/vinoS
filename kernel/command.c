@@ -10,6 +10,7 @@
 #include <kos/interrupts.h>
 #include <kos/keyboard.h>
 #include <kos/log.h>
+#include <kos/mouse.h>
 #include <kos/net.h>
 #include <kos/net_device.h>
 #include <kos/socket.h>
@@ -5331,7 +5332,9 @@ static void command_gui(const char *arguments) {
     }
     if (kstrcmp(operation, "stats") == 0) {
         struct kos_gui_frame_stats stats = {0};
+        struct kos_mouse_stats pointer = {0};
         gui_service_frame_stats_snapshot(&stats);
+        mouse_get_stats(&pointer);
         uint64_t average_ms = stats.redraw_count == 0 ? 0
             : stats.total_frame_duration_ms / stats.redraw_count;
         log_infof("GUI frames: redraws=%llu draw_ops=%llu last_ops=%llu",
@@ -5346,6 +5349,16 @@ static void command_gui(const char *arguments) {
         log_infof("GUI buffers: backbuffer=%s wallpaper_cache=%s",
             stats.backbuffer_enabled ? "on" : "off (direct fallback)",
             stats.background_cache_enabled ? "on" : "not captured");
+        log_infof("GUI pointer: ps2=%s usb-hid=%s events=%llu dropped=%llu move=%llu click=%llu scroll=%llu",
+            pointer.ps2_available ? "ready" : "off",
+            pointer.usb_hid_available ? "ready" : "off",
+            (unsigned long long)pointer.event_count,
+            (unsigned long long)pointer.dropped_event_count,
+            (unsigned long long)pointer.movement_event_count,
+            (unsigned long long)pointer.button_event_count,
+            (unsigned long long)pointer.wheel_event_count);
+        log_infof("GUI pointer position: x=%d y=%d buttons=0x%02X wheel=%d",
+            pointer.x, pointer.y, pointer.buttons, pointer.wheel);
         return;
     }
     if (kstrcmp(operation, "list") == 0) {

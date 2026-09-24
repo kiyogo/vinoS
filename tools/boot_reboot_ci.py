@@ -72,6 +72,15 @@ class QmpMonitor:
             self.key(key_name)
             time.sleep(0.04)
 
+    def pointer_move(self, dx, dy, wheel=0):
+        self.hmp(f"mouse_move {dx} {dy} {wheel}")
+
+    def pointer_buttons(self, state):
+        self.hmp(f"mouse_button {state}")
+
+    def screendump(self, path):
+        self.hmp(f"screendump {Path(path).as_posix()}")
+
     def close(self):
         try:
             self.reader.close()
@@ -100,8 +109,25 @@ def free_tcp_port():
         return listener.getsockname()[1]
 
 
+def verify_cursor_pixel(image_path, x, y):
+    image = image_path.read_bytes()
+    header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\r?\n", image)
+    if header is None:
+        raise RuntimeError("QEMU cursor screenshot is not a binary PPM image")
+    width, height = (int(header.group(1)), int(header.group(2)))
+    pixels = image[header.end():]
+    if len(pixels) != width * height * 3 or not (0 <= x < width and 0 <= y < height):
+        raise RuntimeError("QEMU cursor screenshot has invalid dimensions or pixel data")
+    offset = (y * width + x) * 3
+    tip = tuple(pixels[offset:offset + 3])
+    if tip != (244, 249, 255):
+        raise RuntimeError(
+            f"Cursor tip is not visible at ({x},{y}); pixel={tip}, expected white cursor fill")
+
+
 def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
-        exercise_mvp_install=False, exercise_gui_manager=False):
+        exercise_mvp_install=False, exercise_gui_manager=False,
+        ps2_only=False, exercise_pointer=False):
     if profile not in ("cli", "plus"):
         raise ValueError(f"Unsupported installer profile: {profile}")
     if exercise_mvp_fallback and profile != "plus":
@@ -112,6 +138,8 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
         raise ValueError("GUI manager exercise requires both installed Plus packages")
     if exercise_gui_manager and exercise_mvp_fallback:
         raise ValueError("GUI manager and MVP fallback exercises use separate disk scenarios")
+    if exercise_pointer and (profile != "plus" or not ps2_only):
+        raise ValueError("Pointer exercise requires --profile plus --ps2-only")
     required = (QEMU, OVMF_CODE, OVMF_VARS_TEMPLATE,
                 esp_dir / "EFI" / "BOOT" / "BOOTX64.EFI",
                 esp_dir / "EFI" / "BOOT" / "limine.conf",
@@ -153,6 +181,10 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
             "-qmp", f"tcp:127.0.0.1:{monitor_port},server=on,wait=off",
             "-display", "none",
         ]
+        if not ps2_only:
+            command[command.index("-serial"):command.index("-serial")] = [
+                "-device", "usb-tablet,bus=install-xhci.0,id=usb-pointer",
+            ]
         print("[QEMU] Starting Limine installer with a disposable 512 MiB target disk")
         with log_path.open("w", encoding="utf-8", errors="replace") as serial_log:
             process = subprocess.Popen(command, cwd=ROOT, stdout=serial_log,
@@ -224,6 +256,19 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                     if "GUI session 'default' exited with" in post_start_log:
                         raise RuntimeError("Default GUI exited during startup")
                     print("[QEMU] Default GUI started after the installed Vino Plus reboot")
+                    if exercise_pointer:
+                        print("[QEMU] Sending PS/2 move, left-click, and wheel events into the desktop")
+                        monitor.pointer_move(48, 32)
+                        time.sleep(0.25)
+                        monitor.pointer_buttons(1)
+                        time.sleep(0.1)
+                        monitor.pointer_buttons(0)
+                        monitor.pointer_move(0, 0, 1)
+                        time.sleep(0.4)
+                        cursor_screenshot = temporary / "desktop-pointer.ppm"
+                        monitor.screendump(cursor_screenshot)
+                        if not cursor_screenshot.exists():
+                            raise RuntimeError("QEMU did not create the cursor screenshot")
                     monitor.key("q")
                     wait_for_log(log_path,
                         "GUI session 'default' stopped; CLI remains available", process, 30)
@@ -234,11 +279,32 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                     monitor.key("ret")
                     stats_log = wait_for_log(log_path,
                         "GUI buffers: backbuffer=on wallpaper_cache=on", process, 30)
+                    if exercise_pointer:
+                        pointer_log = wait_for_log(log_path,
+                            "GUI pointer: ps2=ready usb-hid=off events=", process, 30)
+                        pointer_counts = re.findall(
+                            r"GUI pointer: ps2=ready usb-hid=off events=\d+ dropped=\d+ "
+                            r"move=(\d+) click=(\d+) scroll=(\d+)", pointer_log)
+                        if not pointer_counts or any(int(value) == 0
+                                                     for value in pointer_counts[-1]):
+                            raise RuntimeError(
+                                "QEMU did not deliver all PS/2 move/click/scroll events "
+                                f"to the kernel: {pointer_counts}")
+                        print("[PASS] PS/2 pointer events reached the kernel: "
+                              f"move/click/scroll={pointer_counts[-1]}")
+                        pointer_position = re.findall(
+                            r"GUI pointer position: x=(-?\d+) y=(-?\d+)", pointer_log)
+                        if not pointer_position:
+                            raise RuntimeError("Kernel did not report its final pointer position")
+                        verify_cursor_pixel(cursor_screenshot,
+                            int(pointer_position[-1][0]), int(pointer_position[-1][1]))
+                        print("[PASS] QEMU scanout contains the independent cursor overlay at its input position")
                     frame_counts = re.findall(r"GUI frames: redraws=(\d+)", stats_log)
-                    if not frame_counts or int(frame_counts[-1]) > 4:
+                    redraw_limit = 8 if exercise_pointer else 4
+                    if not frame_counts or int(frame_counts[-1]) > redraw_limit:
                         raise RuntimeError(
-                            "Default GUI kept redrawing while idle; expected at most 4 frames "
-                            f"across startup and the 2.5-second idle window (got {frame_counts})")
+                            "Default GUI kept redrawing excessively; expected at most "
+                            f"{redraw_limit} frames (got {frame_counts})")
                     print("[PASS] Vino Plus -> Default install -> Limine reboot -> Default GUI -> CLI fallback")
                     print("[PASS] GUI idle redraw bound and backbuffer/wallpaper cache instrumentation")
                     if exercise_gui_manager:
@@ -403,11 +469,16 @@ def main():
                         help="on a disposable CLI disk, install MVP from ISO and verify its session")
     parser.add_argument("--exercise-gui-manager", action="store_true",
                         help="on a disposable Plus disk, verify GUI commands and persistent selection")
+    parser.add_argument("--ps2-only", action="store_true",
+                        help="omit the USB tablet so QMP pointer events exercise the PS/2 fallback")
+    parser.add_argument("--exercise-pointer", action="store_true",
+                        help="send QEMU move, left-click, and wheel events and assert kernel delivery")
     arguments = parser.parse_args()
     try:
         if not run(arguments.esp_dir.resolve(), arguments.profile,
                    arguments.exercise_mvp_fallback, arguments.exercise_mvp_install,
-                   arguments.exercise_gui_manager):
+                   arguments.exercise_gui_manager, arguments.ps2_only,
+                   arguments.exercise_pointer):
             return 1
     except (OSError, RuntimeError, ValueError) as error:
         print(f"[FAIL] {error}")

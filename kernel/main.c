@@ -431,12 +431,18 @@ KOS_NORETURN void kernel_main(void) {
     acpi_initialize();
     lapic_initialize();
     ioapic_initialize();
-    if (ioapic_is_enabled() && mouse_initialize()
-        && irq_register_handler(KOS_PIC_IRQ_MOUSE, mouse_irq_handler)) {
+    bool ps2_mouse_ready = false;
+    if (ioapic_is_enabled()) {
+        /* Controller command replies share the keyboard output buffer/IRQ. */
+        ioapic_mask_irq(KOS_PIC_IRQ_KEYBOARD);
+        ps2_mouse_ready = mouse_initialize()
+            && irq_register_handler(KOS_PIC_IRQ_MOUSE, mouse_irq_handler);
+        ioapic_unmask_irq(KOS_PIC_IRQ_KEYBOARD);
+    }
+    if (ps2_mouse_ready) {
         ioapic_unmask_irq(KOS_PIC_IRQ_MOUSE);
         log_info("PS/2 mouse initialized and routed through IOAPIC.");
-    }
-    else {
+    } else {
         log_info("PS/2 mouse unavailable; GUI remains keyboard-operable.");
     }
     pic_disable();

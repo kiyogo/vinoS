@@ -560,7 +560,8 @@ static int bootstrap_nasm(void) {
         fail("install NASM 3.02+ and add it to PATH");
 }
 
-static int run_qemu(int memory_mb, int host_port, bool display, bool gdb_wait) {
+static int run_qemu(int memory_mb, int host_port, bool display, bool gdb_wait,
+                    bool usb_pointer) {
     const char *firmware = "C:/Program Files/qemu/share/edk2-x86_64-code.fd";
     const char *variables_template = "C:/Program Files/qemu/share/edk2-i386-vars.fd";
     if (!file_exists("build/esp/boot/kos.elf")) {
@@ -575,9 +576,14 @@ static int run_qemu(int memory_mb, int host_port, bool display, bool gdb_wait) {
     return execute_format("call \"%s\" -machine q35 -cpu max -m %d "
         "-drive if=pflash,format=raw,readonly=on,file=\"%s\" "
         "-drive if=pflash,format=raw,file=build/edk2-vars.fd "
+        "%s"
         "-drive format=raw,file=fat:rw:build/esp -serial stdio -monitor none -no-reboot "
         "-netdev user,id=kosnet,ipv4=on,ipv6=off,hostfwd=tcp::%d-:80 -device e1000,netdev=kosnet,mac=52:54:00:12:34:56 "
-        "-display %s%s", qemu_command(), memory_mb, firmware, host_port,
+        "-display %s%s", qemu_command(), memory_mb, firmware,
+        usb_pointer
+            ? "-device qemu-xhci,id=pointer-xhci -device usb-tablet,bus=pointer-xhci.0 "
+            : "",
+        host_port,
         display ? "default" : "none", gdb_wait ? " -S -s" : "");
 }
 
@@ -585,7 +591,7 @@ static void print_usage(void) {
     puts("KOS C development tool");
     puts("Usage: kos-tool <check|bootstrap-limine|bootstrap-assets|bootstrap-nasm|build|run> [options]");
     puts("build options: --kernel-only, --panic-test, --ci-smoke, --installer");
-    puts("run options: --display, --gdb-wait, --memory-mb <128..4096>, --host-port <1024..65535>");
+    puts("run options: --display, --gdb-wait, --usb-pointer, --memory-mb <128..4096>, --host-port <1024..65535>");
 }
 
 int main(int argc, char **argv) {
@@ -595,6 +601,7 @@ int main(int argc, char **argv) {
     bool installer = false;
     bool display = false;
     bool gdb_wait = false;
+    bool usb_pointer = false;
     bool skip_binary = false;
     int memory_mb = 256;
     int host_port = 8080;
@@ -610,6 +617,7 @@ int main(int argc, char **argv) {
         else if (strcmp(argv[index], "--installer") == 0) installer = true;
         else if (strcmp(argv[index], "--display") == 0) display = true;
         else if (strcmp(argv[index], "--gdb-wait") == 0) gdb_wait = true;
+        else if (strcmp(argv[index], "--usb-pointer") == 0) usb_pointer = true;
         else if (strcmp(argv[index], "--skip-binary") == 0) skip_binary = true;
         else if (strcmp(argv[index], "--memory-mb") == 0 && index + 1 < argc) memory_mb = atoi(argv[++index]);
         else if (strcmp(argv[index], "--host-port") == 0 && index + 1 < argc) host_port = atoi(argv[++index]);
@@ -623,7 +631,7 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "run") == 0) {
         if (memory_mb < 128 || memory_mb > 4096) return fail("memory must be between 128 and 4096 MB");
         if (host_port < 1024 || host_port > 65535) return fail("host port must be between 1024 and 65535");
-        return run_qemu(memory_mb, host_port, display, gdb_wait);
+        return run_qemu(memory_mb, host_port, display, gdb_wait, usb_pointer);
     }
     print_usage();
     return 1;
