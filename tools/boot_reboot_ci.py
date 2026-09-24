@@ -137,6 +137,25 @@ def ppm_dimensions(image_path):
     return width, height
 
 
+def verify_console_background(image_path):
+    image = image_path.read_bytes()
+    header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\r?\n", image)
+    if header is None:
+        raise RuntimeError("QEMU CLI screenshot is not a binary PPM image")
+    width, height = (int(header.group(1)), int(header.group(2)))
+    pixels = image[header.end():]
+    if len(pixels) != width * height * 3:
+        raise RuntimeError("QEMU CLI screenshot has invalid pixel data")
+    background = (0x18, 0x1B, 0x20)
+    last_row = pixels[(height - 1) * width * 3:]
+    for x in range(width):
+        offset = x * 3
+        if tuple(last_row[offset:offset + 3]) != background:
+            raise RuntimeError(
+                "CLI framebuffer was not clean after GUI exit; stale desktop/log pixels "
+                f"remain on the bottom scanline near x={x}")
+
+
 def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
         exercise_mvp_install=False, exercise_gui_manager=False,
         ps2_only=False, exercise_pointer=False, resolution="1024x768",
@@ -320,12 +339,21 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         monitor.screendump(cursor_screenshot)
                         if not cursor_screenshot.exists():
                             raise RuntimeError("QEMU did not create the cursor screenshot")
+                    terminal_ready_marker = "KOS debug terminal ready."
+                    terminal_ready_count = log_path.read_text(
+                        encoding="utf-8", errors="replace").count(terminal_ready_marker)
                     monitor.key("q")
                     wait_for_log(log_path,
                         "GUI session 'default' stopped; CLI remains available", process, 30)
                     wait_for_log(log_path,
                         "Vino CLI ready; open the disk installer with `installer ui`.",
                         process, 30, occurrences=2)
+                    wait_for_log(log_path, terminal_ready_marker, process, 30,
+                                 occurrences=terminal_ready_count + 1)
+                    cli_screenshot = temporary / "cli-after-gui.ppm"
+                    monitor.screendump(cli_screenshot)
+                    verify_console_background(cli_screenshot)
+                    print("[PASS] GUI exit restores a clean CLI framebuffer without desktop/log overlap")
                     monitor.type_text("vino gui stats")
                     monitor.key("ret")
                     stats_log = wait_for_log(log_path,

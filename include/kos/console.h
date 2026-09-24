@@ -9,6 +9,7 @@ bool console_is_initialized(void);
 uint64_t console_columns(void);
 uint64_t console_rows(void);
 void console_clear(void);
+void console_set_display_suppressed(bool suppressed);
 void console_write_char(char character);
 void console_write(const char *text);
 

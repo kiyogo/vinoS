@@ -24,6 +24,7 @@ struct kos_console {
     uint32_t foreground;
     uint32_t background;
     uint8_t initialized;
+    uint8_t display_suppressed;
 };
 
 static struct kos_console console;
@@ -93,6 +94,7 @@ bool console_initialize(void) {
     console.column = 0;
     console.row = 0;
     console.initialized = 1;
+    console.display_suppressed = 0;
     framebuffer_fill(console.background);
     draw_cursor();
     return true;
@@ -120,8 +122,15 @@ void console_clear(void) {
     draw_cursor();
 }
 
+void console_set_display_suppressed(bool suppressed) {
+    if (!console_is_initialized()
+        || console.display_suppressed == (suppressed ? 1u : 0u)) return;
+    console.display_suppressed = suppressed ? 1u : 0u;
+    if (!suppressed) console_clear();
+}
+
 void console_write_char(char character) {
-    if (!console_is_initialized()) {
+    if (!console_is_initialized() || console.display_suppressed) {
         return;
     }
 
