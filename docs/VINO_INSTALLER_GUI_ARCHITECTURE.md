@@ -300,6 +300,11 @@ Unavailable callbacks return `NOT_CONFIGURED`; they do not fabricate a URL,
 download, signature success, or progress. The shared verifier interface has a
 real SHA-256 implementation for integrity checking; signature verification
 remains unconfigured and remote executable installation remains fail-closed.
+Transfer-ready pending states require repository, version, SHA-256, and
+signature metadata; no durable pending-install serializer or reboot resume
+worker is wired up yet. Boot-time contract tests cover repository identity,
+manifest rejection, verifier outcomes, absent remote providers, and malformed
+pending metadata without initiating a fetch.
 
 ## Deliberate follow-up work
 

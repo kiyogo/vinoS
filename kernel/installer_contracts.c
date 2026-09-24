@@ -196,7 +196,15 @@ bool pending_gui_install_is_valid(const struct pending_gui_install *pending) {
             && !is_repository_id(pending->repository_id))) return false;
     if (pending->state >= PENDING_GUI_REQUESTED
         && pending->state <= PENDING_GUI_COMPLETED) {
-        return is_repository_id(pending->repository_id);
+        return is_repository_id(pending->repository_id)
+            && has_text(pending->version)
+            && is_sha256_hex(pending->checksum_sha256)
+            && has_text(pending->signature);
+    }
+    if (pending->repository_id[0] != '\0') {
+        return has_text(pending->version)
+            && is_sha256_hex(pending->checksum_sha256)
+            && has_text(pending->signature);
     }
     return true;
 }
@@ -323,6 +331,21 @@ bool installer_contract_self_test(void) {
     if (pending_gui_install_is_valid(&pending)) return false;
     kstrncpy(pending.repository_id, "test-repository",
              sizeof(pending.repository_id) - 1);
+    if (pending_gui_install_is_valid(&pending)) return false;
+    kstrncpy(pending.version, "1.2.3", sizeof(pending.version) - 1);
+    kstrncpy(pending.checksum_sha256,
+             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+             sizeof(pending.checksum_sha256) - 1);
+    kstrncpy(pending.signature, "detached-signature-metadata",
+             sizeof(pending.signature) - 1);
+    if (!pending_gui_install_is_valid(&pending)) return false;
+    pending.state = PENDING_GUI_VERIFYING;
+    pending.checksum_sha256[0] = 'x';
+    if (pending_gui_install_is_valid(&pending)) return false;
+    pending_gui_install_init(&pending);
+    pending.state = PENDING_GUI_FAILED;
+    kstrncpy(pending.gui_id, "local-repair",
+             sizeof(pending.gui_id) - 1);
     if (!pending_gui_install_is_valid(&pending)) return false;
 
     struct installer_state state;

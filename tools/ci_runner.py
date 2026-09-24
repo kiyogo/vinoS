@@ -101,6 +101,7 @@ def checklist(label, output):
     common = [
         ("Boot", "KOS booting..."),
         ("VFS multi-volume", "VFS multi-volume path self-test passed."),
+        ("Installer and remote GUI contracts", "Installer contracts self-test passed."),
         ("DHCP", "DHCP self-test passed"),
         ("TCP", "tcptest: TCP connection closed cleanly."),
         ("Storage block core", ">>> [PASS] BLOCK DEVICE SUBSYSTEM TEST PASSED <<<"),

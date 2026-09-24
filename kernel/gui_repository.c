@@ -23,6 +23,21 @@ static const struct package_verifier_ops sha256_only_ops = {
     .verify_checksum = package_verifier_sha256_hex,
 };
 
+static enum gui_repository_status self_test_repository_lookup(
+    void *context, const char *gui_id, struct gui_manifest *manifest_out) {
+    if (context == NULL || gui_id == NULL || manifest_out == NULL) {
+        return GUI_REPOSITORY_ERR_INVALID_ARGUMENT;
+    }
+    const struct gui_manifest *fixture = context;
+    if (kstrcmp(fixture->id, gui_id) != 0) return GUI_REPOSITORY_ERR_NOT_FOUND;
+    *manifest_out = *fixture;
+    return GUI_REPOSITORY_OK;
+}
+
+static const struct gui_repository_ops self_test_repository_ops = {
+    .lookup = self_test_repository_lookup,
+};
+
 static uint8_t checksum_hex_value(char character) {
     if (character >= '0' && character <= '9') return (uint8_t)(character - '0');
     if (character >= 'a' && character <= 'f') return (uint8_t)(character - 'a' + 10);
@@ -173,11 +188,13 @@ bool gui_remote_interfaces_self_test(void) {
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
     static const char wrong_sha256[] =
         "aa7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    static const char malformed_sha256[] = "abc";
 
     struct gui_repository repository = {.repository_id = "self-test"};
     struct gui_manifest manifest;
     if (gui_repository_lookup(&repository, "example", &manifest)
-        != GUI_REPOSITORY_ERR_NOT_CONFIGURED) return false;
+            != GUI_REPOSITORY_ERR_NOT_CONFIGURED
+        || manifest.id[0] != '\0') return false;
 
     struct gui_manifest remote_manifest = {
         .id = "example",
@@ -193,11 +210,40 @@ bool gui_remote_interfaces_self_test(void) {
         .checksum_sha256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         .signature = "self-test-only",
     };
+
+    /* This is an in-memory metadata fixture; it performs no network I/O. */
+    repository.ops = &self_test_repository_ops;
+    repository.context = &remote_manifest;
+    if (gui_repository_lookup(&repository, "example", &manifest)
+            != GUI_REPOSITORY_OK
+        || kstrcmp(manifest.id, "example") != 0
+        || kstrcmp(manifest.repository_id, "self-test") != 0) return false;
+    manifest = (struct gui_manifest){.id = "stale-output"};
+    if (gui_repository_lookup(&repository, "missing", &manifest)
+            != GUI_REPOSITORY_ERR_NOT_FOUND
+        || manifest.id[0] != '\0') return false;
+
+    struct gui_manifest saved_manifest = remote_manifest;
+    kstrncpy(remote_manifest.repository_id, "other-repository",
+             sizeof(remote_manifest.repository_id) - 1);
+    manifest = (struct gui_manifest){.id = "stale-output"};
+    if (gui_repository_lookup(&repository, "example", &manifest)
+            != GUI_REPOSITORY_ERR_INVALID_MANIFEST
+        || manifest.id[0] != '\0') return false;
+    remote_manifest = saved_manifest;
+    repository.repository_id = "bad/repository";
+    if (gui_repository_lookup(&repository, "example", &manifest)
+        != GUI_REPOSITORY_ERR_INVALID_ARGUMENT) return false;
+
     struct remote_package_provider provider = {0};
-    struct remote_package_artifact artifact = {0};
+    struct remote_package_artifact artifact = {
+        .data = data,
+        .size = sizeof(data),
+        .provider_token = &remote_manifest,
+    };
     if (remote_package_provider_fetch(&provider, &remote_manifest, &artifact)
         != GUI_REPOSITORY_ERR_NOT_CONFIGURED || artifact.data != NULL
-        || artifact.size != 0) return false;
+        || artifact.size != 0 || artifact.provider_token != NULL) return false;
 
     struct package_verifier verifier;
     package_verifier_init_sha256_only(&verifier);
@@ -206,8 +252,16 @@ bool gui_remote_interfaces_self_test(void) {
         || package_verifier_verify_checksum(&verifier, wrong_sha256, data,
                                             sizeof(data))
             != PACKAGE_VERIFICATION_ERR_CHECKSUM
+        || package_verifier_verify_checksum(&verifier, malformed_sha256, data,
+                                            sizeof(data))
+            != PACKAGE_VERIFICATION_ERR_INVALID_ARGUMENT
         || package_verifier_verify_signature(&verifier, &remote_manifest, data,
                                              sizeof(data))
             != PACKAGE_VERIFICATION_ERR_NOT_CONFIGURED) return false;
+    struct gui_manifest unsigned_manifest = remote_manifest;
+    unsigned_manifest.signature[0] = '\0';
+    if (package_verifier_verify_signature(&verifier, &unsigned_manifest, data,
+                                          sizeof(data))
+        != PACKAGE_VERIFICATION_ERR_SIGNATURE_MISSING) return false;
     return true;
 }
