@@ -122,7 +122,8 @@ static uint32_t wallpaper_pitch;
 static uint32_t recent_apps[2];
 static uint32_t recent_app_count;
 static uint32_t settings_page;
-static bool handler_rendered_current_input;
+static uint64_t last_pointer_render_ms;
+static bool pointer_render_pending;
 static uint32_t animation_frame;
 static char text_scratch[KOS_GUI_TEXT_MAX];
 
@@ -284,6 +285,57 @@ static bool pointer_inside(struct kos_gui_rect rect) {
 static void draw_dot(int32_t x, int32_t y, uint32_t size,
                      struct kos_gui_color color) {
     (void)vino_gui_fill((struct kos_gui_rect){ x, y, size, size }, color);
+}
+
+static void draw_hline(int32_t x, int32_t y, uint32_t width, uint32_t thickness,
+                       struct kos_gui_color color);
+
+static bool pointer_shape_pixel(int32_t x, int32_t y) {
+    static const uint16_t rows[13] = {
+        0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
+        0x01ff, 0x00ff, 0x00db, 0x0198, 0x0300, 0x0300,
+    };
+    return x >= 0 && x < 9 && y >= 0 && y < 13
+        && (rows[y] & (1u << (uint32_t)x)) != 0;
+}
+
+static void draw_pointer_cursor(void) {
+    if (!pointer_available) return;
+    const struct kos_gui_color outline = { 5, 12, 22, 0 };
+    const struct kos_gui_color fill = { 244, 249, 255, 0 };
+    for (int32_t y = -1; y < 14; ++y) {
+        int32_t screen_y = pointer_y + y;
+        if (screen_y < 0 || (uint32_t)screen_y >= surface.height) continue;
+        int32_t run_start = 0;
+        int32_t run_kind = 0;
+        for (int32_t x = -1; x <= 10; ++x) {
+            int32_t screen_x = pointer_x + x;
+            int32_t kind = 0;
+            if (screen_x >= 0 && (uint32_t)screen_x < surface.width) {
+                if (pointer_shape_pixel(x, y)) kind = 2;
+                else {
+                    for (int32_t dy = -1; dy <= 1 && kind == 0; ++dy) {
+                        for (int32_t dx = -1; dx <= 1; ++dx) {
+                            if ((dx != 0 || dy != 0)
+                                && pointer_shape_pixel(x + dx, y + dy)) {
+                                kind = 1;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if (kind != run_kind) {
+                if (run_kind != 0) {
+                    draw_hline(pointer_x + run_start, screen_y,
+                        (uint32_t)(x - run_start), 1,
+                        run_kind == 2 ? fill : outline);
+                }
+                run_start = x;
+                run_kind = kind;
+            }
+        }
+    }
 }
 
 static void draw_round_dot(int32_t x, int32_t y, uint32_t size,
@@ -2041,6 +2093,7 @@ static void render_ui_contents(void) {
         draw_text(overlay_x + 12, 48, "Move window: H/J/K/L  |  G to finish",
                   color_cyan, color_panel_high);
     }
+    draw_pointer_cursor();
 }
 
 static void render_ui(void) {
@@ -2057,7 +2110,6 @@ static void animate_menu(bool opening) {
     if (reduced_motion) {
         menu_animation_step = opening ? 4 : 0;
         render_ui();
-        handler_rendered_current_input = true;
         return;
     }
     while ((opening && menu_animation_step < 4)
@@ -2067,7 +2119,6 @@ static void animate_menu(bool opening) {
         render_ui();
         (void)sys_sleep(16);
     }
-    handler_rendered_current_input = true;
 }
 
 static void set_start_menu(bool open) {
@@ -2671,26 +2722,56 @@ __attribute__((noreturn)) void _start(void) {
     files_reload();
     render_ui();
     for (;;) {
+        bool got_input = false;
+        bool render_for_input = false;
+        uint64_t latest_input_ms = last_pointer_render_ms;
+        uint32_t drained_events = 0;
         struct kos_gui_input_event event = { .abi_version = KOS_GUI_ABI_VERSION };
-        if (vino_gui_input_read(&event) == 0
-            && (event.type == KOS_GUI_INPUT_KEY || event.type == KOS_GUI_INPUT_POINTER)) {
-            bool input_changed = true;
-            if (event.type == KOS_GUI_INPUT_POINTER) {
-                input_changed = event.pointer_x != pointer_x || event.pointer_y != pointer_y
-                    || event.pointer_buttons != pointer_buttons || event.pointer_wheel != 0;
+        for (; drained_events < 64; ++drained_events) {
+            event.abi_version = KOS_GUI_ABI_VERSION;
+            if (vino_gui_input_read(&event) < 0) break;
+            latest_input_ms = event.timestamp_ms;
+            if (event.type != KOS_GUI_INPUT_KEY
+                && event.type != KOS_GUI_INPUT_POINTER) break;
+            got_input = true;
+            if (event.type == KOS_GUI_INPUT_KEY) {
+                handle_key((char)event.key);
+                render_for_input = true;
+                pointer_render_pending = false;
+                continue;
             }
-            if (input_changed) {
-                handler_rendered_current_input = false;
-                if (event.type == KOS_GUI_INPUT_KEY) handle_key((char)event.key);
-                else handle_pointer(&event);
-                if (!handler_rendered_current_input || animation_frame != 0)
-                    render_ui();
-                while (animation_frame != 0) {
-                    --animation_frame;
-                    (void)sys_sleep(16);
-                    render_ui();
-                }
-                handler_rendered_current_input = false;
+
+            bool position_changed = event.pointer_x != pointer_x
+                || event.pointer_y != pointer_y;
+            bool interaction_changed = event.pointer_buttons != pointer_buttons
+                || event.pointer_wheel != 0;
+            if (!position_changed && !interaction_changed) continue;
+            handle_pointer(&event);
+            if (interaction_changed) {
+                render_for_input = true;
+                pointer_render_pending = false;
+            }
+            else if (position_changed) {
+                pointer_render_pending = true;
+            }
+        }
+
+        /* Keep pointer motion independent from UI painting. The kernel cursor
+           moves for every event; hover/layout work is capped at ~60 Hz. */
+        if (pointer_render_pending && latest_input_ms >= last_pointer_render_ms
+            && latest_input_ms - last_pointer_render_ms >= 16) {
+            render_for_input = true;
+            pointer_render_pending = false;
+        }
+        if (render_for_input) {
+            render_ui();
+            last_pointer_render_ms = latest_input_ms;
+            pointer_render_pending = false;
+            while (animation_frame != 0) {
+                --animation_frame;
+                (void)sys_sleep(16);
+                render_ui();
+                last_pointer_render_ms = latest_input_ms;
             }
         }
         uint64_t now = sys_gettime();
@@ -2703,6 +2784,6 @@ __attribute__((noreturn)) void _start(void) {
                 displayed_uptime_minute = now / 60;
             }
         }
-        (void)sys_sleep(24);
+        if (!got_input && drained_events < 64) (void)sys_sleep(2);
     }
 }

@@ -61,7 +61,7 @@ def main():
             "--profile", "plus",
             "--resolution", resolution,
             "--screenshot", str(capture.resolve()),
-            "--ps2-only", "--exercise-pointer",
+            "--exercise-pointer",
         ]
         print(f"[VISUAL] Capturing Vino Default at {resolution}", flush=True)
         result = subprocess.run(command, cwd=ROOT)
