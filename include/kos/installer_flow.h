@@ -32,6 +32,8 @@ int installer_flow_select_profile(struct installer_flow *flow, const char *id);
 int installer_flow_select_gui(struct installer_flow *flow, const char *id);
 int installer_flow_select_disk(struct installer_flow *flow, const char *name);
 int installer_flow_select_partition(struct installer_flow *flow, const char *name);
+int installer_flow_delete_partition(struct installer_flow *flow, const char *name,
+                                    bool confirmed);
 int installer_flow_request_partition_creation(struct installer_flow *flow,
                                               enum partition_table_type table_type,
                                               uint64_t start_lba, uint64_t block_count,

@@ -8,6 +8,7 @@
 #include <kos/partition.h>
 
 #define INSTALLER_FILESYSTEM_NAME_LENGTH 16
+#define INSTALLER_MIN_TARGET_BLOCKS 4096ULL
 
 struct installer_disk_info {
     struct block_device *device;
@@ -38,6 +39,11 @@ bool installer_storage_disk_at(uint32_t index, struct installer_disk_info *info)
 uint32_t installer_storage_partition_count(const struct block_device *disk);
 bool installer_storage_partition_at(const struct block_device *disk, uint32_t index,
                                     struct installer_partition_info *info);
+bool installer_storage_find_free_extent(struct block_device *disk,
+                                        enum partition_table_type table_type,
+                                        uint64_t minimum_blocks,
+                                        uint64_t *start_lba,
+                                        uint64_t *block_count);
 
 /* All mutating APIs require confirmed=true and validate the parent/geometry. */
 bool installer_storage_create_partition(struct block_device *disk,

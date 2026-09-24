@@ -119,6 +119,12 @@ bool partition_plan_is_valid(const struct partition_plan *plan) {
     }
     bool pending_create = plan->operation_count == 1
         && plan->operations[0].type == PARTITION_PLAN_CREATE;
+    if (pending_create
+        && (plan->selected_start_lba != plan->operations[0].start_lba
+            || plan->selected_block_count != plan->operations[0].block_count
+            || plan->selected_filesystem != plan->operations[0].filesystem)) {
+        return false;
+    }
     if (plan->selected_partition_name[0] == '\0') {
         if (!pending_create
             && (plan->selected_start_lba != 0 || plan->selected_block_count != 0
@@ -137,7 +143,7 @@ bool partition_plan_is_valid(const struct partition_plan *plan) {
         return false;
     }
     if (plan->selected_filesystem != PARTITION_PLAN_FILESYSTEM_NONE
-        && plan->selected_partition_name[0] == '\0') {
+        && plan->selected_partition_name[0] == '\0' && !pending_create) {
         return false;
     }
     return true;
@@ -272,6 +278,28 @@ bool installer_contract_self_test(void) {
         .block_count = 2048,
     };
     if (!partition_plan_is_valid(&plan)) return false;
+
+    plan.operations[0] = (struct partition_plan_operation){
+        .type = PARTITION_PLAN_CREATE,
+        .start_lba = 2048,
+        .block_count = 2048,
+        .filesystem = PARTITION_PLAN_FILESYSTEM_FAT32,
+    };
+    plan.selected_start_lba = 2048;
+    plan.selected_block_count = 2048;
+    plan.selected_filesystem = PARTITION_PLAN_FILESYSTEM_FAT32;
+    if (!partition_plan_is_valid(&plan)) return false;
+    plan.operations[0].block_count = 1024;
+    if (partition_plan_is_valid(&plan)) return false;
+
+    plan.operations[0] = (struct partition_plan_operation){
+        .type = PARTITION_PLAN_SELECT_EXISTING,
+        .start_lba = 128,
+        .block_count = 2048,
+    };
+    plan.selected_start_lba = 0;
+    plan.selected_block_count = 0;
+    plan.selected_filesystem = PARTITION_PLAN_FILESYSTEM_NONE;
     plan.operations[0].start_lba = UINT64_MAX;
     if (partition_plan_is_valid(&plan)) return false;
 

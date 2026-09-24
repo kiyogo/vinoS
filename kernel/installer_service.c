@@ -41,6 +41,9 @@ static void serialize_state(struct kos_installer_state *output, int result) {
         .result = result,
         .selected_filesystem = (uint32_t)service_flow.state.partition_plan.selected_filesystem,
         .target_confirmed = service_flow.state.partition_plan.confirmed ? 1u : 0u,
+        .target_start_lba = service_flow.state.partition_plan.selected_start_lba,
+        .target_block_count = service_flow.state.partition_plan.selected_block_count,
+        .target_table_type = (uint32_t)service_flow.state.partition_plan.table_type,
     };
     copy_field(output->selected_profile, sizeof(output->selected_profile),
                service_flow.state.selected_profile_id);
@@ -139,6 +142,9 @@ static int dispatch_action(const struct kos_installer_action_request *request,
             return installer_flow_select_disk(&service_flow, request->value);
         case KOS_INSTALLER_SELECT_PARTITION:
             return installer_flow_select_partition(&service_flow, request->value);
+        case KOS_INSTALLER_DELETE_PARTITION:
+            return installer_flow_delete_partition(&service_flow, request->value,
+                                                    request->confirm != 0);
         case KOS_INSTALLER_REQUEST_PARTITION: {
             enum partition_table_type table = (enum partition_table_type)request->table_type;
             enum partition_plan_filesystem filesystem =
@@ -150,6 +156,7 @@ static int dispatch_action(const struct kos_installer_action_request *request,
             if (request->confirm == 0) return -EPERM;
             if (service_flow.state.partition_plan.operation_count == 1
                 && service_flow.state.partition_plan.operations[0].type == PARTITION_PLAN_CREATE) {
+                service_flow.state.partition_plan.confirmed = true;
                 return installer_flow_apply_partition_creation(&service_flow);
             }
             if (service_flow.selected_partition == NULL

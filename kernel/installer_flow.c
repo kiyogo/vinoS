@@ -204,6 +204,61 @@ int installer_flow_select_partition(struct installer_flow *flow, const char *nam
     return INSTALLER_FLOW_OK;
 }
 
+int installer_flow_delete_partition(struct installer_flow *flow, const char *name,
+                                    bool confirmed) {
+    if (flow == NULL || name == NULL || flow->selected_disk == NULL) {
+        return INSTALLER_FLOW_ERR_INVALID_ARGUMENT;
+    }
+    if (!confirmed || flow->state.phase != INSTALLER_FLOW_PARTITION_SETUP
+        || flow->selected_disk->state != BLOCK_DEVICE_ONLINE
+        || flow->selected_disk->type == BLOCK_TYPE_PARTITION
+        || flow->selected_disk->parent != NULL
+        || flow->selected_disk->block_size != BLOCK_DEFAULT_SECTOR_SIZE
+        || flow->selected_disk->total_blocks == 0
+        || block_device_find_by_name(flow->selected_disk->name) != flow->selected_disk) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+
+    struct block_device *partition = block_device_find_by_name(name);
+    if (partition == NULL || partition->type != BLOCK_TYPE_PARTITION
+        || partition->parent != flow->selected_disk) {
+        return INSTALLER_FLOW_ERR_PARTITION_NOT_FOUND;
+    }
+    bool listed = false;
+    uint32_t count = installer_storage_partition_count(flow->selected_disk);
+    for (uint32_t index = 0; index < count; ++index) {
+        struct installer_partition_info info;
+        if (installer_storage_partition_at(flow->selected_disk, index, &info)
+            && info.device == partition && info.parent == flow->selected_disk) {
+            listed = true;
+            break;
+        }
+    }
+    if (!listed || !installer_storage_delete_partition(partition, confirmed)) {
+        set_error(flow, "Partition deletion failed; the partition table was not updated");
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+
+    partition_plan_init(&flow->state.partition_plan);
+    kstrncpy(flow->state.partition_plan.disk_name, flow->selected_disk->name,
+             sizeof(flow->state.partition_plan.disk_name) - 1);
+    flow->state.partition_plan.disk_name[
+        sizeof(flow->state.partition_plan.disk_name) - 1] = '\0';
+    flow->state.partition_plan.disk_block_size = flow->selected_disk->block_size;
+    flow->state.partition_plan.disk_total_blocks = flow->selected_disk->total_blocks;
+    struct installer_disk_info disk_info;
+    for (uint32_t index = 0; index < installer_storage_disk_count(); ++index) {
+        if (installer_storage_disk_at(index, &disk_info)
+            && disk_info.device == flow->selected_disk) {
+            flow->state.partition_plan.table_type = disk_info.table_type;
+            break;
+        }
+    }
+    flow->selected_partition = NULL;
+    flow->state.phase = INSTALLER_FLOW_PARTITION_SETUP;
+    return INSTALLER_FLOW_OK;
+}
+
 int installer_flow_request_partition_creation(struct installer_flow *flow,
                                               enum partition_table_type table_type,
                                               uint64_t start_lba, uint64_t block_count,
@@ -214,6 +269,13 @@ int installer_flow_request_partition_creation(struct installer_flow *flow,
         || (filesystem != PARTITION_PLAN_FILESYSTEM_NONE
             && filesystem != PARTITION_PLAN_FILESYSTEM_FAT32)) {
         return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
+    if (start_lba == 0 && block_count == 0) {
+        if (!installer_storage_find_free_extent(flow->selected_disk, table_type,
+                INSTALLER_MIN_TARGET_BLOCKS, &start_lba, &block_count)) {
+            set_error(flow, "No suitably sized, aligned free partition extent was found");
+            return INSTALLER_FLOW_ERR_INVALID_STATE;
+        }
     }
     if (start_lba == 0 || block_count == 0
         || start_lba > UINT64_MAX - block_count
@@ -242,9 +304,11 @@ int installer_flow_request_partition_creation(struct installer_flow *flow,
 
 int installer_flow_apply_partition_creation(struct installer_flow *flow) {
     if (flow == NULL || flow->selected_disk == NULL
+        || !installer_flow_is_valid(flow)
         || flow->state.phase != INSTALLER_FLOW_CONFIRMATION
         || flow->state.partition_plan.operation_count != 1
-        || flow->state.partition_plan.operations[0].type != PARTITION_PLAN_CREATE) {
+        || flow->state.partition_plan.operations[0].type != PARTITION_PLAN_CREATE
+        || !flow->state.partition_plan.confirmed) {
         return INSTALLER_FLOW_ERR_INVALID_STATE;
     }
     const struct partition_plan_operation operation = flow->state.partition_plan.operations[0];

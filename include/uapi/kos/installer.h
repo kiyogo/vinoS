@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 
-#define KOS_INSTALLER_ABI_VERSION 1u
+#define KOS_INSTALLER_ABI_VERSION 2u
 #define KOS_INSTALLER_TEXT_MAX 128u
 #define KOS_INSTALLER_NAME_MAX 32u
 #define KOS_INSTALLER_MAX_DISKS 8u
@@ -22,6 +22,7 @@ enum kos_installer_action {
     KOS_INSTALLER_EXECUTE,
     KOS_INSTALLER_BACK,
     KOS_INSTALLER_REBOOT,
+    KOS_INSTALLER_DELETE_PARTITION,
 };
 
 enum kos_installer_phase {
@@ -99,6 +100,10 @@ struct kos_installer_state {
     char error[KOS_INSTALLER_TEXT_MAX];
     struct kos_installer_disk disks[KOS_INSTALLER_MAX_DISKS];
     struct kos_installer_partition partitions[KOS_INSTALLER_MAX_PARTITIONS];
+    uint64_t target_start_lba;
+    uint64_t target_block_count;
+    uint32_t target_table_type;
+    uint32_t reserved_target;
 };
 
 enum kos_installer_transaction_flag {

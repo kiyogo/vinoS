@@ -24,6 +24,8 @@ static struct kos_gui_surface surface;
 static struct kos_installer_state installer;
 static uint32_t selection;
 static bool format_confirmation_pending;
+static bool delete_confirmation_pending;
+static char delete_partition_name[KOS_INSTALLER_NAME_MAX];
 static char local_error[KOS_INSTALLER_TEXT_MAX];
 
 static long syscall1(uint64_t number, uint64_t arg0) {
@@ -130,7 +132,7 @@ static void draw_shell(void) {
     draw_text(UI_MARGIN + 28, UI_MARGIN + 50,
               "Vino OS is the default edition; profiles only choose CLI or GUI.",
               color_muted, color_panel);
-    const char *footer = "J/K select  Enter continue  C confirm/create  F format  Esc exit";
+    const char *footer = "J/K select  Enter continue  C create/confirm  X delete  F format  Esc exit";
     if (installer.phase == KOS_INSTALLER_PHASE_FINISHED)
         footer = "Enter/R reboot   Q/Esc return to Vino CLI";
     else if (installer.phase == KOS_INSTALLER_PHASE_ERROR)
@@ -218,13 +220,32 @@ static void draw_partition_page(void) {
         make_partition_label(labels[index], &installer.partitions[index]);
         items[index] = labels[index];
     }
-    draw_text(UI_MARGIN + 28, UI_MARGIN + 116, "Select an EFI System partition, or create one", color_text, color_panel);
+    draw_text(UI_MARGIN + 28, UI_MARGIN + 116,
+              "Select a target, C creates FAT32 in free space, X deletes the selected partition",
+              color_text, color_panel);
     draw_list(items, installer.partition_count, UI_MARGIN + 148, surface.width - UI_MARGIN * 2 - 56);
     if (installer.partition_count == 0)
-        draw_text(UI_MARGIN + 28, UI_MARGIN + 160, "No partitions found. C prepares a new FAT32 EFI target.", color_muted, color_panel);
+        draw_text(UI_MARGIN + 28, UI_MARGIN + 160,
+                  "No partitions found. C prepares a new FAT32 target in the largest free extent.",
+                  color_muted, color_panel);
+    if (delete_confirmation_pending) {
+        static char message[KOS_GUI_TEXT_MAX];
+        string_copy(message, sizeof(message), "Delete ");
+        string_append(message, sizeof(message), delete_partition_name);
+        string_append(message, sizeof(message),
+            "? Y removes its table entry; data is not erased. N cancels.");
+        struct vino_gui_dialog dialog = {
+            .bounds = content_rect(UI_MARGIN + 360, surface.width - UI_MARGIN * 2 - 100, 88),
+            .title = "Confirm partition deletion",
+            .message = message,
+            .visible = true,
+        };
+        vino_gui_dialog_draw(&dialog, color_text, color_panel, color_error);
+    }
 }
 
 static void draw_confirmation_page(void) {
+    static char plan_label[KOS_GUI_TEXT_MAX];
     draw_text(UI_MARGIN + 28, UI_MARGIN + 116, "Review and confirm the target before writing", color_text, color_panel);
     draw_text(UI_MARGIN + 28, UI_MARGIN + 154, "OS edition: default", color_muted, color_panel);
     draw_text(UI_MARGIN + 28, UI_MARGIN + 184, "Profile:", color_muted, color_panel);
@@ -235,6 +256,21 @@ static void draw_confirmation_page(void) {
     draw_text(UI_MARGIN + 150, UI_MARGIN + 244,
         installer.selected_partition[0] ? installer.selected_partition : "new partition + FAT32",
         color_text, color_panel);
+    if (installer.selected_partition[0] == '\0') {
+        string_copy(plan_label, sizeof(plan_label),
+            installer.target_table_type == KOS_INSTALLER_TABLE_GPT ? "GPT: LBA " : "MBR: LBA ");
+        number_append(plan_label, sizeof(plan_label), installer.target_start_lba);
+        string_append(plan_label, sizeof(plan_label), ", ");
+        number_append(plan_label, sizeof(plan_label), installer.target_block_count);
+        string_append(plan_label, sizeof(plan_label), " sectors, FAT32");
+    } else {
+        string_copy(plan_label, sizeof(plan_label), "Target extent: LBA ");
+        number_append(plan_label, sizeof(plan_label), installer.target_start_lba);
+        string_append(plan_label, sizeof(plan_label), ", ");
+        number_append(plan_label, sizeof(plan_label), installer.target_block_count);
+        string_append(plan_label, sizeof(plan_label), " sectors");
+    }
+    draw_text(UI_MARGIN + 28, UI_MARGIN + 274, plan_label, color_muted, color_panel);
     if (installer.target_confirmed) {
         draw_text(UI_MARGIN + 28, UI_MARGIN + 288, "Target confirmed. Enter starts installation.", color_accent, color_panel);
         draw_text(UI_MARGIN + 28, UI_MARGIN + 318, "Base OS, Limine and selected GUI will be written.", color_muted, color_panel);
@@ -306,27 +342,16 @@ static const struct kos_installer_disk *selected_disk(void) {
 
 static long request_partition(void) {
     const struct kos_installer_disk *disk = selected_disk();
-    if (disk == 0 || disk->partition_count != 0) return -1;
+    if (disk == 0) return -1;
     uint32_t table = disk->table_type;
-    uint64_t first = 2048;
-    uint64_t last;
-    if (table == KOS_INSTALLER_TABLE_NONE) {
-        table = KOS_INSTALLER_TABLE_GPT;
-        if (disk->total_blocks <= 34) return -1;
-        last = disk->total_blocks - 34;
-    } else {
-        if (disk->last_usable_lba < first) return -1;
-        last = disk->last_usable_lba;
-    }
-    if (disk->first_usable_lba > first) first = disk->first_usable_lba;
-    if (last < first || last - first < 4095) return -1;
+    if (table == KOS_INSTALLER_TABLE_NONE) table = KOS_INSTALLER_TABLE_GPT;
     struct kos_installer_action_request request = {
         .abi_version = KOS_INSTALLER_ABI_VERSION,
         .action = KOS_INSTALLER_REQUEST_PARTITION,
         .table_type = table,
         .filesystem = KOS_INSTALLER_FS_FAT32,
-        .start_lba = first,
-        .block_count = last - first + 1,
+        .start_lba = 0,
+        .block_count = 0,
     };
     long result = vino_installer_action(&request, &installer);
     if (result < 0) string_copy(local_error, sizeof(local_error), "Could not prepare a safe partition range.");
@@ -395,6 +420,19 @@ __attribute__((noreturn)) void _start(void) {
             }
             continue;
         }
+        if (delete_confirmation_pending) {
+            if (key == 'y' || key == 'Y') {
+                delete_confirmation_pending = false;
+                (void)send_action(KOS_INSTALLER_DELETE_PARTITION, true,
+                                  delete_partition_name);
+                delete_partition_name[0] = '\0';
+                selection = 0;
+            } else if (key == 'n' || key == 'N' || key == 27) {
+                delete_confirmation_pending = false;
+                delete_partition_name[0] = '\0';
+            }
+            continue;
+        }
         if (key == 27 || key == 'q' || key == 'Q') {
             (void)send_action(KOS_INSTALLER_CLOSE, false, 0);
             app_exit(0);
@@ -412,5 +450,12 @@ __attribute__((noreturn)) void _start(void) {
         else if ((key == 'f' || key == 'F') && installer.phase == KOS_INSTALLER_PHASE_CONFIRMATION
                  && installer.selected_partition[0] != '\0')
             format_confirmation_pending = true;
+        else if ((key == 'x' || key == 'X')
+                 && installer.phase == KOS_INSTALLER_PHASE_PARTITION_SETUP
+                 && installer.partition_count != 0) {
+            string_copy(delete_partition_name, sizeof(delete_partition_name),
+                installer.partitions[selection % installer.partition_count].name);
+            delete_confirmation_pending = delete_partition_name[0] != '\0';
+        }
     }
 }
