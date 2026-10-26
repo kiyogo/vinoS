@@ -4,6 +4,7 @@
 #include <kos/block_cache.h>
 #include <kos/crypto.h>
 #include <kos/fat32.h>
+#include <kos/framebuffer.h>
 #include <kos/gui_manager.h>
 #include <kos/heap.h>
 #include <kos/initramfs.h>
@@ -853,7 +854,15 @@ int install_bootloader(struct installer_flow *flow, void *context) {
         return INSTALLER_FLOW_ERR_NOT_IMPLEMENTED;
     }
 
-    static const uint8_t limine_configuration[] =
+    uint64_t resolution_width = framebuffer_width();
+    uint64_t resolution_height = framebuffer_height();
+    if (resolution_width == 0 || resolution_height == 0) {
+        resolution_width = 1024;
+        resolution_height = 768;
+    }
+    char limine_configuration[320];
+    int configuration_size = snprintf(limine_configuration,
+        sizeof(limine_configuration),
         "timeout: 3\n"
         "quiet: yes\n"
         "serial: yes\n"
@@ -863,9 +872,15 @@ int install_bootloader(struct installer_flow *flow, void *context) {
         "path: boot():/VINO/BOOT/KOS.ELF\n"
         "kaslr: no\n"
         "paging_mode: 4level\n"
-        "resolution: 1024x768x32\n"
+        "resolution: %llux%llux32\n"
         "module_path: boot():/VINO/BOOT/INITRAMFS.CPIO\n"
-        "module_string: kos-initramfs\n";
+        "module_string: kos-initramfs\n",
+        (unsigned long long)resolution_width,
+        (unsigned long long)resolution_height);
+    if (configuration_size <= 0
+        || (uint64_t)configuration_size >= sizeof(limine_configuration)) {
+        return INSTALLER_FLOW_ERR_INVALID_STATE;
+    }
 
     char (*created_directories)[VFS_MAX_PATH] =
         kcalloc(INSTALLER_MAX_CREATED_DIRECTORIES, VFS_MAX_PATH);
@@ -891,8 +906,9 @@ int install_bootloader(struct installer_flow *flow, void *context) {
         ok = write_verified(volume, efi_path, efi_binary, efi_size,
                             verify_items, &verify_count, created_directories,
                             &directory_count)
-            && write_verified(volume, config_path, limine_configuration,
-                sizeof(limine_configuration) - 1, verify_items, &verify_count,
+            && write_verified(volume, config_path,
+                (const uint8_t *)limine_configuration,
+                (uint64_t)configuration_size, verify_items, &verify_count,
                 created_directories, &directory_count);
     }
 
@@ -903,8 +919,8 @@ int install_bootloader(struct installer_flow *flow, void *context) {
         uint8_t config_checksum[32];
         kos_sha256(efi_binary, efi_size, verify_items[0].checksum);
         checksum_to_hex(verify_items[0].checksum, efi_hex);
-        kos_sha256(limine_configuration, sizeof(limine_configuration) - 1,
-                   config_checksum);
+        kos_sha256((const uint8_t *)limine_configuration,
+                   (uint64_t)configuration_size, config_checksum);
         checksum_to_hex(config_checksum, config_hex);
         int record_size = snprintf(checksum_record, sizeof(checksum_record),
             "%s  /EFI/BOOT/BOOTX64.EFI\n%s  /EFI/BOOT/limine.conf\n",

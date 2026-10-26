@@ -18,9 +18,14 @@ static struct kos_gui_frame_stats frame_stats = {
 };
 static bool frame_open;
 static bool frame_buffered;
+static bool frame_damage;
+static struct kos_gui_rect frame_damage_rect;
 static uint64_t frame_started_ms;
 static uint64_t frame_draw_operations;
 static bool pointer_input_first;
+static uint32_t frame_duration_samples[256];
+static uint32_t frame_duration_sample_next;
+static uint32_t frame_duration_sample_count;
 
 static struct gui_color canvas_color(struct kos_gui_color color) {
     return (struct gui_color){ color.red, color.green, color.blue, color.alpha };
@@ -32,6 +37,51 @@ static void record_draw_operation(void) {
 
 static void saturating_increment(uint64_t *value) {
     if (*value != UINT64_MAX) ++*value;
+}
+
+static void record_frame_duration(uint64_t duration_ms) {
+    frame_duration_samples[frame_duration_sample_next] = duration_ms > UINT32_MAX
+        ? UINT32_MAX : (uint32_t)duration_ms;
+    frame_duration_sample_next = (frame_duration_sample_next + 1u)
+        % (uint32_t)(sizeof(frame_duration_samples) / sizeof(frame_duration_samples[0]));
+    if (frame_duration_sample_count
+        < sizeof(frame_duration_samples) / sizeof(frame_duration_samples[0]))
+        ++frame_duration_sample_count;
+}
+
+static uint32_t percentile_duration(const uint32_t *sorted, uint32_t count,
+                                    uint32_t percentile) {
+    if (count == 0) return 0;
+    uint64_t rank = ((uint64_t)count * percentile + 99u) / 100u;
+    return sorted[rank == 0 ? 0 : (uint32_t)(rank - 1)];
+}
+
+static void build_frame_stats_snapshot(struct kos_gui_frame_stats *snapshot) {
+    *snapshot = frame_stats;
+    snapshot->abi_version = KOS_GUI_ABI_VERSION;
+    snapshot->struct_size = sizeof(*snapshot);
+    snapshot->backbuffer_enabled = framebuffer_backbuffer_available() ? 1u : 0u;
+    snapshot->background_cache_enabled =
+        framebuffer_background_cache_available() ? 1u : 0u;
+    snapshot->timing_sample_count = frame_duration_sample_count;
+    uint32_t sorted[sizeof(frame_duration_samples) / sizeof(frame_duration_samples[0])];
+    for (uint32_t index = 0; index < frame_duration_sample_count; ++index) {
+        uint32_t value = frame_duration_samples[index];
+        uint32_t insertion = index;
+        while (insertion != 0 && sorted[insertion - 1] > value) {
+            sorted[insertion] = sorted[insertion - 1];
+            --insertion;
+        }
+        sorted[insertion] = value;
+    }
+    snapshot->p50_frame_duration_ms = percentile_duration(
+        sorted, frame_duration_sample_count, 50);
+    snapshot->p95_frame_duration_ms = percentile_duration(
+        sorted, frame_duration_sample_count, 95);
+    snapshot->p99_frame_duration_ms = percentile_duration(
+        sorted, frame_duration_sample_count, 99);
+    framebuffer_blur_cache_stats(&snapshot->blur_cache_hit_count,
+        &snapshot->blur_cache_miss_count, &snapshot->blur_cache_bytes_used);
 }
 
 static bool valid_rect(const struct kos_gui_rect *rect) {
@@ -136,12 +186,8 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
                               sizeof(requested)) != 0) return (uint64_t)-EFAULT;
         if (requested.abi_version != KOS_GUI_ABI_VERSION
             || requested.struct_size < sizeof(requested)) return (uint64_t)-EINVAL;
-        struct kos_gui_frame_stats snapshot = frame_stats;
-        snapshot.abi_version = KOS_GUI_ABI_VERSION;
-        snapshot.struct_size = sizeof(snapshot);
-        snapshot.backbuffer_enabled = framebuffer_backbuffer_available() ? 1u : 0u;
-        snapshot.background_cache_enabled =
-            framebuffer_background_cache_available() ? 1u : 0u;
+        struct kos_gui_frame_stats snapshot;
+        build_frame_stats_snapshot(&snapshot);
         return copy_to_user((void *)user_request, &snapshot, sizeof(snapshot)) == 0
             ? 0 : (uint64_t)-EFAULT;
     }
@@ -225,26 +271,53 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
         }
         case KOS_GUI_DISPLAY_BEGIN_FRAME:
             if (frame_open) return (uint64_t)-EBUSY;
-            if ((request.flags & ~KOS_GUI_FRAME_DISCARD_PREVIOUS) != 0)
+            if ((request.flags & ~(KOS_GUI_FRAME_DISCARD_PREVIOUS
+                                   | KOS_GUI_FRAME_DAMAGE_RECT)) != 0)
+                return (uint64_t)-EINVAL;
+            frame_damage = (request.flags & KOS_GUI_FRAME_DAMAGE_RECT) != 0;
+            if (frame_damage && (!valid_rect(&request.rect)
+                || (request.flags & KOS_GUI_FRAME_DISCARD_PREVIOUS) == 0))
                 return (uint64_t)-EINVAL;
             frame_started_ms = timer_get_uptime_ms();
             framebuffer_cursor_suspend();
             frame_buffered = framebuffer_backbuffer_available();
-            if (frame_buffered && !framebuffer_frame_begin(
-                    (request.flags & KOS_GUI_FRAME_DISCARD_PREVIOUS) == 0)) {
+            bool frame_started = frame_buffered && (frame_damage
+                ? framebuffer_frame_begin_damage((uint32_t)request.rect.x,
+                    (uint32_t)request.rect.y, request.rect.width, request.rect.height)
+                : framebuffer_frame_begin(
+                    (request.flags & KOS_GUI_FRAME_DISCARD_PREVIOUS) == 0));
+            if (!frame_started) {
                 frame_buffered = false;
+                frame_damage = false;
                 framebuffer_cursor_resume();
                 return (uint64_t)-EBUSY;
             }
+            frame_damage_rect = request.rect;
             frame_open = true;
             frame_draw_operations = 0;
             return 0;
         case KOS_GUI_DISPLAY_PRESENT_FRAME: {
             if (!frame_open) return (uint64_t)-EINVAL;
-            if (frame_buffered) framebuffer_frame_present();
-            else framebuffer_cursor_resume();
+            bool pointer_available = mouse_is_initialized();
+            int32_t pointer_x = 0;
+            int32_t pointer_y = 0;
+            mouse_get_position(&pointer_x, &pointer_y);
+            if (frame_buffered) {
+                if (frame_damage) {
+                    if (!framebuffer_frame_present_damage(
+                            (uint32_t)frame_damage_rect.x,
+                            (uint32_t)frame_damage_rect.y,
+                            frame_damage_rect.width, frame_damage_rect.height))
+                        framebuffer_frame_present();
+                }
+                else framebuffer_frame_present();
+            }
+            /* Re-anchor after scanout is complete. This keeps the independent
+               kernel overlay above every newly presented desktop frame. */
+            framebuffer_cursor_set(pointer_available, pointer_x, pointer_y);
             uint64_t now = timer_get_uptime_ms();
             uint64_t duration = now >= frame_started_ms ? now - frame_started_ms : 0;
+            record_frame_duration(duration);
             saturating_increment(&frame_stats.redraw_count);
             if (UINT64_MAX - frame_stats.draw_operation_count < frame_draw_operations)
                 frame_stats.draw_operation_count = UINT64_MAX;
@@ -261,13 +334,21 @@ uint64_t gui_service_display(uint64_t operation, uint64_t user_request) {
                 framebuffer_background_cache_available() ? 1u : 0u;
             frame_open = false;
             frame_buffered = false;
+            frame_damage = false;
             return 0;
         }
         case KOS_GUI_DISPLAY_BACKGROUND_CAPTURE:
-            if (!frame_open) return (uint64_t)-EINVAL;
+            if (!frame_open || frame_damage) return (uint64_t)-EINVAL;
             return framebuffer_background_capture() ? 0 : (uint64_t)-ENOMEM;
         case KOS_GUI_DISPLAY_BACKGROUND_RESTORE:
             if (!frame_open) return (uint64_t)-EINVAL;
+            if (request.rect.width != 0 || request.rect.height != 0) {
+                if (!valid_rect(&request.rect)) return (uint64_t)-EINVAL;
+                return framebuffer_background_restore_rect(
+                    (uint32_t)request.rect.x, (uint32_t)request.rect.y,
+                    request.rect.width, request.rect.height)
+                    ? 0 : (uint64_t)-ENOENT;
+            }
             return framebuffer_background_restore() ? 0 : (uint64_t)-ENOENT;
         default:
             return (uint64_t)-EINVAL;
@@ -280,17 +361,13 @@ void gui_service_abort_frame(void) {
     if (frame_open) saturating_increment(&frame_stats.aborted_frame_count);
     frame_open = false;
     frame_buffered = false;
+    frame_damage = false;
     frame_draw_operations = 0;
 }
 
 void gui_service_frame_stats_snapshot(struct kos_gui_frame_stats *stats) {
     if (stats == 0) return;
-    *stats = frame_stats;
-    stats->abi_version = KOS_GUI_ABI_VERSION;
-    stats->struct_size = sizeof(*stats);
-    stats->backbuffer_enabled = framebuffer_backbuffer_available() ? 1u : 0u;
-    stats->background_cache_enabled =
-        framebuffer_background_cache_available() ? 1u : 0u;
+    build_frame_stats_snapshot(stats);
 }
 
 uint64_t gui_service_input(uint64_t user_event) {
@@ -334,6 +411,9 @@ uint64_t gui_service_input(uint64_t user_event) {
     else if (have_key) {
         event.type = KOS_GUI_INPUT_KEY;
         event.key = (uint8_t)key;
+    }
+    else if (mouse_is_initialized()) {
+        framebuffer_cursor_refresh();
     }
     return copy_to_user((void *)user_event, &event, sizeof(event)) == 0
         ? 0 : (uint64_t)-EFAULT;

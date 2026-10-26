@@ -65,6 +65,7 @@
 #include <kos/installer_ui.h>
 #include <kos/qa.h>
 #include <kos/fault_injection.h>
+#include <kos/framebuffer.h>
 #include <uapi/kos/syscall_numbers.h>
 
 void *memset(void *destination, int value, size_t size);
@@ -5341,11 +5342,19 @@ static void command_gui(const char *arguments) {
             (unsigned long long)stats.redraw_count,
             (unsigned long long)stats.draw_operation_count,
             (unsigned long long)stats.last_frame_draw_operations);
-        log_infof("GUI frame time (ms): last=%llu average=%llu max=%llu aborted=%llu",
+        log_infof("GUI frame time (ms): last=%llu average=%llu p50=%u p95=%u p99=%u max=%llu samples=%u aborted=%llu",
             (unsigned long long)stats.last_frame_duration_ms,
             (unsigned long long)average_ms,
+            stats.p50_frame_duration_ms,
+            stats.p95_frame_duration_ms,
+            stats.p99_frame_duration_ms,
             (unsigned long long)stats.max_frame_duration_ms,
+            stats.timing_sample_count,
             (unsigned long long)stats.aborted_frame_count);
+        log_infof("GUI blur cache: hits=%llu misses=%llu bytes=%llu",
+            (unsigned long long)stats.blur_cache_hit_count,
+            (unsigned long long)stats.blur_cache_miss_count,
+            (unsigned long long)stats.blur_cache_bytes_used);
         log_infof("GUI buffers: backbuffer=%s wallpaper_cache=%s",
             stats.backbuffer_enabled ? "on" : "off (direct fallback)",
             stats.background_cache_enabled ? "on" : "not captured");
@@ -5359,6 +5368,19 @@ static void command_gui(const char *arguments) {
             (unsigned long long)pointer.wheel_event_count);
         log_infof("GUI pointer position: x=%d y=%d buttons=0x%02X wheel=%d",
             pointer.x, pointer.y, pointer.buttons, pointer.wheel);
+        uint64_t cursor_draws = 0, cursor_repairs = 0, cursor_intact_skips = 0;
+        uint64_t cursor_refreshes = 0;
+        int32_t cursor_x = 0, cursor_y = 0;
+        bool cursor_visible = false, cursor_saved = false;
+        framebuffer_cursor_overlay_stats(&cursor_draws, &cursor_repairs,
+            &cursor_intact_skips, &cursor_x, &cursor_y, &cursor_visible,
+            &cursor_saved, &cursor_refreshes);
+        log_infof("GUI cursor overlay: draws=%llu integrity_repairs=%llu intact_skips=%llu refreshes=%llu pos=%d,%d visible=%u saved=%u",
+            (unsigned long long)cursor_draws,
+            (unsigned long long)cursor_repairs,
+            (unsigned long long)cursor_intact_skips,
+            (unsigned long long)cursor_refreshes, cursor_x, cursor_y,
+            cursor_visible ? 1u : 0u, cursor_saved ? 1u : 0u);
         return;
     }
     if (kstrcmp(operation, "list") == 0) {

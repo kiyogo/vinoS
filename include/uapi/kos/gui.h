@@ -3,12 +3,13 @@
 
 #include <stdint.h>
 
-#define KOS_GUI_ABI_VERSION 3u
+#define KOS_GUI_ABI_VERSION 4u
 #define KOS_GUI_TEXT_MAX 128u
 #define KOS_GUI_SURFACE_POINTER 0x01u
 #define KOS_GUI_SURFACE_BACKBUFFER 0x02u
 /* BEGIN_FRAME only: skip copying old scanout when the caller paints the full surface. */
 #define KOS_GUI_FRAME_DISCARD_PREVIOUS 0x01u
+#define KOS_GUI_FRAME_DAMAGE_RECT 0x02u
 
 #define KOS_GUI_RGB(red, green, blue) \
     ((((uint32_t)(red) & 0xffu) << 16) | (((uint32_t)(green) & 0xffu) << 8) \
@@ -127,6 +128,13 @@ struct kos_gui_frame_stats {
     uint64_t aborted_frame_count;
     uint32_t backbuffer_enabled;
     uint32_t background_cache_enabled;
+    uint32_t timing_sample_count;
+    uint32_t p50_frame_duration_ms;
+    uint32_t p95_frame_duration_ms;
+    uint32_t p99_frame_duration_ms;
+    uint64_t blur_cache_hit_count;
+    uint64_t blur_cache_miss_count;
+    uint64_t blur_cache_bytes_used;
 };
 
 struct kos_gui_input_event {

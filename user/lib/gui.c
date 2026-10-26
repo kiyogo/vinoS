@@ -52,6 +52,15 @@ long vino_gui_frame_begin(bool discard_previous) {
         discard_previous ? KOS_GUI_FRAME_DISCARD_PREVIOUS : 0);
 }
 
+long vino_gui_frame_begin_damage(struct kos_gui_rect damage) {
+    struct kos_gui_display_request request = {
+        .operation = KOS_GUI_DISPLAY_BEGIN_FRAME,
+        .flags = KOS_GUI_FRAME_DISCARD_PREVIOUS | KOS_GUI_FRAME_DAMAGE_RECT,
+        .rect = damage,
+    };
+    return display_request(&request);
+}
+
 long vino_gui_frame_present(void) {
     return display_simple_operation(KOS_GUI_DISPLAY_PRESENT_FRAME, 0);
 }
@@ -62,6 +71,14 @@ long vino_gui_background_capture(void) {
 
 long vino_gui_background_restore(void) {
     return display_simple_operation(KOS_GUI_DISPLAY_BACKGROUND_RESTORE, 0);
+}
+
+long vino_gui_background_restore_rect(struct kos_gui_rect rect) {
+    struct kos_gui_display_request request = {
+        .operation = KOS_GUI_DISPLAY_BACKGROUND_RESTORE,
+        .rect = rect,
+    };
+    return display_request(&request);
 }
 
 long vino_gui_frame_stats_get(struct kos_gui_frame_stats *stats) {

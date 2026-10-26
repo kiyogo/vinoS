@@ -122,9 +122,9 @@ static uint32_t wallpaper_pitch;
 static uint32_t recent_apps[2];
 static uint32_t recent_app_count;
 static uint32_t settings_page;
-static uint64_t last_pointer_render_ms;
-static bool pointer_render_pending;
+static uint32_t pointer_hover_target;
 static uint32_t animation_frame;
+static bool visual_action_rendered;
 static char text_scratch[KOS_GUI_TEXT_MAX];
 
 static void open_app(uint32_t app);
@@ -275,7 +275,8 @@ static void draw_box(struct kos_gui_rect rect, struct kos_gui_color fill,
     if (rect.width == 0 || rect.height == 0) return;
     uint32_t radius = rect.width < rect.height ? rect.width / 3 : rect.height / 3;
     if (radius > 12) radius = 12;
-    draw_glass(rect, fill, border, radius, 30);
+    /* Small controls/cards should not trigger a full software backdrop blur. */
+    draw_glass(rect, fill, border, radius, 0);
 }
 
 static bool pointer_inside(struct kos_gui_rect rect) {
@@ -289,54 +290,6 @@ static void draw_dot(int32_t x, int32_t y, uint32_t size,
 
 static void draw_hline(int32_t x, int32_t y, uint32_t width, uint32_t thickness,
                        struct kos_gui_color color);
-
-static bool pointer_shape_pixel(int32_t x, int32_t y) {
-    static const uint16_t rows[13] = {
-        0x0003, 0x0007, 0x000f, 0x001f, 0x003f, 0x007f, 0x00ff,
-        0x01ff, 0x00ff, 0x00db, 0x0198, 0x0300, 0x0300,
-    };
-    return x >= 0 && x < 9 && y >= 0 && y < 13
-        && (rows[y] & (1u << (uint32_t)x)) != 0;
-}
-
-static void draw_pointer_cursor(void) {
-    if (!pointer_available) return;
-    const struct kos_gui_color outline = { 5, 12, 22, 0 };
-    const struct kos_gui_color fill = { 244, 249, 255, 0 };
-    for (int32_t y = -1; y < 14; ++y) {
-        int32_t screen_y = pointer_y + y;
-        if (screen_y < 0 || (uint32_t)screen_y >= surface.height) continue;
-        int32_t run_start = 0;
-        int32_t run_kind = 0;
-        for (int32_t x = -1; x <= 10; ++x) {
-            int32_t screen_x = pointer_x + x;
-            int32_t kind = 0;
-            if (screen_x >= 0 && (uint32_t)screen_x < surface.width) {
-                if (pointer_shape_pixel(x, y)) kind = 2;
-                else {
-                    for (int32_t dy = -1; dy <= 1 && kind == 0; ++dy) {
-                        for (int32_t dx = -1; dx <= 1; ++dx) {
-                            if ((dx != 0 || dy != 0)
-                                && pointer_shape_pixel(x + dx, y + dy)) {
-                                kind = 1;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            if (kind != run_kind) {
-                if (run_kind != 0) {
-                    draw_hline(pointer_x + run_start, screen_y,
-                        (uint32_t)(x - run_start), 1,
-                        run_kind == 2 ? fill : outline);
-                }
-                run_start = x;
-                run_kind = kind;
-            }
-        }
-    }
-}
 
 static void draw_round_dot(int32_t x, int32_t y, uint32_t size,
                            struct kos_gui_color color) {
@@ -1767,7 +1720,7 @@ static void draw_window(uint32_t app) {
     struct kos_gui_color shadow = { 0, 0, 0, strong_window_shadow ? 110 : 82 };
     struct kos_gui_color shadow_border = { 0, 0, 0, 1 };
     (void)vino_gui_glass((struct kos_gui_rect){ x + 8, y + 12,
-        bounds.width, bounds.height }, shadow, shadow_border, 20, 30);
+        bounds.width, bounds.height }, shadow, shadow_border, 20, 0);
     struct kos_gui_color window_fill = { 15, 22, 40, 179 };
     struct kos_gui_color window_border = edge;
     window_border.alpha = (int32_t)app == active_app ? 96 : 23;
@@ -1843,8 +1796,9 @@ static void draw_start_menu(void) {
     int32_t x = 14;
     int32_t y = (int32_t)surface.height - 56 - (int32_t)height;
     struct kos_gui_color panel_border = { 255, 255, 255, 23 };
+    uint32_t blur_radius = menu_animation_step == 4 ? 30 : 0;
     draw_glass((struct kos_gui_rect){ x, y, width, height },
-               color_panel, panel_border, 20, 30);
+               color_panel, panel_border, 20, blur_radius);
 
     if (height >= 62) {
         struct kos_gui_rect search = { x + 20, y + 18, width - 40, 38 };
@@ -1922,6 +1876,71 @@ static void draw_start_menu(void) {
         draw_box(power, color_panel_high, color_dim);
         draw_text(power.x + 20, power.y + 12, "Power", color_text, color_panel_high);
     }
+}
+
+static uint32_t pointer_hover_at_current_position(void) {
+    if (!pointer_available || power_dialog_state != POWER_DIALOG_CLOSED
+        || context_menu_open) return 0;
+
+    if (start_menu_open && menu_animation_step != 0) {
+        uint32_t target_height = surface.height > 592 ? 520 : surface.height - 72;
+        uint32_t height = target_height * menu_animation_step / 4;
+        if (height < 60) height = 60;
+        uint32_t width = surface.width > 508 ? 480 : surface.width - 28;
+        int32_t x = 14;
+        int32_t y = (int32_t)surface.height - 56 - (int32_t)height;
+        if (height > 100) {
+            uint32_t cell_width = (width - 36) / 4;
+            const uint32_t cell_height = 78;
+            uint32_t item = 0;
+            for (uint32_t app = 0; app < APP_COUNT; ++app) {
+                if (!menu_app_matches(app)) continue;
+                uint32_t cell_y = (uint32_t)(y + 92)
+                    + (item / 4) * cell_height;
+                if (cell_y >= (uint32_t)y
+                    && cell_y - (uint32_t)y + cell_height <= height - 100) {
+                    struct kos_gui_rect cell = {
+                        x + 18 + (int32_t)((item % 4) * cell_width),
+                        (int32_t)cell_y, cell_width, cell_height - 4,
+                    };
+                    if (app != menu_selected
+                        && vino_gui_rect_contains(&cell, pointer_x, pointer_y))
+                        return 0x100u + app;
+                }
+                ++item;
+            }
+        }
+    }
+
+    int32_t bar_y = (int32_t)(surface.height - 48);
+    struct kos_gui_rect start = { 16, bar_y + 7, 34, 34 };
+    if (vino_gui_rect_contains(&start, pointer_x, pointer_y)) return 1;
+
+    uint32_t icon_size = surface.width >= 720 ? 38 : 32;
+    uint32_t icon_gap = surface.width >= 720 ? 6 : 2;
+    uint32_t dock_width = APP_COUNT * icon_size + (APP_COUNT - 1) * icon_gap;
+    int32_t dock_x = (int32_t)(surface.width - dock_width) / 2;
+    int32_t dock_y = bar_y + 5;
+    for (uint32_t app = 0; app < APP_COUNT; ++app) {
+        struct kos_gui_rect button = {
+            dock_x + (int32_t)(app * (icon_size + icon_gap)), dock_y,
+            icon_size, 38,
+        };
+        bool active = active_app == (int32_t)app && windows[app].open
+            && !windows[app].minimized;
+        if (!active && vino_gui_rect_contains(&button, pointer_x, pointer_y))
+            return 2u + app;
+    }
+
+    struct kos_gui_rect control = {
+        (int32_t)surface.width - 138, bar_y + 7, 34, 34,
+    };
+    if (vino_gui_rect_contains(&control, pointer_x, pointer_y)) return 0x40u;
+    struct kos_gui_rect clock = {
+        (int32_t)surface.width - 96, bar_y + 6, 80, 36,
+    };
+    if (vino_gui_rect_contains(&clock, pointer_x, pointer_y)) return 0x41u;
+    return 0;
 }
 
 static void draw_context_menu(void) {
@@ -2093,7 +2112,6 @@ static void render_ui_contents(void) {
         draw_text(overlay_x + 12, 48, "Move window: H/J/K/L  |  G to finish",
                   color_cyan, color_panel_high);
     }
-    draw_pointer_cursor();
 }
 
 static void render_ui(void) {
@@ -2104,19 +2122,102 @@ static void render_ui(void) {
     }
     render_ui_contents();
     (void)vino_gui_frame_present();
+    pointer_hover_target = pointer_hover_at_current_position();
+}
+
+static struct kos_gui_rect menu_damage_bounds(void) {
+    uint32_t height = surface.height > 592 ? 520 : surface.height - 72;
+    uint32_t width = surface.width > 508 ? 480 : surface.width - 28;
+    int32_t x = 14;
+    int32_t y = (int32_t)surface.height - 56 - (int32_t)height;
+    return (struct kos_gui_rect){ x, y, width, height };
+}
+
+static bool rects_intersect(struct kos_gui_rect left, struct kos_gui_rect right) {
+    int64_t left_right = (int64_t)left.x + left.width;
+    int64_t left_bottom = (int64_t)left.y + left.height;
+    int64_t right_right = (int64_t)right.x + right.width;
+    int64_t right_bottom = (int64_t)right.y + right.height;
+    return left.x < right_right && right.x < left_right
+        && left.y < right_bottom && right.y < left_bottom;
+}
+
+static void draw_windows_intersecting(struct kos_gui_rect damage) {
+    for (uint32_t order = 0; order < APP_COUNT; ++order) {
+        for (uint32_t app = 0; app < APP_COUNT; ++app) {
+            struct vino_window *window = &windows[app];
+            if (!window->open || window->minimized || window->z_order != order + 1)
+                continue;
+            struct kos_gui_rect bounds = {
+                window->x, window->y - (int32_t)(animation_frame * 7),
+                window->width, window->height,
+            };
+            if (rects_intersect(bounds, damage)) draw_window(app);
+        }
+    }
+}
+
+static void render_menu_region(void) {
+    struct kos_gui_rect damage = menu_damage_bounds();
+    if (vino_gui_frame_begin_damage(damage) < 0) {
+        render_ui();
+        return;
+    }
+    if (vino_gui_background_restore_rect(damage) < 0) {
+        (void)vino_gui_frame_present();
+        render_ui();
+        return;
+    }
+    /* Menu animation never intersects the bottom bar. Redraw only windows
+       beneath its damage and menu overlays, not the entire desktop/taskbar. */
+    draw_windows_intersecting(damage);
+    draw_start_menu();
+    draw_context_menu();
+    draw_preview();
+    draw_about();
+    draw_power_dialog();
+    (void)vino_gui_frame_present();
+    pointer_hover_target = pointer_hover_at_current_position();
+}
+
+static void render_ui_region(struct kos_gui_rect damage) {
+    if (vino_gui_frame_begin_damage(damage) < 0) {
+        render_ui();
+        return;
+    }
+    if (vino_gui_background_restore_rect(damage) < 0) {
+        (void)vino_gui_frame_present();
+        render_ui();
+        return;
+    }
+    render_ui_contents();
+    (void)vino_gui_frame_present();
+    pointer_hover_target = pointer_hover_at_current_position();
+}
+
+static void render_hover_region(void) {
+    if (start_menu_open && menu_animation_step != 0) {
+        render_menu_region();
+        return;
+    }
+    uint32_t bar_height = surface.height < 48 ? surface.height : 48;
+    render_ui_region((struct kos_gui_rect){ 0,
+        (int32_t)(surface.height - bar_height), surface.width, bar_height });
 }
 
 static void animate_menu(bool opening) {
     if (reduced_motion) {
         menu_animation_step = opening ? 4 : 0;
-        render_ui();
+        render_menu_region();
+        visual_action_rendered = true;
         return;
     }
     while ((opening && menu_animation_step < 4)
            || (!opening && menu_animation_step > 0)) {
         if (opening) ++menu_animation_step;
         else --menu_animation_step;
-        render_ui();
+        render_menu_region();
+        visual_action_rendered = true;
         (void)sys_sleep(16);
     }
 }
@@ -2188,6 +2289,7 @@ static void handle_file_key(char key) {
 }
 
 static void handle_key(char key) {
+    if (key == '\r') key = '\n';
     if (power_dialog_state != POWER_DIALOG_CLOSED) {
         handle_power_dialog_key(key);
         return;
@@ -2712,6 +2814,7 @@ __attribute__((noreturn)) void _start(void) {
     pointer_available = (surface.capabilities & KOS_GUI_SURFACE_POINTER) != 0;
     pointer_x = (int32_t)(surface.width / 2);
     pointer_y = (int32_t)(surface.height / 2);
+    pointer_hover_target = pointer_hover_at_current_position();
     (void)refresh_system_info();
     wallpaper_load();
     last_state_poll_second = sys_gettime();
@@ -2724,54 +2827,63 @@ __attribute__((noreturn)) void _start(void) {
     for (;;) {
         bool got_input = false;
         bool render_for_input = false;
-        uint64_t latest_input_ms = last_pointer_render_ms;
+        bool batch_interaction = false;
+        bool batch_dragging = false;
         uint32_t drained_events = 0;
         struct kos_gui_input_event event = { .abi_version = KOS_GUI_ABI_VERSION };
         for (; drained_events < 64; ++drained_events) {
             event.abi_version = KOS_GUI_ABI_VERSION;
             if (vino_gui_input_read(&event) < 0) break;
-            latest_input_ms = event.timestamp_ms;
             if (event.type != KOS_GUI_INPUT_KEY
                 && event.type != KOS_GUI_INPUT_POINTER) break;
             got_input = true;
             if (event.type == KOS_GUI_INPUT_KEY) {
+                visual_action_rendered = false;
                 handle_key((char)event.key);
-                render_for_input = true;
-                pointer_render_pending = false;
+                if (!visual_action_rendered) render_for_input = true;
                 continue;
             }
 
             bool position_changed = event.pointer_x != pointer_x
                 || event.pointer_y != pointer_y;
-            bool interaction_changed = event.pointer_buttons != pointer_buttons
+            bool buttons_changed = event.pointer_buttons != pointer_buttons;
+            bool interaction_changed = ((event.pointer_buttons & 3u) != 0
+                && (event.pointer_buttons & 3u) != (pointer_buttons & 3u))
                 || event.pointer_wheel != 0;
-            if (!position_changed && !interaction_changed) continue;
+            if (interaction_changed) batch_interaction = true;
+            if (!position_changed && !buttons_changed && event.pointer_wheel == 0)
+                continue;
+            visual_action_rendered = false;
             handle_pointer(&event);
-            if (interaction_changed) {
+            bool dragging = drag_app >= 0 && (event.pointer_buttons & 1u) != 0;
+            if (dragging) batch_dragging = true;
+            if (interaction_changed && !visual_action_rendered) {
                 render_for_input = true;
-                pointer_render_pending = false;
             }
-            else if (position_changed) {
-                pointer_render_pending = true;
+            else if (position_changed && dragging) {
+                render_for_input = true;
             }
         }
 
-        /* Keep pointer motion independent from UI painting. The kernel cursor
-           moves for every event; hover/layout work is capped at ~60 Hz. */
-        if (pointer_render_pending && latest_input_ms >= last_pointer_render_ms
-            && latest_input_ms - last_pointer_render_ms >= 16) {
+        bool hover_changed = pointer_hover_at_current_position() != pointer_hover_target;
+        if (hover_changed)
             render_for_input = true;
-            pointer_render_pending = false;
-        }
+
+        /* The kernel owns the hardware cursor overlay. Plain pointer motion
+           therefore does not repaint the desktop; only hover changes, clicks,
+           wheel actions, and active window drags reach the desktop renderer. */
         if (render_for_input) {
-            render_ui();
-            last_pointer_render_ms = latest_input_ms;
-            pointer_render_pending = false;
+            if (visual_action_rendered) {
+                render_for_input = false;
+            }
+            else if (hover_changed && !batch_interaction && !batch_dragging) {
+                render_hover_region();
+            }
+            else render_ui();
             while (animation_frame != 0) {
                 --animation_frame;
                 (void)sys_sleep(16);
                 render_ui();
-                last_pointer_render_ms = latest_input_ms;
             }
         }
         uint64_t now = sys_gettime();

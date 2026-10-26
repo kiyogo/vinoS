@@ -74,10 +74,24 @@ class QmpMonitor:
             time.sleep(0.04)
 
     def pointer_move(self, dx, dy, wheel=0):
-        self.hmp(f"mouse_move {dx} {dy} {wheel}")
+        while dx != 0 or dy != 0:
+            step_x = max(-100, min(100, dx))
+            step_y = max(-100, min(100, dy))
+            events = []
+            if step_x != 0:
+                events.append({"type": "rel", "data": {"axis": "x", "value": step_x}})
+            if step_y != 0:
+                events.append({"type": "rel", "data": {"axis": "y", "value": step_y}})
+            self.execute("input-send-event", {"events": events})
+            dx -= step_x
+            dy -= step_y
+        if wheel != 0:
+            self.hmp(f"mouse_move 0 0 {wheel}")
 
     def pointer_buttons(self, state):
-        self.hmp(f"mouse_button {state}")
+        self.execute("input-send-event", {"events": [
+            {"type": "btn", "data": {"button": "left", "down": state != 0}},
+        ]})
 
     def screendump(self, path):
         self.hmp(f"screendump {Path(path).as_posix()}")
@@ -126,6 +140,39 @@ def verify_cursor_pixel(image_path, x, y):
             f"Cursor tip is not visible at ({x},{y}); pixel={tip}, expected white cursor fill")
 
 
+def verify_idle_desktop_unchanged(before_path, after_path, cursor_x, cursor_y):
+    def read_ppm(path):
+        image = path.read_bytes()
+        header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\r?\n", image)
+        if header is None:
+            raise RuntimeError(f"QEMU screenshot is not a binary PPM image: {path}")
+        width, height = (int(header.group(1)), int(header.group(2)))
+        pixels = image[header.end():]
+        if len(pixels) != width * height * 3:
+            raise RuntimeError(f"QEMU screenshot has invalid pixel data: {path}")
+        return width, height, pixels
+
+    before_width, before_height, before = read_ppm(before_path)
+    after_width, after_height, after = read_ppm(after_path)
+    if (before_width, before_height) != (after_width, after_height):
+        raise RuntimeError("QEMU framebuffer dimensions changed during idle")
+    cursor_left = max(0, cursor_x - 1)
+    cursor_right = min(before_width, cursor_x + 10)
+    cursor_top = max(0, cursor_y - 1)
+    cursor_bottom = min(before_height, cursor_y + 14)
+    row_bytes = before_width * 3
+    for row in range(before_height):
+        row_start = row * row_bytes
+        if cursor_top <= row < cursor_bottom:
+            left = row_start + cursor_left * 3
+            right = row_start + cursor_right * 3
+            if before[row_start:left] != after[row_start:left] \
+                    or before[right:row_start + row_bytes] != after[right:row_start + row_bytes]:
+                raise RuntimeError("The desktop changed outside the cursor overlay during idle")
+        elif before[row_start:row_start + row_bytes] != after[row_start:row_start + row_bytes]:
+            raise RuntimeError("The desktop changed during a no-input idle interval")
+
+
 def verify_pointer_action(before_path, after_path):
     def read_ppm(path):
         image = path.read_bytes()
@@ -145,6 +192,104 @@ def verify_pointer_action(before_path, after_path):
     changed = sum(before[index:index + 3] != after[index:index + 3]
                   for index in range(0, len(before), 3))
     return changed
+
+
+def desktop_frame_visible(image_path):
+    image = image_path.read_bytes()
+    header = re.match(rb"P6\s+(\d+)\s+(\d+)\s+255\r?\n", image)
+    if header is None:
+        raise RuntimeError(f"QEMU screenshot is not a binary PPM image: {image_path}")
+    width, height = (int(header.group(1)), int(header.group(2)))
+    pixels = image[header.end():]
+    if len(pixels) != width * height * 3:
+        raise RuntimeError(f"QEMU screenshot has invalid pixel data: {image_path}")
+    # The CLI framebuffer's bottom scanline is a uniform #181B20. The native
+    # desktop paints its taskbar to the bottom edge, so wait for that real GUI
+    # frame instead of mistaking an early post-session CLI frame for the UI.
+    row = pixels[(height - 1) * width * 3:]
+    console_pixel = bytes((0x18, 0x1B, 0x20))
+    non_console_pixels = sum(
+        row[offset:offset + 3] != console_pixel
+        for offset in range(0, len(row), 3)
+    )
+    return non_console_pixels >= max(64, width // 4)
+
+
+def wait_for_desktop_frame(monitor, screenshot_path, process, timeout=30):
+    screenshot_path = Path(screenshot_path)
+    screenshot_path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("QEMU exited while waiting for the Default desktop frame")
+        monitor.screendump(screenshot_path)
+        if desktop_frame_visible(screenshot_path):
+            return time.monotonic() - started
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"Default GUI session started, but no desktop/taskbar frame appeared within {timeout}s"
+    )
+
+
+def wait_for_pointer_action(monitor, before_path, after_path, process,
+                            minimum_changed_pixels, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("QEMU exited while waiting for a GUI input response")
+        monitor.screendump(after_path)
+        changed = verify_pointer_action(before_path, after_path)
+        if changed > minimum_changed_pixels:
+            return changed
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"GUI did not visibly respond to input within {timeout}s; "
+        f"only {changed} pixels changed (required >{minimum_changed_pixels})"
+    )
+
+
+def wait_for_pointer_restore(monitor, baseline_path, after_path, process,
+                             maximum_changed_pixels, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("QEMU exited while waiting for the GUI to close Start")
+        monitor.screendump(after_path)
+        changed = verify_pointer_action(baseline_path, after_path)
+        if changed <= maximum_changed_pixels:
+            return changed
+        time.sleep(0.1)
+    raise RuntimeError(
+        f"GUI did not restore the desktop within {timeout}s; "
+        f"{changed} pixels still differ (maximum {maximum_changed_pixels})"
+    )
+
+
+def wait_for_stable_frame(monitor, screenshot_path, process, timeout=10,
+                         quiet_seconds=0.4):
+    screenshot_path = Path(screenshot_path)
+    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    previous = None
+    stable_since = None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise RuntimeError("QEMU exited while waiting for GUI animation to settle")
+        monitor.screendump(screenshot_path)
+        current = screenshot_path.read_bytes()
+        if previous == current:
+            if stable_since is None:
+                stable_since = time.monotonic()
+            if time.monotonic() - stable_since >= quiet_seconds:
+                return time.monotonic() - started
+        else:
+            stable_since = None
+        previous = current
+        time.sleep(0.2)
+    raise RuntimeError(
+        f"GUI did not produce a stable frame within {timeout}s after input"
+    )
 
 
 def ppm_dimensions(image_path):
@@ -220,8 +365,8 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
     log_path = Path(log_name)
 
     temporary_context = (
-        nullcontext(Path(tempfile.mkdtemp(prefix="vino-phase4-", dir=BUILD)))
-        if leave_running else tempfile.TemporaryDirectory(prefix="vino-phase4-", dir=BUILD)
+        nullcontext(Path(tempfile.mkdtemp(prefix="vino-phase4-")))
+        if leave_running else tempfile.TemporaryDirectory(prefix="vino-phase4-")
     )
     with temporary_context as temporary:
         temporary = Path(temporary)
@@ -331,12 +476,16 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         "Vino Plus: starting selected GUI 'default'.", process, 90)
                     wait_for_log(log_path,
                         "GUI session 1: started 'default' in process", process, 90)
-                    time.sleep(2.5)
+                    time.sleep(0.5)
                     post_start_log = log_path.read_text(
                         encoding="utf-8", errors="replace")
                     if "GUI session 'default' exited with" in post_start_log:
                         raise RuntimeError("Default GUI exited during startup")
+                    desktop_ready_seconds = wait_for_desktop_frame(
+                        monitor, BUILD / "gui-visual" / "desktop-ready.ppm", process)
                     print("[QEMU] Default GUI started after the installed Vino Plus reboot")
+                    print(f"[QEMU] First desktop/taskbar frame visible after "
+                          f"{desktop_ready_seconds:.2f}s")
                     if screenshot_path is not None:
                         screenshot_path = Path(screenshot_path).resolve()
                         screenshot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,39 +504,155 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                               f"private disk and firmware files: {temporary}")
                         return True
                     if exercise_pointer:
-                        print("[QEMU] Sending PS/2 move and Start-button click into the desktop")
+                        print("[QEMU] Stressing cursor motion, clicking Start, then checking redraw statistics")
                         pointer_debug_dir = BUILD / "gui-visual"
                         pointer_debug_dir.mkdir(parents=True, exist_ok=True)
+                        keyboard_before = pointer_debug_dir / "keyboard-desktop-before.ppm"
+                        keyboard_menu = pointer_debug_dir / "keyboard-start-menu.ppm"
+                        keyboard_focus = pointer_debug_dir / "keyboard-start-focus.ppm"
+                        keyboard_closed = pointer_debug_dir / "keyboard-start-closed.ppm"
+                        monitor.screendump(keyboard_before)
+                        monitor.key("s")
+                        keyboard_menu_changed = wait_for_pointer_action(
+                            monitor, keyboard_before, keyboard_menu, process, 5000)
+                        wait_for_stable_frame(monitor, keyboard_menu, process)
+                        monitor.screendump(keyboard_menu)
+                        monitor.key("j")
+                        keyboard_focus_changed = wait_for_pointer_action(
+                            monitor, keyboard_menu, keyboard_focus, process, 100)
+                        wait_for_stable_frame(monitor, keyboard_focus, process)
+                        monitor.screendump(keyboard_focus)
+                        monitor.key("s")
+                        keyboard_restore_changed = wait_for_pointer_restore(
+                            monitor, keyboard_before, keyboard_closed, process, 1000)
+                        print("[PASS] Keyboard-only Start open/focus/close restored the "
+                              f"desktop ({keyboard_menu_changed} menu, "
+                              f"{keyboard_focus_changed} focus pixels; "
+                              f"{keyboard_restore_changed} residual pixels)")
                         pointer_before = pointer_debug_dir / "desktop-before-pointer.ppm"
                         monitor.screendump(pointer_before)
                         start_x = 32
                         start_y = resolution_height - 24
+                        idle_after = pointer_debug_dir / "desktop-after-idle.ppm"
+                        time.sleep(0.5)
+                        monitor.screendump(idle_after)
+                        center_x = resolution_width // 2
+                        center_y = resolution_height // 2
+                        verify_idle_desktop_unchanged(pointer_before, idle_after,
+                                                      center_x, center_y)
+                        verify_cursor_pixel(idle_after, center_x, center_y)
+                        # Sweep repeatedly over a neutral desktop area first.
+                        # Cursor motion alone must not repaint the full desktop.
+                        for _ in range(24):
+                            monitor.pointer_move(2, 0)
+                            time.sleep(0.02)
+                        monitor.pointer_move(-48, 0)
                         monitor.pointer_move(start_x - resolution_width // 2,
                                              start_y - resolution_height // 2)
                         time.sleep(0.25)
                         pointer_motion_screenshot = pointer_debug_dir / "desktop-pointer-motion.ppm"
                         monitor.screendump(pointer_motion_screenshot)
                         verify_cursor_pixel(pointer_motion_screenshot, start_x, start_y)
-                        monitor.pointer_buttons(1)
-                        time.sleep(0.1)
-                        monitor.pointer_buttons(0)
-                        time.sleep(0.4)
+                        cursor_error = None
                         cursor_screenshot = pointer_debug_dir / "desktop-pointer.ppm"
-                        monitor.screendump(cursor_screenshot)
-                        if not cursor_screenshot.exists():
-                            raise RuntimeError("QEMU did not create the cursor screenshot")
-                        pointer_action_changed = verify_pointer_action(
-                            pointer_before, cursor_screenshot)
-                        if pointer_action_changed < 2000:
+                        for cycle in range(20):
+                            monitor.pointer_buttons(1)
+                            time.sleep(0.1)
+                            monitor.pointer_buttons(0)
+                            time.sleep(0.3)
+                            if cycle == 0:
+                                monitor.screendump(cursor_screenshot)
+                                if not cursor_screenshot.exists():
+                                    raise RuntimeError(
+                                        "QEMU did not create the cursor screenshot")
+                                pointer_action_changed = verify_pointer_action(
+                                    pointer_before, cursor_screenshot)
+                                if pointer_action_changed < 2000:
+                                    raise RuntimeError(
+                                        "Clicking the desktop Start button did not visibly open "
+                                        f"its menu (only {pointer_action_changed} pixels changed)")
+                                try:
+                                    verify_cursor_pixel(cursor_screenshot, start_x, start_y)
+                                except RuntimeError as error:
+                                    cursor_error = str(error)
+                                    monitor.pointer_move(1, 0)
+                                    monitor.pointer_move(-1, 0)
+                                    time.sleep(0.15)
+                                    motion_recovery = pointer_debug_dir / "cursor-after-recovery-motion.ppm"
+                                    monitor.screendump(motion_recovery)
+                                    try:
+                                        verify_cursor_pixel(motion_recovery, start_x, start_y)
+                                        print("[DIAG] Cursor reappeared after a 1-pixel move")
+                                    except RuntimeError:
+                                        print("[DIAG] Cursor stayed absent after a 1-pixel move")
+                                print("[PASS] PS/2 cursor reached the Start-button target and "
+                                      f"the click opened its menu ({pointer_action_changed} "
+                                      "pixels changed)")
+                            # A second click outside the open menu closes it and
+                            # verifies that release state does not swallow clicks.
+                            monitor.pointer_buttons(1)
+                            time.sleep(0.1)
+                            monitor.pointer_buttons(0)
+                            time.sleep(0.25)
+                        stationary_cursor = pointer_debug_dir / "cursor-stationary-after-menu-cycles.ppm"
+                        time.sleep(0.5)
+                        monitor.screendump(stationary_cursor)
+                        try:
+                            verify_cursor_pixel(stationary_cursor, start_x, start_y)
+                        except RuntimeError as error:
+                            cursor_error = str(error)
+                        monitor.key("q")
+                        wait_for_log(log_path,
+                            "GUI session 'default' stopped; CLI remains available", process, 30)
+                        wait_for_log(log_path,
+                            "Vino CLI ready; open the disk installer with `installer ui`.",
+                            process, 30, occurrences=2)
+                        monitor.type_text("vino gui stats")
+                        monitor.key("ret")
+                        stats_log = wait_for_log(log_path,
+                            "GUI blur cache: hits=", process, 30)
+                        frame_counts = re.findall(r"GUI frames: redraws=(\d+)", stats_log)
+                        frame_times = re.findall(
+                            r"GUI frame time \(ms\): .*p95=(\d+).*samples=(\d+)",
+                            stats_log)
+                        pointer_stats = re.findall(
+                            r"GUI pointer: .*dropped=(\d+) move=(\d+) click=(\d+)",
+                            stats_log)
+                        blur_stats = re.findall(
+                            r"GUI blur cache: hits=(\d+) misses=(\d+) bytes=(\d+)",
+                            stats_log)
+                        if not frame_counts or int(frame_counts[-1]) > 180:
                             raise RuntimeError(
-                                "Clicking the desktop Start button did not visibly open its menu "
-                                f"(only {pointer_action_changed} pixels changed)")
-                        verify_cursor_pixel(cursor_screenshot, start_x, start_y)
-                        print("[PASS] PS/2 cursor reached the Start-button target and the click "
-                              f"opened its menu ({pointer_action_changed} pixels changed)")
+                                "Cursor motion or menu interactions repainted too often; "
+                                f"expected at most 180 total frames including keyboard "
+                                f"Start navigation, got {frame_counts}")
+                        if not frame_times or int(frame_times[-1][1]) < 160:
+                            raise RuntimeError(
+                                "Pointer/animation exercise produced too few timing samples "
+                                "for a statistically useful p95: "
+                                f"{frame_times}")
+                        if resolution_width == 1920 and int(frame_times[-1][0]) >= 33:
+                            raise RuntimeError(
+                                "1080p QEMU GUI frame p95 missed the 33 ms budget: "
+                                f"{frame_times[-1][0]} ms")
+                        if not pointer_stats or int(pointer_stats[-1][0]) != 0 \
+                                or int(pointer_stats[-1][1]) < 25 \
+                                or int(pointer_stats[-1][2]) < 80:
+                            raise RuntimeError(
+                                "Pointer stress test dropped events or failed to record "
+                                f"the click: {pointer_stats}")
+                        if not blur_stats or int(blur_stats[-1][0]) == 0:
+                            raise RuntimeError(
+                                "Repeated stable panel rendering did not reuse the blur cache: "
+                                f"{blur_stats}")
+                        if cursor_error is not None:
+                            raise RuntimeError(cursor_error)
+                        print(f"[PASS] Pointer stress: frames={frame_counts[-1]}, "
+                              f"p95={frame_times[-1][0]} ms over "
+                              f"{frame_times[-1][1]} frames, no lost pointer events")
                         monitor.execute("quit")
                         process.wait(timeout=10)
-                        print("[PASS] QEMU GUI pointer action completed")
+                        print("[PASS] QEMU GUI pointer and frame-budget exercise completed")
                         return True
                     terminal_ready_marker = "KOS debug terminal ready."
                     terminal_ready_count = log_path.read_text(
@@ -413,6 +678,14 @@ def run(esp_dir, profile="cli", exercise_mvp_fallback=False,
                         raise RuntimeError(
                             "Default GUI kept redrawing excessively; expected at most "
                             f"4 frames (got {frame_counts})")
+                    frame_times = re.findall(
+                        r"GUI frame time \(ms\): .*p95=(\d+).*samples=(\d+)",
+                        stats_log)
+                    if resolution_width == 1920 and (
+                            not frame_times or int(frame_times[-1][0]) >= 33):
+                        raise RuntimeError(
+                            "1080p QEMU GUI frame p95 missed the 33 ms budget: "
+                            f"{frame_times}")
                     print("[PASS] Vino Plus -> Default install -> Limine reboot -> Default GUI -> CLI fallback")
                     print("[PASS] GUI idle redraw bound and backbuffer/wallpaper cache instrumentation")
                     if exercise_gui_manager:
