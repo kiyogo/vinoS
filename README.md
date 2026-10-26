@@ -1,4 +1,4 @@
-# vinoS (KOS)
+# vinoS
 
 <div align="center">
 
