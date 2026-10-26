@@ -1,0 +1,57 @@
+name: CI Build & Smoke Test
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Kernel & Run Smoke Gates
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install QEMU
+        run: |
+          choco install qemu -y --no-progress
+          echo "C:\Program Files\qemu" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Verify Toolchain
+        run: |
+          clang --version
+          ld.lld --version
+          python --version
+          qemu-system-x86_64 --version
+
+      - name: Compile Host Tool (kos-tool)
+        run: |
+          mkdir -p build
+          clang -O2 tools/kos.c -o build/kos-tool.exe
+
+      - name: Build vinoS Kernel & Userspace Packages
+        run: |
+          .\build\kos-tool.exe build --ci-smoke
+
+      - name: Run Smoke CI Gate
+        run: |
+          python tools/ci_runner.py smoke
+
+      - name: Run Storage CI Gate
+        run: |
+          python tools/storage_ci.py

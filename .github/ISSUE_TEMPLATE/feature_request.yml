@@ -1,0 +1,44 @@
+name: "Feature Request"
+description: "Suggest an idea or architectural improvement for vinoS."
+title: "[FEAT]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        We are thrilled to receive suggestions and feature proposals for vinoS!
+  - type: textarea
+    id: problem
+    attributes:
+      label: "Problem or Missing Capability"
+      description: "Is your feature request related to a problem or architectural gap?"
+      placeholder: "e.g., Currently we lack USB xHCI driver support for physical hardware peripherals..."
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: "Proposed Solution"
+      description: "Describe what you would like to see implemented."
+      placeholder: "Implement an xHCI controller driver under drivers/usb/ conforming to the driver model..."
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternative Solutions"
+      description: "Describe any alternative solutions or features you've considered."
+  - type: dropdown
+    id: subsystem
+    attributes:
+      label: "Target Subsystem"
+      options:
+        - "Kernel Core & Architecture (arch/x86_64, mm, interrupts, SMP)"
+        - "Drivers & Hardware (AHCI, NVMe, VirtIO, e1000, framebuffer)"
+        - "VFS & Filesystems (FAT32, partition, caching)"
+        - "Networking & Protocols (TCP/IP, DHCP, DNS, TLS 1.3)"
+        - "GUI & Windowing Compositor (framebuffer, glass blur, input)"
+        - "Aore AI & Automation Subsystem"
+        - "User Space & Tooling"
+    validations:
+      required: true

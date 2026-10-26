@@ -1,0 +1,59 @@
+name: "Bug Report"
+description: "File an issue about a defect or crash in the vinoS kernel, driver, or GUI."
+title: "[BUG]: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a bug in vinoS! Please fill in this form accurately to help us diagnose the problem.
+  - type: textarea
+    id: description
+    attributes:
+      label: "Bug Description"
+      description: "A clear and concise description of what the bug is."
+      placeholder: "e.g., Kernel panic occurs when attempting to read FAT32 file after AHCI sector unregistration..."
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: "Steps To Reproduce"
+      description: "How can we reproduce the problem?"
+      placeholder: |
+        1. Run `python tools/ci_runner.py ...`
+        2. In the debug terminal, execute command `...`
+        3. Observe the crash or assertion failure.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "Expected Behavior"
+      description: "What did you expect to happen instead?"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Serial / QEMU Log Output"
+      description: "Paste serial console logs, crash stack traces, or terminal output."
+      render: shell
+  - type: dropdown
+    id: environment
+    attributes:
+      label: "Host Environment"
+      description: "What platform are you compiling/running on?"
+      options:
+        - "Windows 11 (native LLVM + QEMU)"
+        - "Windows 10"
+        - "Linux (Ubuntu / Debian / Arch)"
+        - "macOS"
+        - "Other"
+    validations:
+      required: true
+  - type: input
+    id: qemu_version
+    attributes:
+      label: "QEMU & LLVM/Clang Version"
+      placeholder: "e.g. QEMU 9.0.0, Clang 18.1.8"
